@@ -144,7 +144,6 @@ void FrameRenderer::createPSOs(IRenderDevice& device, const std::string& lib)
     auto loadFS = [&](const char* e){ return device.createShaderFromLibrary(lib, ShaderStage::Fragment, e); };
     auto loadCS = [&](const char* e){ return device.createShaderFromLibrary(lib, ShaderStage::Compute,  e); };
 
-    auto vsDepthPrepass  = loadVS("depth_prepass_vert");
     auto vsGBuffer       = loadVS("gbuffer_vert");
     auto fsGBuffer       = loadFS("gbuffer_frag");
     auto vsSkybox        = loadVS("skybox_vert");
@@ -160,24 +159,9 @@ void FrameRenderer::createPSOs(IRenderDevice& device, const std::string& lib)
     auto csSSAO          = loadCS("ssao_main");
     auto csLighting      = loadCS("lighting_main");
 
-    // ── Depth prepass (depth-only, no colour output) ──────────────────────────
-    {
-        RenderPipelineDescriptor d;
-        d.vertexShader         = vsDepthPrepass.get();
-        d.fragmentShader       = nullptr;
-        d.colorAttachmentCount = 0;
-        d.depthFormat          = TextureFormat::Depth32Float;
-        d.depthTest            = true;
-        d.depthWrite           = true;
-        d.depthCompare         = CompareFunction::Less;
-        d.cullMode             = CullMode::Back;
-        d.vertexAttributes     = geometryAttributes();
-        d.vertexBufferLayouts  = geometryLayouts();
-        d.debugName            = "DepthPrepass";
-        m_depthPrepassPSO = device.createRenderPipeline(d);
-    }
-
-    // ── G-buffer (3 colour targets + depth load) ───────────────────────────────
+    // ── G-buffer (3 colour targets + depth write in one pass) ─────────────────
+    // Depth prepass is intentionally omitted: writing depth here guarantees
+    // every visible pixel gets a motion vector, which TAA reprojection requires.
     {
         RenderPipelineDescriptor d;
         d.vertexShader         = vsGBuffer.get();
@@ -188,8 +172,8 @@ void FrameRenderer::createPSOs(IRenderDevice& device, const std::string& lib)
         d.colorFormats[2]      = TextureFormat::RG16Float;    // motion vectors
         d.depthFormat          = TextureFormat::Depth32Float;
         d.depthTest            = true;
-        d.depthWrite           = false;   // depth prepass already wrote it
-        d.depthCompare         = CompareFunction::LessEqual;
+        d.depthWrite           = true;    // single pass writes depth
+        d.depthCompare         = CompareFunction::Less;
         d.cullMode             = CullMode::Back;
         d.vertexAttributes     = geometryAttributes();
         d.vertexBufferLayouts  = geometryLayouts();
@@ -540,7 +524,6 @@ void FrameRenderer::renderFrame(IRenderDevice& device,
     IBuffer*   vbo        = m_roomVBO.get();
     IBuffer*   ibo        = m_roomIBO.get();
     ISampler*  linSamp    = m_linearClampSampler.get();
-    IPipeline* pDepth     = m_depthPrepassPSO.get();
     IPipeline* pGBuf      = m_gbufferPSO.get();
     IPipeline* pSSAO      = m_ssaoPSO.get();
     IPipeline* pLighting  = m_lightingPSO.get();
@@ -555,30 +538,7 @@ void FrameRenderer::renderFrame(IRenderDevice& device,
     const ScissorRect sc{ 0, 0, swapW, swapH };
 
     // ─────────────────────────────────────────────────────────────────────────
-    // Pass 1 — Depth prepass
-    // ─────────────────────────────────────────────────────────────────────────
-    {
-        RGRenderPassDesc p;
-        p.name             = "DepthPrepass";
-        p.colorOutputCount = 0;
-        p.depthOutput      = gDepthId;
-        p.clearDepth       = 1.0f;
-        p.execute = [=](IRenderPassEncoder* enc)
-        {
-            enc->setViewport(vp);
-            enc->setScissor(sc);
-            enc->setRenderPipeline(pDepth);
-            enc->setVertexBuffer(frameBuf, 0, 0);           // FrameConstants @ slot 0
-            enc->setVertexBytes(&modelGPU, sizeof(ModelGPU), 1); // ModelGPU inline @ slot 1
-            enc->setVertexBuffer(vbo, 0, k_vboSlot);        // VBO @ slot 30
-            enc->setIndexBuffer(ibo, 0, true);
-            enc->drawIndexed(k_roomIndexCount);
-        };
-        m_graph.addRenderPass(std::move(p));
-    }
-
-    // ─────────────────────────────────────────────────────────────────────────
-    // Pass 2 — G-buffer
+    // Pass 1 — G-buffer (writes depth + colour in one pass)
     // ─────────────────────────────────────────────────────────────────────────
     {
         RGRenderPassDesc p;
@@ -588,7 +548,8 @@ void FrameRenderer::renderFrame(IRenderDevice& device,
         p.colorOutputs[2]    = gMotionId;
         p.colorOutputCount   = 3;
         p.depthOutput        = gDepthId;
-        p.loadDepth          = true;   // preserve depth from depth-prepass
+        p.clearDepth         = 1.0f;  // clear to far plane
+        // loadDepth = false (default): depth prepass removed, G-buffer clears+writes depth
         p.execute = [=](IRenderPassEncoder* enc)
         {
             enc->setViewport(vp);

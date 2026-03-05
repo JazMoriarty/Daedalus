@@ -2,16 +2,15 @@
 // Orchestrates the full deferred rendering pipeline for one frame.
 //
 // Pass order:
-//   1. Depth prepass  (render)
-//   2. G-buffer       (render)
-//   3. SSAO           (compute)
-//   4. Lighting       (compute, deferred PBR)
-//   5. Skybox         (render, procedural sky on background pixels)
-//   6. TAA            (render, temporal anti-aliasing)
-//   7. Bloom extract  (render)
-//   8. Bloom blur H   (render)
-//   9. Bloom blur V   (render)
-//  10. Tone mapping   (render → swapchain)
+//   1. G-buffer       (render, depth + colour in one pass)
+//   2. SSAO           (compute)
+//   3. Lighting       (compute, deferred PBR)
+//   4. Skybox         (render, procedural sky on background pixels)
+//   5. TAA            (render, temporal anti-aliasing)
+//   6. Bloom extract  (render)
+//   7. Bloom blur H   (render)
+//   8. Bloom blur V   (render)
+//   9. Tone mapping   (render → swapchain)
 
 #pragma once
 
@@ -66,7 +65,6 @@ public:
 private:
     // ─── Render pipelines ─────────────────────────────────────────────────────
 
-    std::unique_ptr<rhi::IPipeline> m_depthPrepassPSO;
     std::unique_ptr<rhi::IPipeline> m_gbufferPSO;
     std::unique_ptr<rhi::IPipeline> m_ssaoPSO;
     std::unique_ptr<rhi::IPipeline> m_lightingPSO;

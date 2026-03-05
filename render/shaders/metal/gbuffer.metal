@@ -37,15 +37,13 @@ vertex GBufVertOut gbuffer_vert(
     GBufVertOut out;
 
     float4 worldPos = model.model * float4(in.position, 1.0);
+    // TAA jitter is already baked into frame.viewProj by the CPU-side jitter matrix.
     float4 clipPos  = frame.viewProj * worldPos;
+    out.position    = clipPos;
 
-    // TAA jitter
-    clipPos.xy += frame.jitter * clipPos.w;
-    out.position = clipPos;
-
-    // Previous-frame clip position (for motion vectors)
-    float4 prevWorld  = model.prevModel * float4(in.position, 1.0);
-    out.prevClip      = frame.prevViewProj * prevWorld;
+    // Previous-frame clip position (for motion vectors, uses unjittered prevViewProj)
+    float4 prevWorld = model.prevModel * float4(in.position, 1.0);
+    out.prevClip     = frame.prevViewProj * prevWorld;
 
     out.currClip    = clipPos;
     out.worldNormal = normalize((model.normalMat * float4(in.normal, 0.0)).xyz);
@@ -77,11 +75,13 @@ fragment GBufFragOut gbuffer_frag(
     out.normalMetalness = float4(normalize(in.worldNormal), 0.0); // metalness = 0
 
     // ─── Motion vectors (NDC delta → UV delta) ────────────────────────────────
-    float2 currNDC  = in.currClip.xy / in.currClip.w;
-    float2 prevNDC  = in.prevClip.xy / in.prevClip.w;
-    // Remove TAA jitter contribution from both frames
-    float2 currUV   = ndc_to_uv(currNDC - frame.jitter);
-    float2 prevUV   = ndc_to_uv(prevNDC - frame.jitter);
+    float2 currNDC  = in.currClip.xy / in.currClip.w;  // jittered (frame.viewProj)
+    float2 prevNDC  = in.prevClip.xy / in.prevClip.w;  // unjittered (frame.prevViewProj)
+    // Remove TAA jitter from current NDC.
+    // frame.jitter is in pixel space; NDC shift = jitter_px * (2 / screenSize).
+    float2 jitterNDC = frame.jitter * frame.screenSize.zw * 2.0;
+    float2 currUV   = ndc_to_uv(currNDC - jitterNDC);
+    float2 prevUV   = ndc_to_uv(prevNDC);   // already unjittered
     out.motionVectors = currUV - prevUV;
 
     return out;

@@ -23,11 +23,7 @@ vertex DepthVertOut depth_prepass_vert(
 {
     DepthVertOut out;
     float4 worldPos  = model.model * float4(in.position, 1.0);
-    float4 clipPos   = frame.viewProj * worldPos;
-
-    // Apply TAA jitter (in NDC space)
-    clipPos.xy += frame.jitter * clipPos.w;
-
-    out.position = clipPos;
+    // TAA jitter is already baked into frame.viewProj by the CPU-side jitter matrix.
+    out.position = frame.viewProj * worldPos;
     return out;
 }
