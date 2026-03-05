@@ -3,7 +3,12 @@
 
 #pragma once
 
+#include "daedalus/world/map_data.h"
+#include "daedalus/world/world_types.h"
+
 #include <glm/glm.hpp>
+#include <cstddef>
+#include <utility>
 #include <vector>
 
 namespace daedalus::editor::geometry
@@ -28,5 +33,18 @@ namespace daedalus::editor::geometry
 /// Uses a ray-casting test in the XZ plane.
 [[nodiscard]] bool pointInPolygon(glm::vec2 p,
                                   const std::vector<glm::vec2>& verts) noexcept;
+
+/// Returns the squared distance from point p to the segment [a, b].
+[[nodiscard]] float pointToSegmentDistSq(glm::vec2 p,
+                                          glm::vec2 a,
+                                          glm::vec2 b) noexcept;
+
+/// Finds a wall in a different sector whose endpoints match the endpoints of
+/// wall wA of sector sA (within epsilon), in either winding order.
+/// Returns {matchSector, matchWallIndex}, or {INVALID_SECTOR_ID, 0} if none.
+[[nodiscard]] std::pair<world::SectorId, std::size_t>
+findMatchingWall(world::SectorId          sA,
+                 std::size_t              wA,
+                 const world::WorldMapData& map) noexcept;
 
 } // namespace daedalus::editor::geometry

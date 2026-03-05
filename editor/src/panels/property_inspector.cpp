@@ -3,9 +3,13 @@
 #include "daedalus/world/map_data.h"
 #include "document/commands/cmd_set_sector_heights.h"
 #include "document/commands/cmd_set_wall_flags.h"
+#include "document/commands/cmd_link_portal.h"
+#include "document/commands/cmd_unlink_portal.h"
+#include "tools/geometry_utils.h"
 
 #include "imgui.h"
 
+#include <cstddef>
 #include <memory>
 
 namespace daedalus::editor
@@ -101,6 +105,135 @@ void PropertyInspector::draw(EditMapDocument& doc)
             }
 
             ImGui::PopID();
+        }
+    }
+    else if (sel.type == SelectionType::Wall)
+    {
+        const world::SectorId sid = sel.wallSectorId;
+        const std::size_t     wi  = sel.wallIndex;
+        auto& sectors = doc.mapData().sectors;
+
+        if (sid >= sectors.size() || wi >= sectors[sid].walls.size())
+        {
+            ImGui::TextDisabled("(invalid selection)");
+            ImGui::End();
+            return;
+        }
+
+        world::Wall& wall = sectors[sid].walls[wi];
+        const std::size_t n = sectors[sid].walls.size();
+        const glm::vec2   p0 = wall.p0;
+        const glm::vec2   p1 = sectors[sid].walls[(wi + 1) % n].p0;
+
+        ImGui::SeparatorText("Wall");
+        ImGui::Text("Sector %u  Wall %zu", static_cast<unsigned>(sid), wi);
+        ImGui::Text("p0 (%.2f, %.2f)  p1 (%.2f, %.2f)", p0.x, p0.y, p1.x, p1.y);
+
+        ImGui::Spacing();
+        ImGui::SeparatorText("Flags");
+        {
+            bool blocking = hasFlag(wall.flags, world::WallFlags::Blocking);
+            if (ImGui::Checkbox("Blocking", &blocking))
+            {
+                const world::WallFlags newFlags = blocking
+                    ? (wall.flags | world::WallFlags::Blocking)
+                    : static_cast<world::WallFlags>(
+                          static_cast<unsigned>(wall.flags) &
+                          ~static_cast<unsigned>(world::WallFlags::Blocking));
+                doc.pushCommand(std::make_unique<CmdSetWallFlags>(doc, sid, wi, newFlags));
+            }
+            bool twoSided = hasFlag(wall.flags, world::WallFlags::TwoSided);
+            if (ImGui::Checkbox("Two-sided", &twoSided))
+            {
+                const world::WallFlags newFlags = twoSided
+                    ? (wall.flags | world::WallFlags::TwoSided)
+                    : static_cast<world::WallFlags>(
+                          static_cast<unsigned>(wall.flags) &
+                          ~static_cast<unsigned>(world::WallFlags::TwoSided));
+                doc.pushCommand(std::make_unique<CmdSetWallFlags>(doc, sid, wi, newFlags));
+            }
+        }
+
+        ImGui::Spacing();
+        ImGui::SeparatorText("Portal");
+
+        if (wall.portalSectorId == world::INVALID_SECTOR_ID)
+        {
+            ImGui::TextDisabled("Not linked.");
+            if (ImGui::Button("Link Portal"))
+            {
+                const auto [matchSid, matchWi] =
+                    geometry::findMatchingWall(sid, wi, doc.mapData());
+                if (matchSid == world::INVALID_SECTOR_ID)
+                {
+                    doc.log("Link Portal: no matching wall found in adjacent sectors.");
+                }
+                else
+                {
+                    doc.pushCommand(std::make_unique<CmdLinkPortal>(
+                        doc, sid, wi, matchSid, matchWi));
+                    doc.log(std::string("Linked wall ") +
+                            std::to_string(wi) + " (sector " +
+                            std::to_string(sid) + ") <-> wall " +
+                            std::to_string(matchWi) + " (sector " +
+                            std::to_string(matchSid) + ").");
+                }
+            }
+        }
+        else
+        {
+            ImGui::Text("\xe2\x86\x92 Sector %u  Wall %zu",
+                        static_cast<unsigned>(wall.portalSectorId),
+                        static_cast<unsigned>(wi));
+
+            // Find the partner wall index for the unlink command.
+            if (ImGui::Button("Unlink Portal"))
+            {
+                const world::SectorId partnerSid = wall.portalSectorId;
+                // Scan partner sector for the wall that points back to us.
+                std::size_t partnerWi = 0;
+                bool found = false;
+                if (partnerSid < doc.mapData().sectors.size())
+                {
+                    const auto& pSec = doc.mapData().sectors[partnerSid];
+                    for (std::size_t pw = 0; pw < pSec.walls.size(); ++pw)
+                    {
+                        if (pSec.walls[pw].portalSectorId == sid)
+                        {
+                            partnerWi = pw;
+                            found = true;
+                            break;
+                        }
+                    }
+                }
+                if (found)
+                {
+                    doc.pushCommand(std::make_unique<CmdUnlinkPortal>(
+                        doc, sid, wi, partnerSid, partnerWi));
+                }
+                else
+                {
+                    // Partner not found (orphaned link) — just clear our side.
+                    doc.pushCommand(std::make_unique<CmdUnlinkPortal>(
+                        doc, sid, wi, world::INVALID_SECTOR_ID, 0));
+                }
+            }
+        }
+    }
+    else if (sel.type == SelectionType::Vertex)
+    {
+        const world::SectorId sid = sel.vertexSectorId;
+        const std::size_t     wi  = sel.vertexWallIndex;
+        auto& sectors = doc.mapData().sectors;
+
+        if (sid < sectors.size() && wi < sectors[sid].walls.size())
+        {
+            const glm::vec2 p = sectors[sid].walls[wi].p0;
+            ImGui::SeparatorText("Vertex");
+            ImGui::Text("Sector %u  Wall %zu", static_cast<unsigned>(sid), wi);
+            ImGui::Text("Position: (%.3f, %.3f)", p.x, p.y);
+            ImGui::Spacing();
+            ImGui::TextDisabled("Drag in 2D viewport to move.");
         }
     }
     else if (sel.type == SelectionType::None)

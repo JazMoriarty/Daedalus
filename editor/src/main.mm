@@ -353,6 +353,25 @@ int main(int /*argc*/, char* /*argv*/[])
                         if (activeToolId == ActiveTool::DrawSector)
                             drawSectorTool.tryFinish(doc);
                     }
+                    // Keys 1–8: set grid step.
+                    else
+                    {
+                        static constexpr float k_gridSteps[8] =
+                            { 0.25f, 0.5f, 1.0f, 2.0f, 4.0f, 8.0f, 16.0f, 32.0f };
+                        static constexpr SDL_Scancode k_gridKeys[8] = {
+                            SDL_SCANCODE_1, SDL_SCANCODE_2, SDL_SCANCODE_3,
+                            SDL_SCANCODE_4, SDL_SCANCODE_5, SDL_SCANCODE_6,
+                            SDL_SCANCODE_7, SDL_SCANCODE_8
+                        };
+                        for (int gi = 0; gi < 8; ++gi)
+                        {
+                            if (sc == k_gridKeys[gi])
+                            {
+                                vp2d.setGridStep(k_gridSteps[gi]);
+                                break;
+                            }
+                        }
+                    }
                 }
 
                 // Cmd+Z / Cmd+Shift+Z undo/redo.

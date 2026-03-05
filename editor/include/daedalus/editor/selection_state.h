@@ -16,6 +16,7 @@ enum class SelectionType : unsigned
     None   = 0,
     Sector = 1,
     Wall   = 2,
+    Vertex = 3,
 };
 
 struct SelectionState
@@ -29,12 +30,18 @@ struct SelectionState
     world::SectorId wallSectorId = world::INVALID_SECTOR_ID;
     std::size_t     wallIndex    = 0;
 
+    /// For type == Vertex: the owning sector and the wall whose p0 is the vertex.
+    world::SectorId vertexSectorId  = world::INVALID_SECTOR_ID;
+    std::size_t     vertexWallIndex = 0;
+
     void clear() noexcept
     {
-        type         = SelectionType::None;
+        type            = SelectionType::None;
         sectors.clear();
-        wallSectorId = world::INVALID_SECTOR_ID;
-        wallIndex    = 0;
+        wallSectorId    = world::INVALID_SECTOR_ID;
+        wallIndex       = 0;
+        vertexSectorId  = world::INVALID_SECTOR_ID;
+        vertexWallIndex = 0;
     }
 
     [[nodiscard]] bool hasSelection() const noexcept

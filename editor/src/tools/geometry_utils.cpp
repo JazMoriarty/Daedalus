@@ -2,6 +2,7 @@
 
 #include <cmath>
 #include <cstddef>
+#include <utility>
 
 namespace daedalus::editor::geometry
 {
@@ -91,6 +92,63 @@ bool pointInPolygon(glm::vec2 p, const std::vector<glm::vec2>& verts) noexcept
         }
     }
     return inside;
+}
+
+// ─── pointToSegmentDistSq ─────────────────────────────────────────────────────
+
+float pointToSegmentDistSq(glm::vec2 p, glm::vec2 a, glm::vec2 b) noexcept
+{
+    const glm::vec2 ab = b - a;
+    const float     lenSq = glm::dot(ab, ab);
+    if (lenSq < 1e-12f)
+        return glm::dot(p - a, p - a);  // degenerate segment: dist to point a
+
+    const float t = glm::clamp(glm::dot(p - a, ab) / lenSq, 0.0f, 1.0f);
+    const glm::vec2 proj = a + t * ab;
+    const glm::vec2 diff = p - proj;
+    return glm::dot(diff, diff);
+}
+
+// ─── findMatchingWall ─────────────────────────────────────────────────────────
+
+static constexpr float k_matchEpsilonSq = 0.01f * 0.01f;  // 1 cm squared
+
+std::pair<world::SectorId, std::size_t>
+findMatchingWall(world::SectorId sA, std::size_t wA,
+                 const world::WorldMapData& map) noexcept
+{
+    if (sA >= map.sectors.size()) return {world::INVALID_SECTOR_ID, 0};
+
+    const world::Sector& secA = map.sectors[sA];
+    const std::size_t    nA   = secA.walls.size();
+    if (wA >= nA) return {world::INVALID_SECTOR_ID, 0};
+
+    const glm::vec2 a0 = secA.walls[wA].p0;
+    const glm::vec2 a1 = secA.walls[(wA + 1) % nA].p0;
+
+    for (world::SectorId sB = 0; sB < static_cast<world::SectorId>(map.sectors.size()); ++sB)
+    {
+        if (sB == sA) continue;
+        const world::Sector& secB = map.sectors[sB];
+        const std::size_t    nB   = secB.walls.size();
+        for (std::size_t wB = 0; wB < nB; ++wB)
+        {
+            const glm::vec2 b0 = secB.walls[wB].p0;
+            const glm::vec2 b1 = secB.walls[(wB + 1) % nB].p0;
+
+            // Match in same or opposite winding order.
+            const auto distSq = [](glm::vec2 x, glm::vec2 y) {
+                return glm::dot(x - y, x - y);
+            };
+            const bool fwd = distSq(a0, b0) < k_matchEpsilonSq &&
+                             distSq(a1, b1) < k_matchEpsilonSq;
+            const bool rev = distSq(a0, b1) < k_matchEpsilonSq &&
+                             distSq(a1, b0) < k_matchEpsilonSq;
+            if (fwd || rev)
+                return {sB, wB};
+        }
+    }
+    return {world::INVALID_SECTOR_ID, 0};
 }
 
 } // namespace daedalus::editor::geometry

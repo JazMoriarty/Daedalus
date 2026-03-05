@@ -89,6 +89,11 @@ public:
         return m_log;
     }
 
+    /// Mark the document as having unsaved changes and flag geometry for
+    /// re-tessellation.  Call this when directly mutating map data outside
+    /// of pushCommand() (e.g. live vertex drag).
+    void markDirty() noexcept { m_dirty = true; m_geometryDirty = true; }
+
 private:
     world::WorldMapData   m_mapData;
     UndoStack             m_undoStack;
@@ -99,8 +104,6 @@ private:
     bool m_geometryDirty = false;
 
     std::vector<std::string> m_log;
-
-    void markDirty() noexcept { m_dirty = true; m_geometryDirty = true; }
 };
 
 } // namespace daedalus::editor

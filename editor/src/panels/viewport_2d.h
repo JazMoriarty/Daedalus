@@ -31,10 +31,17 @@ public:
 
     [[nodiscard]] float     zoom()      const noexcept { return m_zoom; }
     [[nodiscard]] glm::vec2 panOffset() const noexcept { return m_panOffset; }
+    [[nodiscard]] float     gridStep()  const noexcept { return m_gridStep; }
+
+    void setGridStep   (float step) noexcept { m_gridStep    = step; }
+    void setSnapEnabled(bool  on)   noexcept { m_snapEnabled = on;   }
 
 private:
     glm::vec2 m_panOffset{400.0f, 300.0f};  ///< Canvas pixels from origin to map (0,0).
     float     m_zoom    = 20.0f;            ///< Pixels per map unit.
+
+    float     m_gridStep    = 1.0f;  ///< Current grid snap increment (map units).
+    bool      m_snapEnabled = true;  ///< Whether grid snapping is active.
 
     bool      m_panActive = false;
     glm::vec2 m_panStartMouse{};

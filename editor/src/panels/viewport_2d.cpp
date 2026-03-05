@@ -1,5 +1,6 @@
 #include "viewport_2d.h"
 #include "daedalus/editor/edit_map_document.h"
+#include "daedalus/editor/selection_state.h"
 #include "daedalus/editor/i_editor_tool.h"
 #include "tools/draw_sector_tool.h"
 
@@ -9,6 +10,15 @@
 #include <algorithm>
 #include <cmath>
 #include <vector>
+
+namespace {
+
+inline float snapToGrid(float v, float step) noexcept
+{
+    return std::round(v / step) * step;
+}
+
+} // anonymous namespace
 
 namespace daedalus::editor
 {
@@ -77,19 +87,21 @@ void Viewport2D::drawSectors(ImDrawList*            dl,
                                const EditMapDocument& doc,
                                glm::vec2              canvasMin) const
 {
-    const auto& map = doc.mapData();
+    const auto&           map = doc.mapData();
+    const SelectionState& sel = doc.selection();
 
     for (std::size_t si = 0; si < map.sectors.size(); ++si)
     {
         const world::Sector& sector = map.sectors[si];
-        if (sector.walls.size() < 3) continue;
+        const std::size_t    n      = sector.walls.size();
+        if (n < 3) continue;
 
-        const bool selected = doc.selection().isSectorSelected(
-            static_cast<world::SectorId>(si));
+        const auto   sid      = static_cast<world::SectorId>(si);
+        const bool   sectSel  = sel.isSectorSelected(sid);
 
         // Build screen-space vertex list.
         std::vector<ImVec2> pts;
-        pts.reserve(sector.walls.size());
+        pts.reserve(n);
         for (const auto& wall : sector.walls)
         {
             const auto s = mapToScreen(wall.p0, canvasMin);
@@ -97,21 +109,83 @@ void Viewport2D::drawSectors(ImDrawList*            dl,
         }
 
         // Filled polygon.
-        const ImU32 fillColor = selected
+        const ImU32 fillColor = sectSel
             ? IM_COL32(80, 130, 200, 60)
             : IM_COL32(50,  80, 120, 40);
         dl->AddConvexPolyFilled(pts.data(), static_cast<int>(pts.size()), fillColor);
 
-        // Outline.
-        const ImU32 lineColor = selected
-            ? IM_COL32(120, 180, 255, 220)
-            : IM_COL32( 80, 130, 200, 180);
-        dl->AddPolyline(pts.data(), static_cast<int>(pts.size()),
-                        lineColor, ImDrawFlags_Closed, 1.5f);
+        // Per-wall outline — colour depends on: portal, selection, default.
+        for (std::size_t wi = 0; wi < n; ++wi)
+        {
+            const world::Wall& wall    = sector.walls[wi];
+            const ImVec2&      p0      = pts[wi];
+            const ImVec2&      p1      = pts[(wi + 1) % n];
+
+            const bool isPortal   = (wall.portalSectorId != world::INVALID_SECTOR_ID);
+            const bool wallSel    = (sel.type == SelectionType::Wall &&
+                                     sel.wallSectorId == sid && sel.wallIndex == wi);
+
+            ImU32 edgeColor;
+            float edgeThick;
+            if (wallSel)
+            {
+                edgeColor = IM_COL32(255, 255, 255, 240);
+                edgeThick = 2.5f;
+            }
+            else if (isPortal)
+            {
+                edgeColor = IM_COL32(0, 210, 210, 220);
+                edgeThick = 2.5f;
+            }
+            else if (sectSel)
+            {
+                edgeColor = IM_COL32(120, 180, 255, 220);
+                edgeThick = 1.5f;
+            }
+            else
+            {
+                edgeColor = IM_COL32(80, 130, 200, 180);
+                edgeThick = 1.5f;
+            }
+            dl->AddLine(p0, p1, edgeColor, edgeThick);
+
+            // Portal midpoint arrow (small cyan triangle).
+            if (isPortal)
+            {
+                const float mx = (p0.x + p1.x) * 0.5f;
+                const float my = (p0.y + p1.y) * 0.5f;
+                // Perpendicular direction (pointing inward).
+                const float dx = p1.x - p0.x;
+                const float dy = p1.y - p0.y;
+                const float len = std::sqrt(dx * dx + dy * dy);
+                if (len > 0.5f)
+                {
+                    const float nx = -dy / len;
+                    const float ny =  dx / len;
+                    constexpr float sz = 5.0f;
+                    const ImVec2 tip  = {mx + nx * sz,       my + ny * sz};
+                    const ImVec2 bl   = {mx - nx * 2.0f - dx * 0.12f,
+                                         my - ny * 2.0f - dy * 0.12f};
+                    const ImVec2 br   = {mx - nx * 2.0f + dx * 0.12f,
+                                         my - ny * 2.0f + dy * 0.12f};
+                    dl->AddTriangleFilled(tip, bl, br, IM_COL32(0, 210, 210, 200));
+                }
+            }
+        }
 
         // Vertex dots.
-        for (const auto& pt : pts)
-            dl->AddCircleFilled(pt, 3.0f, lineColor);
+        for (std::size_t wi = 0; wi < n; ++wi)
+        {
+            const bool vertSel = (sel.type == SelectionType::Vertex &&
+                                  sel.vertexSectorId == sid &&
+                                  sel.vertexWallIndex == wi);
+            const float  radius = vertSel ? 6.0f : 3.0f;
+            const ImU32  col    = vertSel
+                ? IM_COL32(255, 255, 180, 255)
+                : (sectSel ? IM_COL32(120, 180, 255, 220)
+                           : IM_COL32( 80, 130, 200, 180));
+            dl->AddCircleFilled(pts[wi], radius, col);
+        }
     }
 }
 
@@ -169,7 +243,15 @@ void Viewport2D::draw(EditMapDocument& doc,
 
     // ── Mouse input ───────────────────────────────────────────────────────────
     const ImVec2 mousePosV = ImGui::GetMousePos();
-    const glm::vec2 mouseMap = screenToMap({mousePosV.x, mousePosV.y}, canvasMin);
+    const glm::vec2 mouseMapRaw = screenToMap({mousePosV.x, mousePosV.y}, canvasMin);
+
+    // Apply grid snap (disabled when Shift is held).
+    const bool shiftHeld = ImGui::GetIO().KeyShift;
+    const bool doSnap    = m_snapEnabled && !shiftHeld;
+    const glm::vec2 mouseMap = doSnap
+        ? glm::vec2{snapToGrid(mouseMapRaw.x, m_gridStep),
+                    snapToGrid(mouseMapRaw.y, m_gridStep)}
+        : mouseMapRaw;
 
     if (hovered)
     {
@@ -185,7 +267,7 @@ void Viewport2D::draw(EditMapDocument& doc,
             m_zoom = std::clamp(m_zoom * factor, 2.0f, 400.0f);
         }
 
-        // Tool mouse events.
+        // Tool mouse events (snapped coordinates).
         if (activeTool)
         {
             activeTool->onMouseMove(doc, mouseMap.x, mouseMap.y);
@@ -217,9 +299,10 @@ void Viewport2D::draw(EditMapDocument& doc,
         m_panActive = false;
     }
 
-    // Coordinates readout.
+    // Coordinates readout (show snapped position, mark with dot when snapping).
     ImGui::SetCursorScreenPos({canvasMin.x + 8.0f, canvasMax.y - 22.0f});
-    ImGui::TextDisabled("(%.2f, %.2f)", mouseMap.x, mouseMap.y);
+    ImGui::TextDisabled(doSnap ? "%.2f, %.2f [%.2g]" : "%.2f, %.2f",
+                        mouseMap.x, mouseMap.y, m_gridStep);
 
     ImGui::End();
 }

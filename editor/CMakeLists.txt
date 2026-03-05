@@ -7,6 +7,9 @@ target_sources(DaedalusEdit PRIVATE
     src/document/commands/cmd_draw_sector.cpp
     src/document/commands/cmd_set_sector_heights.cpp
     src/document/commands/cmd_set_wall_flags.cpp
+    src/document/commands/cmd_move_vertex.cpp
+    src/document/commands/cmd_link_portal.cpp
+    src/document/commands/cmd_unlink_portal.cpp
     src/tools/geometry_utils.cpp
     src/tools/select_tool.cpp
     src/tools/draw_sector_tool.cpp
