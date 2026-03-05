@@ -1,0 +1,69 @@
+---
+Language: Cpp
+Standard: c++23
+BasedOnStyle: LLVM
+
+# ─── Indentation ──────────────────────────────────────────────────────────────
+IndentWidth: 4
+TabWidth: 4
+UseTab: Never
+ContinuationIndentWidth: 4
+IndentCaseLabels: true
+IndentPPDirectives: AfterHash
+
+# ─── Line length ──────────────────────────────────────────────────────────────
+ColumnLimit: 100
+
+# ─── Braces ───────────────────────────────────────────────────────────────────
+BreakBeforeBraces: Allman
+
+# ─── Includes ─────────────────────────────────────────────────────────────────
+SortIncludes: CaseSensitive
+IncludeBlocks: Regroup
+IncludeCategories:
+  # Project public headers
+  - Regex: '^"daedalus/'
+    Priority: 1
+  # Project private headers
+  - Regex: '^"'
+    Priority: 2
+  # Third-party
+  - Regex: '^<'
+    Priority: 3
+
+# ─── Spacing ──────────────────────────────────────────────────────────────────
+SpaceAfterCStyleCast: false
+SpaceBeforeParens: ControlStatements
+SpaceInEmptyParentheses: false
+SpacesInAngles: Never
+SpacesInParentheses: false
+SpacesInSquareBrackets: false
+
+# ─── Alignment ────────────────────────────────────────────────────────────────
+AlignAfterOpenBracket: Align
+AlignConsecutiveAssignments: None
+AlignConsecutiveDeclarations: None
+AlignOperands: Align
+AlignTrailingComments:
+  Kind: Always
+  OverEmptyLines: 1
+
+# ─── Breaking ─────────────────────────────────────────────────────────────────
+AllowShortFunctionsOnASingleLine: Inline
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLoopsOnASingleLine: false
+AllowShortLambdasOnASingleLine: Inline
+BreakConstructorInitializers: BeforeColon
+BreakInheritanceList: BeforeColon
+ConstructorInitializerIndentWidth: 4
+
+# ─── Pointers & References ────────────────────────────────────────────────────
+PointerAlignment: Left
+ReferenceAlignment: Left
+
+# ─── Misc ─────────────────────────────────────────────────────────────────────
+Cpp11BracedListStyle: true
+FixNamespaceComments: true
+NamespaceIndentation: None
+MaxEmptyLinesToKeep: 1
+ReflowComments: true

@@ -1,0 +1,57 @@
+# ─── Build output ─────────────────────────────────────────────────────────────
+build/
+out/
+cmake-build-*/
+*.o
+*.a
+*.dylib
+*.so
+*.dll
+*.exe
+
+# ─── CMake ────────────────────────────────────────────────────────────────────
+CMakeCache.txt
+CMakeFiles/
+CMakeScripts/
+cmake_install.cmake
+install_manifest.txt
+compile_commands.json
+CTestTestfile.cmake
+_deps/
+*.cmake
+!CMakeLists.txt
+
+# ─── Xcode ────────────────────────────────────────────────────────────────────
+*.xcodeproj/
+*.xcworkspace/
+xcuserdata/
+DerivedData/
+*.pbxproj
+
+# ─── VS / VS Code ─────────────────────────────────────────────────────────────
+.vs/
+*.sln
+*.vcxproj
+*.vcxproj.filters
+*.suo
+*.user
+.vscode/
+
+# ─── macOS ────────────────────────────────────────────────────────────────────
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# ─── Compiler / linker artifacts ─────────────────────────────────────────────
+*.d
+*.pch
+*.gch
+*.dSYM/
+
+# ─── Third-party (managed separately) ────────────────────────────────────────
+third_party/
+
+# ─── Runtime / test output ───────────────────────────────────────────────────
+*.log
+*.tmp
