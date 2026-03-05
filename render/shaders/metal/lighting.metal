@@ -7,6 +7,7 @@
 //   texture(2) = gDepth            Depth32Float (read)
 //   texture(3) = ssaoTex           R16Float    (read)
 //   texture(4) = hdrOut            RGBA16Float (write)
+//   texture(5) = shadowMap         Depth32Float (read, manual PCF compare)
 //   buffer(0)  = FrameConstants
 //   buffer(1)  = point light count (u32)
 //   buffer(2)  = PointLightGPU[]
@@ -14,15 +15,16 @@
 #include "common.h"
 
 kernel void lighting_main(
-    texture2d<float, access::read>  gAlbedoRoughness [[texture(0)]],
-    texture2d<float, access::read>  gNormalMetal     [[texture(1)]],
-    texture2d<float, access::read>  gDepth           [[texture(2)]],
-    texture2d<float, access::read>  ssaoTex          [[texture(3)]],
-    texture2d<float, access::write> hdrOut           [[texture(4)]],
-    constant FrameConstants&        frame            [[buffer(0)]],
-    constant uint&                  lightCount       [[buffer(1)]],
-    constant PointLightGPU*         lights           [[buffer(2)]],
-    uint2                           gid              [[thread_position_in_grid]])
+    texture2d<float, access::read>   gAlbedoRoughness [[texture(0)]],
+    texture2d<float, access::read>   gNormalMetal     [[texture(1)]],
+    texture2d<float, access::read>   gDepth           [[texture(2)]],
+    texture2d<float, access::read>   ssaoTex          [[texture(3)]],
+    texture2d<float, access::write>  hdrOut           [[texture(4)]],
+    texture2d<float, access::read>   shadowMap        [[texture(5)]],
+    constant FrameConstants&         frame            [[buffer(0)]],
+    constant uint&                   lightCount       [[buffer(1)]],
+    constant PointLightGPU*          lights           [[buffer(2)]],
+    uint2                            gid              [[thread_position_in_grid]])
 {
     const uint fw = hdrOut.get_width();
     const uint fh = hdrOut.get_height();
@@ -52,9 +54,33 @@ kernel void lighting_main(
     float3 V        = normalize(frame.cameraPos.xyz - worldPos);
 
     // ─── Directional sun light ────────────────────────────────────────────────
-    float3 sunDir  = normalize(frame.sunDirection.xyz);
-    float3 sunCol  = frame.sunColor.xyz * frame.sunColor.w;  // color × intensity
-    float3 radiance = cook_torrance(N, V, sunDir, albedo, roughness, metalness) * sunCol;
+    float3 sunDir = normalize(frame.sunDirection.xyz);
+    float3 sunCol = frame.sunColor.xyz * frame.sunColor.w;  // color × intensity
+
+    // ─── PCF shadow (3×3 kernel, manual depth compare) ────────────────────────
+    float4 shadowClip = frame.sunViewProj * float4(worldPos, 1.0);
+    float3 shadowNDC  = shadowClip.xyz / shadowClip.w;
+    float2 shadowUV   = ndc_to_uv(shadowNDC.xy);     // Metal y=0 at top
+    float  refDepth   = shadowNDC.z - 0.002f;         // depth bias
+    float  lit        = 1.0f;  // default lit (outside shadow frustum)
+    if (shadowUV.x >= 0.0f && shadowUV.x <= 1.0f &&
+        shadowUV.y >= 0.0f && shadowUV.y <= 1.0f &&
+        shadowNDC.z >= 0.0f && shadowNDC.z <= 1.0f)
+    {
+        lit = 0.0f;
+        float2 shadowPx = shadowUV * 2048.0f;
+        for (int dx = -1; dx <= 1; dx++)
+            for (int dy = -1; dy <= 1; dy++)
+            {
+                uint2 tc = uint2(clamp(shadowPx + float2(dx, dy),
+                                       float2(0.0f), float2(2047.0f)));
+                float stored = shadowMap.read(tc).r;
+                lit += (stored >= refDepth) ? 1.0f : 0.0f;
+            }
+        lit /= 9.0f;
+    }
+
+    float3 radiance = cook_torrance(N, V, sunDir, albedo, roughness, metalness) * sunCol * lit;
 
     // ─── Point lights ─────────────────────────────────────────────────────────
     for (uint i = 0; i < lightCount; ++i)

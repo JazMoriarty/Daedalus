@@ -2,15 +2,16 @@
 // Orchestrates the full deferred rendering pipeline for one frame.
 //
 // Pass order:
-//   1. G-buffer       (render, depth + colour in one pass)
-//   2. SSAO           (compute)
-//   3. Lighting       (compute, deferred PBR)
-//   4. Skybox         (render, procedural sky on background pixels)
-//   5. TAA            (render, temporal anti-aliasing)
-//   6. Bloom extract  (render)
-//   7. Bloom blur H   (render)
-//   8. Bloom blur V   (render)
-//   9. Tone mapping   (render → swapchain)
+//   1. Shadow depth   (render, depth-only from sun POV — 2048×2048)
+//   2. G-buffer       (render, depth + colour in one pass)
+//   3. SSAO           (compute)
+//   4. Lighting       (compute, deferred PBR + PCF shadow)
+//   5. Skybox         (render, procedural sky on background pixels)
+//   6. TAA            (render, temporal anti-aliasing)
+//   7. Bloom extract  (render)
+//   8. Bloom blur H   (render)
+//   9. Bloom blur V   (render)
+//  10. Tone mapping   (render → swapchain)
 
 #pragma once
 
@@ -66,6 +67,7 @@ private:
     // ─── Render pipelines ─────────────────────────────────────────────────────
 
     std::unique_ptr<rhi::IPipeline> m_gbufferPSO;
+    std::unique_ptr<rhi::IPipeline> m_shadowDepthPSO;
     std::unique_ptr<rhi::IPipeline> m_ssaoPSO;
     std::unique_ptr<rhi::IPipeline> m_lightingPSO;
     std::unique_ptr<rhi::IPipeline> m_skyboxPSO;
@@ -77,19 +79,22 @@ private:
 
     // ─── Test-room geometry ───────────────────────────────────────────────────
 
-    std::unique_ptr<rhi::IBuffer> m_roomVBO;        ///< 24 vertices × 48 B
-    std::unique_ptr<rhi::IBuffer> m_roomIBO;        ///< 36 u32 indices
-    static constexpr u32          k_roomIndexCount = 36;
+    std::unique_ptr<rhi::IBuffer> m_roomVBO;        ///< 44 vertices × 48 B
+    std::unique_ptr<rhi::IBuffer> m_roomIBO;        ///< 72 u32 indices
+    static constexpr u32          k_roomIndexCount = 72;
 
     // ─── Per-frame GPU buffers ────────────────────────────────────────────────
 
-    std::unique_ptr<rhi::IBuffer> m_frameConstBuf;  ///< FrameGPU  (448 B)
+    std::unique_ptr<rhi::IBuffer> m_frameConstBuf;  ///< FrameGPU  (512 B)
     std::unique_ptr<rhi::IBuffer> m_lightBuf;       ///< u32 header + PointLightGPU[]
 
     // ─── Persistent textures ─────────────────────────────────────────────────
 
     /// TAA history ping-pong: [even frame writes to 0, odd frame writes to 1].
     std::unique_ptr<rhi::ITexture> m_taaHistory[2];
+
+    /// Sun shadow depth map (2048×2048 Depth32Float, persistent).
+    std::unique_ptr<rhi::ITexture> m_shadowDepthTex;
 
     // ─── Sampler ─────────────────────────────────────────────────────────────
 

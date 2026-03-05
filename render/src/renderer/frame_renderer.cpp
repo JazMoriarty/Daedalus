@@ -19,7 +19,8 @@ using namespace rhi;
 
 // ─── Test-room geometry ───────────────────────────────────────────────────────
 // Closed box room: 10 × 4 × 10 units, centred at (0, 2, 0).
-// Normals point inward (toward camera); CCW front-face winding.
+// Room normals point inward; CCW front-face winding.
+// Centre box: 0.8 × 1.5 × 0.8 units, base at y=0, centred at (0,0,0).
 // Vertex stride: pos(12) + normal(12) + uv(8) + tangent(16) = 48 bytes.
 
 struct RoomVertex
@@ -34,7 +35,7 @@ static_assert(sizeof(RoomVertex) == 48, "RoomVertex stride must be 48 bytes");
 // GPU buffer slot used for vertex data (avoids colliding with constant-buffer slots 0–1).
 static constexpr u32 k_vboSlot = 30;
 
-static constexpr RoomVertex k_roomVertices[24] =
+static constexpr RoomVertex k_roomVertices[44] =
 {
     // ── Floor  (y=0, n=(0,+1,0), t=(+1,0,0,1)) ──────────────────────────────
     {{-5,0, 5}, {0,1,0}, {0,0}, { 1,0,0,1}},
@@ -71,9 +72,36 @@ static constexpr RoomVertex k_roomVertices[24] =
     {{ 5,0, 5}, {-1,0,0}, {1,1}, {0,0,1,1}},
     {{ 5,4, 5}, {-1,0,0}, {1,0}, {0,0,1,1}},
     {{ 5,4,-5}, {-1,0,0}, {0,0}, {0,0,1,1}},
+
+    // ── Centre box — 0.8 × 1.5 × 0.8, base at y=0 ───────────────────────────
+    // Top  (y=1.5, n=( 0,+1, 0), t=(+1,0,0,1))
+    {{-0.4f,1.5f, 0.4f}, { 0,1, 0}, {0,0}, { 1,0,0,1}},
+    {{ 0.4f,1.5f, 0.4f}, { 0,1, 0}, {1,0}, { 1,0,0,1}},
+    {{ 0.4f,1.5f,-0.4f}, { 0,1, 0}, {1,1}, { 1,0,0,1}},
+    {{-0.4f,1.5f,-0.4f}, { 0,1, 0}, {0,1}, { 1,0,0,1}},
+    // Front (z=+0.4, n=( 0, 0,+1), t=(+1,0,0,1))
+    {{-0.4f,0.0f, 0.4f}, { 0,0, 1}, {0,1}, { 1,0,0,1}},
+    {{ 0.4f,0.0f, 0.4f}, { 0,0, 1}, {1,1}, { 1,0,0,1}},
+    {{ 0.4f,1.5f, 0.4f}, { 0,0, 1}, {1,0}, { 1,0,0,1}},
+    {{-0.4f,1.5f, 0.4f}, { 0,0, 1}, {0,0}, { 1,0,0,1}},
+    // Back  (z=-0.4, n=( 0, 0,-1), t=(-1,0,0,1))
+    {{ 0.4f,0.0f,-0.4f}, { 0,0,-1}, {0,1}, {-1,0,0,1}},
+    {{-0.4f,0.0f,-0.4f}, { 0,0,-1}, {1,1}, {-1,0,0,1}},
+    {{-0.4f,1.5f,-0.4f}, { 0,0,-1}, {1,0}, {-1,0,0,1}},
+    {{ 0.4f,1.5f,-0.4f}, { 0,0,-1}, {0,0}, {-1,0,0,1}},
+    // Left  (x=-0.4, n=(-1, 0, 0), t=(0,0,+1,1))
+    {{-0.4f,0.0f,-0.4f}, {-1,0, 0}, {0,1}, {0,0,1,1}},
+    {{-0.4f,0.0f, 0.4f}, {-1,0, 0}, {1,1}, {0,0,1,1}},
+    {{-0.4f,1.5f, 0.4f}, {-1,0, 0}, {1,0}, {0,0,1,1}},
+    {{-0.4f,1.5f,-0.4f}, {-1,0, 0}, {0,0}, {0,0,1,1}},
+    // Right (x=+0.4, n=(+1, 0, 0), t=(0,0,-1,1))
+    {{ 0.4f,0.0f, 0.4f}, { 1,0, 0}, {0,1}, {0,0,-1,1}},
+    {{ 0.4f,0.0f,-0.4f}, { 1,0, 0}, {1,1}, {0,0,-1,1}},
+    {{ 0.4f,1.5f,-0.4f}, { 1,0, 0}, {1,0}, {0,0,-1,1}},
+    {{ 0.4f,1.5f, 0.4f}, { 1,0, 0}, {0,0}, {0,0,-1,1}},
 };
 
-static constexpr u32 k_roomIndices[36] =
+static constexpr u32 k_roomIndices[72] =
 {
      0, 1, 2,  0, 2, 3,   // floor
      4, 5, 6,  4, 6, 7,   // ceiling
@@ -81,6 +109,11 @@ static constexpr u32 k_roomIndices[36] =
     12,13,14, 12,14,15,   // back wall
     16,17,18, 16,18,19,   // left wall
     20,21,22, 20,22,23,   // right wall
+    24,25,26, 24,26,27,   // box top
+    28,29,30, 28,30,31,   // box front
+    32,33,34, 32,34,35,   // box back
+    36,37,38, 36,38,39,   // box left
+    40,41,42, 40,42,43,   // box right
 };
 
 // ─── TAA: 8-sample Halton(base-2 × base-3) jitter ────────────────────────────
@@ -181,7 +214,25 @@ void FrameRenderer::createPSOs(IRenderDevice& device, const std::string& lib)
         m_gbufferPSO = device.createRenderPipeline(d);
     }
 
-    // ── SSAO compute ──────────────────────────────────────────────────────────
+    // ── Shadow depth (depth-only, no fragment shader) ─────────────────────────
+    {
+        auto vsShadow = loadVS("shadow_depth_vert");
+        RenderPipelineDescriptor d;
+        d.vertexShader         = vsShadow.get();
+        d.fragmentShader       = nullptr;                // depth-only: no FS needed
+        d.colorAttachmentCount = 0;
+        d.depthFormat          = TextureFormat::Depth32Float;
+        d.depthTest            = true;
+        d.depthWrite           = true;
+        d.depthCompare         = CompareFunction::Less;
+        d.cullMode             = CullMode::Back;         // cull back-faces so ceiling doesn't shadow the interior
+        d.vertexAttributes     = geometryAttributes();
+        d.vertexBufferLayouts  = geometryLayouts();
+        d.debugName            = "ShadowDepth";
+        m_shadowDepthPSO = device.createRenderPipeline(d);
+    }
+
+    // ── SSAO compute
     {
         ComputePipelineDescriptor d;
         d.computeShader = csSSAO.get();
@@ -332,6 +383,17 @@ void FrameRenderer::createPersistentResources(IRenderDevice& device, u32 w, u32 
         m_linearClampSampler = device.createSampler(d);
     }
 
+    // Shadow depth map — 2048×2048, persistent across frames
+    {
+        TextureDescriptor d;
+        d.width     = 2048;
+        d.height    = 2048;
+        d.format    = TextureFormat::Depth32Float;
+        d.usage     = TextureUsage::DepthStencil | TextureUsage::ShaderRead;
+        d.debugName = "ShadowDepth";
+        m_shadowDepthTex = device.createTexture(d);
+    }
+
     // TAA history textures
     recreateTAAHistory(device, w, h);
 }
@@ -412,6 +474,18 @@ void FrameRenderer::renderFrame(IRenderDevice& device,
     frame.pad0       = 0.0f;
     frame.jitter     = jitterPx;
     frame.pad1       = glm::vec2(0.0f);
+
+    // ── Sun view-projection for shadow map ────────────────────────────────────
+    {
+        const glm::vec3 lightDir = glm::normalize(scene.sunDirection);
+        const glm::vec3 up       = (std::abs(lightDir.y) > 0.99f)
+                                   ? glm::vec3(0.f, 0.f, 1.f)
+                                   : glm::vec3(0.f, 1.f, 0.f);
+        const glm::vec3 center(0.0f, 2.0f, 0.0f);
+        const glm::mat4 lightView = glm::lookAtLH(center + lightDir * 20.f, center, up);
+        const glm::mat4 lightProj = glm::orthoLH_ZO(-12.f, 12.f, -12.f, 12.f, 0.1f, 40.f);
+        frame.sunViewProj = lightProj * lightView;
+    }
 
     {
         void* p = m_frameConstBuf->map();
@@ -497,8 +571,10 @@ void FrameRenderer::renderFrame(IRenderDevice& device,
     // Import persistent textures
     const RGTextureId taaOutId  = m_graph.importTexture("TAAHistoryCurr",
                                                           m_taaHistory[currHist].get());
-    const RGTextureId taaHistId = m_graph.importTexture("TAAHistoryPrev",
-                                                          m_taaHistory[prevHist].get());
+    const RGTextureId taaHistId     = m_graph.importTexture("TAAHistoryPrev",
+                                                              m_taaHistory[prevHist].get());
+    const RGTextureId shadowDepthId = m_graph.importTexture("ShadowDepth",
+                                                              m_shadowDepthTex.get());
     // Import swapchain drawable
     ITexture* drawable = swapchain.nextDrawable();
     const RGTextureId swapId = m_graph.importTexture("Swapchain", drawable);
@@ -515,8 +591,9 @@ void FrameRenderer::renderFrame(IRenderDevice& device,
     ITexture* hdrTex     = m_graph.get(hdrId);
     ITexture* bloomATex  = m_graph.get(bloomAId);
     ITexture* bloomBTex  = m_graph.get(bloomBId);
-    ITexture* taaOutTex  = m_taaHistory[currHist].get();
-    ITexture* taaHistTex = m_taaHistory[prevHist].get();
+    ITexture* taaOutTex      = m_taaHistory[currHist].get();
+    ITexture* taaHistTex     = m_taaHistory[prevHist].get();
+    ITexture* shadowDepthTex = m_shadowDepthTex.get();
 
     // Capture resources by value for lambda use
     IBuffer*   frameBuf   = m_frameConstBuf.get();
@@ -525,6 +602,7 @@ void FrameRenderer::renderFrame(IRenderDevice& device,
     IBuffer*   ibo        = m_roomIBO.get();
     ISampler*  linSamp    = m_linearClampSampler.get();
     IPipeline* pGBuf      = m_gbufferPSO.get();
+    IPipeline* pShadow    = m_shadowDepthPSO.get();
     IPipeline* pSSAO      = m_ssaoPSO.get();
     IPipeline* pLighting  = m_lightingPSO.get();
     IPipeline* pSkybox    = m_skyboxPSO.get();
@@ -538,7 +616,32 @@ void FrameRenderer::renderFrame(IRenderDevice& device,
     const ScissorRect sc{ 0, 0, swapW, swapH };
 
     // ─────────────────────────────────────────────────────────────────────────
-    // Pass 1 — G-buffer (writes depth + colour in one pass)
+    // Pass 1 — Shadow depth (depth-only from sun's POV, 2048×2048)
+    // ─────────────────────────────────────────────────────────────────────────
+    {
+        const Viewport    shadowVP { 0.f, 0.f, 2048.f, 2048.f };
+        const ScissorRect shadowSC { 0,   0,   2048u,  2048u  };
+        RGRenderPassDesc p;
+        p.name             = "ShadowDepth";
+        p.colorOutputCount = 0;
+        p.depthOutput      = shadowDepthId;
+        p.clearDepth       = 1.0f;
+        p.execute = [=](IRenderPassEncoder* enc)
+        {
+            enc->setViewport(shadowVP);
+            enc->setScissor(shadowSC);
+            enc->setRenderPipeline(pShadow);
+            enc->setVertexBuffer(frameBuf, 0, 0);
+            enc->setVertexBytes(&modelGPU, sizeof(ModelGPU), 1);
+            enc->setVertexBuffer(vbo, 0, k_vboSlot);
+            enc->setIndexBuffer(ibo, 0, true);
+            enc->drawIndexed(k_roomIndexCount);
+        };
+        m_graph.addRenderPass(std::move(p));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Pass 2 — G-buffer (writes depth + colour in one pass)
     // ─────────────────────────────────────────────────────────────────────────
     {
         RGRenderPassDesc p;
@@ -596,7 +699,8 @@ void FrameRenderer::renderFrame(IRenderDevice& device,
             enc->setTexture(gNormalTex, 1);   // gNormalMetal
             enc->setTexture(gDepthTex,  2);   // gDepth
             enc->setTexture(ssaoTex,    3);   // ssaoTex
-            enc->setTexture(hdrTex,     4);   // hdrOut (write)
+            enc->setTexture(hdrTex,        4);   // hdrOut (write)
+            enc->setTexture(shadowDepthTex, 5);   // shadow depth (PCF)
             enc->setBuffer(frameBuf,  0, 0);
             enc->setBuffer(lightBuf,  0, 1);  // lightCount at offset 0
             enc->setBuffer(lightBuf, 16, 2);  // PointLightGPU[] at offset 16

@@ -19,12 +19,18 @@ target_compile_features(DaedalusApp PRIVATE cxx_std_23)
 if(DAEDALUS_PLATFORM_MACOS)
     target_compile_definitions(DaedalusApp PRIVATE DAEDALUS_BACKEND_METAL)
 
-    # Depend on the Metal shader compilation and copy the .metallib next to the executable.
-    add_dependencies(DaedalusApp DaedalusShaders)
-    add_custom_command(TARGET DaedalusApp POST_BUILD
+    # Copy the .metallib next to the executable whenever DaedalusShaders changes.
+    # Use add_custom_command(OUTPUT ...) so the copy fires on every metallib update,
+    # not only when DaedalusApp itself rebuilds (POST_BUILD limitation).
+    set(METALLIB_APP_COPY "${CMAKE_BINARY_DIR}/app/daedalus_shaders.metallib")
+    add_custom_command(
+        OUTPUT  "${METALLIB_APP_COPY}"
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            "${DAEDALUS_METALLIB_OUTPUT}"
-            "$<TARGET_FILE_DIR:DaedalusApp>/daedalus_shaders.metallib"
+                "${DAEDALUS_METALLIB_OUTPUT}"
+                "${METALLIB_APP_COPY}"
+        DEPENDS "${DAEDALUS_METALLIB_OUTPUT}"
         COMMENT "Copying daedalus_shaders.metallib to app output directory"
     )
+    add_custom_target(CopyDaedalusShaders ALL DEPENDS "${METALLIB_APP_COPY}")
+    add_dependencies(DaedalusApp CopyDaedalusShaders)
 endif()

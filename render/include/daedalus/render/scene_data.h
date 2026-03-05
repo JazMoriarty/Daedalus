@@ -15,7 +15,7 @@ namespace daedalus::render
 
 // ─── FrameGPU ─────────────────────────────────────────────────────────────────
 // Uploaded once per frame to buffer index 0 (vertex and fragment stages).
-// Total size: 5×mat4 + 6×vec4 + 1×vec4(time/dt/frame/pad) + 1×vec4(jitter) = 448 bytes.
+// Total size: 6×mat4 + 6×vec4 + 1×vec4(time/dt/frame/pad) + 1×vec4(jitter) = 512 bytes.
 
 struct alignas(16) FrameGPU
 {
@@ -25,6 +25,7 @@ struct alignas(16) FrameGPU
     glm::mat4 viewProj;       // 64 bytes
     glm::mat4 invViewProj;    // 64 bytes
     glm::mat4 prevViewProj;   // 64 bytes  — for TAA reprojection
+    glm::mat4 sunViewProj;    // 64 bytes  — directional shadow projection
 
     // Camera world-space
     glm::vec4 cameraPos;      // w unused
@@ -46,7 +47,7 @@ struct alignas(16) FrameGPU
     glm::vec2 jitter;
     glm::vec2 pad1;
 };
-static_assert(sizeof(FrameGPU) == 448, "FrameGPU size mismatch — MSL constant buffer will be wrong");
+static_assert(sizeof(FrameGPU) == 512, "FrameGPU size mismatch — MSL constant buffer will be wrong");
 
 // ─── ModelGPU ─────────────────────────────────────────────────────────────────
 // Per-draw-call data uploaded to buffer index 1 (vertex stage).

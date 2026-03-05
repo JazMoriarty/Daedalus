@@ -19,6 +19,7 @@ struct FrameConstants      // buffer(0), vertex + fragment + compute
     float4x4 viewProj;
     float4x4 invViewProj;
     float4x4 prevViewProj;
+    float4x4 sunViewProj;
 
     float4 cameraPos;     // w unused
     float4 cameraDir;     // w unused
