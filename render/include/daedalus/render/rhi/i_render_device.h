@@ -69,6 +69,14 @@ public:
                  ShaderStage           stage,
                  std::string_view      entryPoint) = 0;
 
+    /// Load a pre-compiled shader function from a binary library on disk.
+    /// `libraryPath` is an absolute path to a .metallib (Metal) or SPIR-V module (Vulkan).
+    /// Libraries are cached by path — repeated calls with the same path reuse the loaded library.
+    [[nodiscard]] virtual std::unique_ptr<IShader>
+    createShaderFromLibrary(std::string_view libraryPath,
+                            ShaderStage      stage,
+                            std::string_view entryPoint) = 0;
+
     // ─── Pipelines ────────────────────────────────────────────────────────────
 
     [[nodiscard]] virtual std::unique_ptr<IPipeline>

@@ -12,6 +12,7 @@
 #include "daedalus/render/rhi/i_command_queue.h"
 #include "daedalus/render/rhi/i_command_buffer.h"
 #include "daedalus/render/rhi/i_render_pass_encoder.h"
+#include "daedalus/render/rhi/i_compute_pass_encoder.h"
 #include "daedalus/render/rhi/i_swapchain.h"
 #include "daedalus/render/rhi/i_buffer.h"
 #include "daedalus/render/rhi/i_texture.h"
@@ -25,6 +26,7 @@
 
 #include <string>
 #include <string_view>
+#include <unordered_map>
 
 namespace daedalus::rhi
 {
@@ -110,6 +112,100 @@ static MTLSamplerAddressMode toMTL(SamplerDescriptor::AddressMode m) noexcept
         case SamplerDescriptor::AddressMode::ClampToBorder:return MTLSamplerAddressModeClampToBorderColor;
     }
     return MTLSamplerAddressModeRepeat;
+}
+
+static MTLVertexFormat toMTL(VertexFormat fmt) noexcept
+{
+    switch (fmt)
+    {
+        case VertexFormat::Float:            return MTLVertexFormatFloat;
+        case VertexFormat::Float2:           return MTLVertexFormatFloat2;
+        case VertexFormat::Float3:           return MTLVertexFormatFloat3;
+        case VertexFormat::Float4:           return MTLVertexFormatFloat4;
+        case VertexFormat::Half2:            return MTLVertexFormatHalf2;
+        case VertexFormat::Half4:            return MTLVertexFormatHalf4;
+        case VertexFormat::UInt:             return MTLVertexFormatUInt;
+        case VertexFormat::UInt2:            return MTLVertexFormatUInt2;
+        case VertexFormat::UByte4Normalized: return MTLVertexFormatUChar4Normalized;
+        case VertexFormat::Short2Normalized: return MTLVertexFormatShort2Normalized;
+    }
+    return MTLVertexFormatFloat;
+}
+
+static MTLCompareFunction toMTL(CompareFunction fn) noexcept
+{
+    switch (fn)
+    {
+        case CompareFunction::Never:        return MTLCompareFunctionNever;
+        case CompareFunction::Less:         return MTLCompareFunctionLess;
+        case CompareFunction::LessEqual:    return MTLCompareFunctionLessEqual;
+        case CompareFunction::Equal:        return MTLCompareFunctionEqual;
+        case CompareFunction::GreaterEqual: return MTLCompareFunctionGreaterEqual;
+        case CompareFunction::Greater:      return MTLCompareFunctionGreater;
+        case CompareFunction::NotEqual:     return MTLCompareFunctionNotEqual;
+        case CompareFunction::Always:       return MTLCompareFunctionAlways;
+    }
+    return MTLCompareFunctionLess;
+}
+
+static MTLCullMode toMTL(CullMode mode) noexcept
+{
+    switch (mode)
+    {
+        case CullMode::None:  return MTLCullModeNone;
+        case CullMode::Front: return MTLCullModeFront;
+        case CullMode::Back:  return MTLCullModeBack;
+    }
+    return MTLCullModeNone;
+}
+
+static MTLBlendFactor toMTL(BlendFactor f) noexcept
+{
+    switch (f)
+    {
+        case BlendFactor::Zero:             return MTLBlendFactorZero;
+        case BlendFactor::One:              return MTLBlendFactorOne;
+        case BlendFactor::SrcAlpha:         return MTLBlendFactorSourceAlpha;
+        case BlendFactor::OneMinusSrcAlpha: return MTLBlendFactorOneMinusSourceAlpha;
+        case BlendFactor::DstAlpha:         return MTLBlendFactorDestinationAlpha;
+        case BlendFactor::OneMinusDstAlpha: return MTLBlendFactorOneMinusDestinationAlpha;
+        case BlendFactor::SrcColor:         return MTLBlendFactorSourceColor;
+        case BlendFactor::OneMinusSrcColor: return MTLBlendFactorOneMinusSourceColor;
+    }
+    return MTLBlendFactorOne;
+}
+
+static MTLBlendOperation toMTL(BlendOperation op) noexcept
+{
+    switch (op)
+    {
+        case BlendOperation::Add:             return MTLBlendOperationAdd;
+        case BlendOperation::Subtract:        return MTLBlendOperationSubtract;
+        case BlendOperation::ReverseSubtract: return MTLBlendOperationReverseSubtract;
+        case BlendOperation::Min:             return MTLBlendOperationMin;
+        case BlendOperation::Max:             return MTLBlendOperationMax;
+    }
+    return MTLBlendOperationAdd;
+}
+
+static u32 formatBytesPerPixel(TextureFormat fmt) noexcept
+{
+    switch (fmt)
+    {
+        case TextureFormat::RGBA8Unorm:
+        case TextureFormat::RGBA8Unorm_sRGB:
+        case TextureFormat::BGRA8Unorm:
+        case TextureFormat::BGRA8Unorm_sRGB:
+        case TextureFormat::R11G11B10Float:
+        case TextureFormat::Depth32Float:
+        case TextureFormat::RG16Float:
+        case TextureFormat::R32Float:
+        case TextureFormat::Depth24Stencil8: return 4;
+        case TextureFormat::RGBA16Float:
+        case TextureFormat::RG32Float:       return 8;
+        case TextureFormat::RGBA32Float:     return 16;
+        default:                             return 4;
+    }
 }
 
 // ─── MetalTexture ─────────────────────────────────────────────────────────────
@@ -212,17 +308,27 @@ private:
 class MetalPipeline final : public IPipeline
 {
 public:
-    explicit MetalPipeline(id<MTLRenderPipelineState> pso) : m_renderPSO(pso) {}
+    /// Render pipeline: owns depth stencil state and cull mode.
+    MetalPipeline(id<MTLRenderPipelineState> pso,
+                  id<MTLDepthStencilState>   dss,
+                  MTLCullMode                cullMode)
+        : m_renderPSO(pso), m_depthStencilState(dss), m_cullMode(cullMode) {}
+
+    /// Compute pipeline.
     explicit MetalPipeline(id<MTLComputePipelineState> pso) : m_computePSO(pso) {}
 
     ~MetalPipeline() override = default;
 
-    [[nodiscard]] id<MTLRenderPipelineState>  renderPSO()  const noexcept { return m_renderPSO;  }
-    [[nodiscard]] id<MTLComputePipelineState> computePSO() const noexcept { return m_computePSO; }
+    [[nodiscard]] id<MTLRenderPipelineState>  renderPSO()         const noexcept { return m_renderPSO;         }
+    [[nodiscard]] id<MTLDepthStencilState>    depthStencilState() const noexcept { return m_depthStencilState; }
+    [[nodiscard]] MTLCullMode                 cullMode()          const noexcept { return m_cullMode;          }
+    [[nodiscard]] id<MTLComputePipelineState> computePSO()        const noexcept { return m_computePSO;        }
 
 private:
-    id<MTLRenderPipelineState>  m_renderPSO  = nil;
-    id<MTLComputePipelineState> m_computePSO = nil;
+    id<MTLRenderPipelineState>  m_renderPSO         = nil;
+    id<MTLDepthStencilState>    m_depthStencilState = nil;
+    MTLCullMode                 m_cullMode          = MTLCullModeNone;
+    id<MTLComputePipelineState> m_computePSO        = nil;
 };
 
 // ─── MetalFence ──────────────────────────────────────────────────────────────
@@ -258,7 +364,78 @@ private:
     bool                 m_completed;
 };
 
-// ─── MetalRenderPassEncoder ───────────────────────────────────────────────────
+// ─── MetalComputePassEncoder ──────────────────────────────────────────────────────────
+
+class MetalComputePassEncoder final : public IComputePassEncoder
+{
+public:
+    explicit MetalComputePassEncoder(id<MTLComputeCommandEncoder> enc)
+        : m_encoder(enc) {}
+
+    ~MetalComputePassEncoder() override = default;
+
+    void setComputePipeline(IPipeline* pipeline) override
+    {
+        auto* mp = static_cast<MetalPipeline*>(pipeline);
+        [m_encoder setComputePipelineState:mp->computePSO()];
+        NSUInteger w = mp->computePSO().threadExecutionWidth;
+        m_tgWidth  = (w > 0) ? w : 64;
+        m_tgHeight = 1;
+    }
+
+    void setBuffer(IBuffer* buffer, u32 offset, u32 index) override
+    {
+        [m_encoder setBuffer:static_cast<MetalBuffer*>(buffer)->mtlBuffer()
+                      offset:offset
+                     atIndex:index];
+    }
+
+    void setTexture(ITexture* texture, u32 index) override
+    {
+        [m_encoder setTexture:static_cast<MetalTexture*>(texture)->mtlTexture()
+                      atIndex:index];
+    }
+
+    void setSampler(ISampler* sampler, u32 index) override
+    {
+        [m_encoder setSamplerState:static_cast<MetalSampler*>(sampler)->mtlSamplerState()
+                           atIndex:index];
+    }
+
+    void setBytes(const void* data, u32 size, u32 index) override
+    {
+        [m_encoder setBytes:data length:size atIndex:index];
+    }
+
+    void dispatch(u32 threadCountX, u32 threadCountY, u32 threadCountZ) override
+    {
+        MTLSize threads = { threadCountX, threadCountY, threadCountZ };
+        MTLSize tg      = { m_tgWidth, m_tgHeight, 1 };
+        [m_encoder dispatchThreads:threads threadsPerThreadgroup:tg];
+    }
+
+    void pushDebugGroup(std::string_view label) override
+    {
+        [m_encoder pushDebugGroup:[NSString stringWithUTF8String:std::string(label).c_str()]];
+    }
+
+    void popDebugGroup() override
+    {
+        [m_encoder popDebugGroup];
+    }
+
+    void end() override
+    {
+        [m_encoder endEncoding];
+    }
+
+private:
+    id<MTLComputeCommandEncoder> m_encoder;
+    NSUInteger                   m_tgWidth  = 8;
+    NSUInteger                   m_tgHeight = 8;
+};
+
+// ─── MetalRenderPassEncoder ───────────────────────────────────────────────────────────
 
 class MetalRenderPassEncoder final : public IRenderPassEncoder
 {
@@ -272,6 +449,9 @@ public:
     {
         auto* mp = static_cast<MetalPipeline*>(pipeline);
         [m_encoder setRenderPipelineState:mp->renderPSO()];
+        if (mp->depthStencilState())
+            [m_encoder setDepthStencilState:mp->depthStencilState()];
+        [m_encoder setCullMode:mp->cullMode()];
     }
 
     void setViewport(const Viewport& vp) override
@@ -295,21 +475,52 @@ public:
 
     void setVertexBuffer(IBuffer* buffer, u32 offset, u32 bindIndex) override
     {
-        auto* mb = static_cast<MetalBuffer*>(buffer);
-        [m_encoder setVertexBuffer:mb->mtlBuffer()
+        [m_encoder setVertexBuffer:static_cast<MetalBuffer*>(buffer)->mtlBuffer()
                             offset:offset
                            atIndex:bindIndex];
     }
 
-    void setIndexBuffer(IBuffer* /*buffer*/, u32 /*offset*/, bool /*use32Bit*/) override
+    void setVertexTexture(ITexture* texture, u32 bindIndex) override
     {
-        // Index buffer is passed directly to drawIndexed in Metal.
-        // Store it here so drawIndexed can use it.
+        [m_encoder setVertexTexture:static_cast<MetalTexture*>(texture)->mtlTexture()
+                            atIndex:bindIndex];
+    }
+
+    void setVertexSampler(ISampler* sampler, u32 bindIndex) override
+    {
+        [m_encoder setVertexSamplerState:static_cast<MetalSampler*>(sampler)->mtlSamplerState()
+                                 atIndex:bindIndex];
+    }
+
+    void setIndexBuffer(IBuffer* buffer, u32 offset, bool use32Bit) override
+    {
+        m_indexBuffer = static_cast<MetalBuffer*>(buffer)->mtlBuffer();
+        m_indexOffset = offset;
+        m_indexType   = use32Bit ? MTLIndexTypeUInt32 : MTLIndexTypeUInt16;
     }
 
     void setBindGroup(u32 /*index*/, IBindGroup* /*group*/) override
     {
-        // Phase 1A: bind groups not yet exercised.
+        // Bind groups not used; resources bound individually.
+    }
+
+    void setFragmentBuffer(IBuffer* buffer, u32 offset, u32 bindIndex) override
+    {
+        [m_encoder setFragmentBuffer:static_cast<MetalBuffer*>(buffer)->mtlBuffer()
+                              offset:offset
+                             atIndex:bindIndex];
+    }
+
+    void setFragmentTexture(ITexture* texture, u32 bindIndex) override
+    {
+        [m_encoder setFragmentTexture:static_cast<MetalTexture*>(texture)->mtlTexture()
+                              atIndex:bindIndex];
+    }
+
+    void setFragmentSampler(ISampler* sampler, u32 bindIndex) override
+    {
+        [m_encoder setFragmentSamplerState:static_cast<MetalSampler*>(sampler)->mtlSamplerState()
+                                   atIndex:bindIndex];
     }
 
     void setVertexBytes(const void* data, u32 size, u32 bindIndex) override
@@ -335,9 +546,16 @@ public:
     void drawIndexed(u32 indexCount, u32 instanceCount, u32 firstIndex,
                      i32 vertexOffset, u32 firstInstance) override
     {
-        // Phase 1A: full indexed draw via stored index buffer in future iteration.
-        (void)indexCount; (void)instanceCount; (void)firstIndex;
-        (void)vertexOffset; (void)firstInstance;
+        DAEDALUS_ASSERT(m_indexBuffer != nil, "drawIndexed: index buffer not set");
+        const u32 indexStride = (m_indexType == MTLIndexTypeUInt32) ? 4u : 2u;
+        [m_encoder drawIndexedPrimitives:MTLPrimitiveTypeTriangle
+                              indexCount:indexCount
+                               indexType:m_indexType
+                             indexBuffer:m_indexBuffer
+                       indexBufferOffset:m_indexOffset + firstIndex * indexStride
+                           instanceCount:instanceCount
+                              baseVertex:vertexOffset
+                            baseInstance:firstInstance];
     }
 
     void end() override
@@ -347,6 +565,9 @@ public:
 
 private:
     id<MTLRenderCommandEncoder> m_encoder;
+    id<MTLBuffer>               m_indexBuffer = nil;
+    u32                         m_indexOffset = 0;
+    MTLIndexType                m_indexType   = MTLIndexTypeUInt32;
 };
 
 // ─── MetalSwapchain ───────────────────────────────────────────────────────────
@@ -471,8 +692,19 @@ public:
             enc.label = [NSString stringWithUTF8String:desc.debugLabel.c_str()];
         }
 
-        m_encoder = std::make_unique<MetalRenderPassEncoder>(enc);
-        return m_encoder.get();
+        m_renderEncoder = std::make_unique<MetalRenderPassEncoder>(enc);
+        return m_renderEncoder.get();
+    }
+
+    [[nodiscard]] IComputePassEncoder*
+    beginComputePass(std::string_view debugLabel = {}) override
+    {
+        id<MTLComputeCommandEncoder> enc = [m_cmdBuf computeCommandEncoder];
+        DAEDALUS_ASSERT(enc != nil, "beginComputePass: failed to create encoder");
+        if (!debugLabel.empty())
+            enc.label = [NSString stringWithUTF8String:std::string(debugLabel).c_str()];
+        m_computeEncoder = std::make_unique<MetalComputePassEncoder>(enc);
+        return m_computeEncoder.get();
     }
 
     void copyBuffer(IBuffer* src, usize srcOffset,
@@ -484,6 +716,14 @@ public:
                     toBuffer:static_cast<MetalBuffer*>(dst)->mtlBuffer()
            destinationOffset:dstOffset
                         size:size];
+        [blit endEncoding];
+    }
+
+    void copyTexture(ITexture* src, ITexture* dst) override
+    {
+        id<MTLBlitCommandEncoder> blit = [m_cmdBuf blitCommandEncoder];
+        [blit copyFromTexture:static_cast<MetalTexture*>(src)->mtlTexture()
+                    toTexture:static_cast<MetalTexture*>(dst)->mtlTexture()];
         [blit endEncoding];
     }
 
@@ -512,8 +752,9 @@ public:
     }
 
 private:
-    id<MTLCommandBuffer>                m_cmdBuf;
-    std::unique_ptr<MetalRenderPassEncoder> m_encoder;
+    id<MTLCommandBuffer>                     m_cmdBuf;
+    std::unique_ptr<MetalRenderPassEncoder>  m_renderEncoder;
+    std::unique_ptr<MetalComputePassEncoder> m_computeEncoder;
 };
 
 // ─── MetalCommandQueue ────────────────────────────────────────────────────────
@@ -582,7 +823,7 @@ public:
 
         layer.device          = m_device;
         layer.pixelFormat     = MTLPixelFormatBGRA8Unorm;
-        layer.framebufferOnly = YES;
+        layer.framebufferOnly = NO;  // allow shader reads from swapchain texture
         layer.drawableSize    = CGSizeMake(static_cast<CGFloat>(width),
                                            static_cast<CGFloat>(height));
 
@@ -631,10 +872,21 @@ public:
         if (hasFlag(desc.usage, TextureUsage::RenderTarget))usage |= MTLTextureUsageRenderTarget;
         if (hasFlag(desc.usage, TextureUsage::DepthStencil))usage |= MTLTextureUsageRenderTarget;
         mtlDesc.usage = usage;
-        mtlDesc.storageMode = MTLStorageModePrivate;
+        // Textures with CPU init data use shared storage so replaceRegion can upload.
+        mtlDesc.storageMode = (desc.initData != nullptr)
+            ? MTLStorageModeShared : MTLStorageModePrivate;
 
         id<MTLTexture> tex = [m_device newTextureWithDescriptor:mtlDesc];
         DAEDALUS_ASSERT(tex != nil, "createTexture: failed");
+
+        if (desc.initData)
+        {
+            const u32 bytesPerRow = desc.width * formatBytesPerPixel(desc.format);
+            [tex replaceRegion:MTLRegionMake2D(0, 0, desc.width, desc.height)
+                   mipmapLevel:0
+                     withBytes:desc.initData
+                   bytesPerRow:bytesPerRow];
+        }
 
         if (!desc.debugName.empty())
         {
@@ -691,6 +943,35 @@ public:
         return std::make_unique<MetalShader>(func, stage, std::string(entryPoint));
     }
 
+    [[nodiscard]] std::unique_ptr<IShader>
+    createShaderFromLibrary(std::string_view libraryPath,
+                            ShaderStage      stage,
+                            std::string_view entryPoint) override
+    {
+        std::string pathStr(libraryPath);
+        id<MTLLibrary> lib = nil;
+        auto it = m_libraryCache.find(pathStr);
+        if (it != m_libraryCache.end())
+        {
+            lib = it->second;
+        }
+        else
+        {
+            NSURL* url = [NSURL fileURLWithPath:
+                [NSString stringWithUTF8String:pathStr.c_str()]];
+            NSError* error = nil;
+            lib = [m_device newLibraryWithURL:url error:&error];
+            DAEDALUS_ASSERT(lib != nil,
+                error ? [[error localizedDescription] UTF8String]
+                      : "createShaderFromLibrary: failed to load .metallib");
+            m_libraryCache[pathStr] = lib;
+        }
+        NSString* name = [NSString stringWithUTF8String:std::string(entryPoint).c_str()];
+        id<MTLFunction> func = [lib newFunctionWithName:name];
+        DAEDALUS_ASSERT(func != nil, "createShaderFromLibrary: entry point not found");
+        return std::make_unique<MetalShader>(func, stage, std::string(entryPoint));
+    }
+
     // ─── Pipelines ────────────────────────────────────────────────────────────
 
     [[nodiscard]] std::unique_ptr<IPipeline>
@@ -699,28 +980,52 @@ public:
         MTLRenderPipelineDescriptor* pd = [[MTLRenderPipelineDescriptor alloc] init];
 
         if (desc.vertexShader)
-        {
             pd.vertexFunction   = static_cast<MetalShader*>(desc.vertexShader)->mtlFunction();
-        }
         if (desc.fragmentShader)
-        {
             pd.fragmentFunction = static_cast<MetalShader*>(desc.fragmentShader)->mtlFunction();
+
+        // ─── Vertex descriptor ────────────────────────────────────────────────
+        if (!desc.vertexAttributes.empty())
+        {
+            MTLVertexDescriptor* vd = [MTLVertexDescriptor vertexDescriptor];
+            for (const auto& attr : desc.vertexAttributes)
+            {
+                vd.attributes[attr.location].format      = toMTL(attr.format);
+                vd.attributes[attr.location].offset      = attr.offset;
+                vd.attributes[attr.location].bufferIndex = attr.bufferIndex;
+            }
+            for (u32 i = 0; i < static_cast<u32>(desc.vertexBufferLayouts.size()); ++i)
+            {
+                const u32 bufIdx = desc.vertexBufferLayouts[i].bufferIndex;
+                vd.layouts[bufIdx].stride       = desc.vertexBufferLayouts[i].stride;
+                vd.layouts[bufIdx].stepFunction = MTLVertexStepFunctionPerVertex;
+            }
+            pd.vertexDescriptor = vd;
         }
 
+        // ─── Color attachments + blend ────────────────────────────────────────
         for (u32 i = 0; i < desc.colorAttachmentCount; ++i)
         {
             pd.colorAttachments[i].pixelFormat = toMTL(desc.colorFormats[i]);
+            const auto& bs = desc.blendStates[i];
+            if (bs.blendEnabled)
+            {
+                pd.colorAttachments[i].blendingEnabled             = YES;
+                pd.colorAttachments[i].sourceRGBBlendFactor        = toMTL(bs.srcRGB);
+                pd.colorAttachments[i].destinationRGBBlendFactor   = toMTL(bs.dstRGB);
+                pd.colorAttachments[i].rgbBlendOperation           = toMTL(bs.rgbOp);
+                pd.colorAttachments[i].sourceAlphaBlendFactor      = toMTL(bs.srcAlpha);
+                pd.colorAttachments[i].destinationAlphaBlendFactor = toMTL(bs.dstAlpha);
+                pd.colorAttachments[i].alphaBlendOperation         = toMTL(bs.alphaOp);
+            }
         }
 
+        // ─── Depth attachment ─────────────────────────────────────────────────
         if (desc.depthFormat != TextureFormat::Invalid)
-        {
             pd.depthAttachmentPixelFormat = toMTL(desc.depthFormat);
-        }
 
         if (!desc.debugName.empty())
-        {
             pd.label = [NSString stringWithUTF8String:desc.debugName.c_str()];
-        }
 
         NSError* error = nil;
         id<MTLRenderPipelineState> pso =
@@ -729,7 +1034,18 @@ public:
             error ? [[error localizedDescription] UTF8String]
                   : "createRenderPipeline: failed");
 
-        return std::make_unique<MetalPipeline>(pso);
+        // ─── Depth stencil state ──────────────────────────────────────────────
+        id<MTLDepthStencilState> dss = nil;
+        if (desc.depthTest || desc.depthWrite)
+        {
+            MTLDepthStencilDescriptor* dsd = [[MTLDepthStencilDescriptor alloc] init];
+            dsd.depthCompareFunction = desc.depthTest
+                ? toMTL(desc.depthCompare) : MTLCompareFunctionAlways;
+            dsd.depthWriteEnabled    = desc.depthWrite ? YES : NO;
+            dss = [m_device newDepthStencilStateWithDescriptor:dsd];
+        }
+
+        return std::make_unique<MetalPipeline>(pso, dss, toMTL(desc.cullMode));
     }
 
     [[nodiscard]] std::unique_ptr<IPipeline>
@@ -766,8 +1082,9 @@ public:
     }
 
 private:
-    id<MTLDevice> m_device;
-    std::string   m_deviceName;
+    id<MTLDevice>                                   m_device;
+    std::string                                     m_deviceName;
+    std::unordered_map<std::string, id<MTLLibrary>> m_libraryCache;
 };
 
 // ─── Factory ─────────────────────────────────────────────────────────────────

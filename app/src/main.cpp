@@ -1,7 +1,7 @@
 // Daedalus Engine — Application Entry Point
-// Phase 1A: SDL3 + Metal window with a per-frame clear-colour render.
-// Exercises the full RHI stack: device → queue → swapchain → command buffer →
-// render pass (clear) → present → commit.
+// Phase 1B: SDL3 + Metal deferred renderer.
+// Deferred PBR pipeline: depth-prepass → G-buffer → SSAO → lighting
+//   → skybox → TAA → bloom → tone-mapping.
 
 #include "daedalus/core/assert.h"
 #include "daedalus/core/create_platform.h"
@@ -12,9 +12,15 @@
 #include "daedalus/render/rhi/i_command_queue.h"
 #include "daedalus/render/rhi/i_command_buffer.h"
 #include "daedalus/render/rhi/i_swapchain.h"
+#include "daedalus/render/frame_renderer.h"
+#include "daedalus/render/scene_view.h"
 
 #include <SDL3/SDL.h>
+#include <glm/glm.hpp>
+#include <glm/gtc/matrix_transform.hpp>
 
+#include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <memory>
 
@@ -120,12 +126,33 @@ int main(int /*argc*/, char* /*argv*/[])
 
     // ─── RHI device + swapchain ───────────────────────────────────────────────
 
-    auto device   = rhi::createRenderDevice();
-    auto queue    = device->createCommandQueue("Main Queue");
+    auto device    = rhi::createRenderDevice();
+    auto queue     = device->createCommandQueue("Main Queue");
     auto swapchain = device->createSwapchain(window, WINDOW_W, WINDOW_H);
 
     std::printf("[Daedalus] GPU: %s\n",
                 std::string(device->deviceName()).c_str());
+
+    // ─── FrameRenderer ────────────────────────────────────────────────────────
+
+    const std::string metalLibPath =
+        platform->getExecutableDir() + "/daedalus_shaders.metallib";
+    std::printf("[Daedalus] Shader library: %s\n", metalLibPath.c_str());
+
+    render::FrameRenderer renderer;
+    renderer.initialize(*device, metalLibPath, WINDOW_W, WINDOW_H);
+
+    // ─── Frame timing + camera state ─────────────────────────────────────────
+
+    using Clock   = std::chrono::steady_clock;
+    auto  startTP = Clock::now();
+    auto  prevTP  = startTP;
+
+    glm::mat4 prevView(1.0f);
+    glm::mat4 prevProj(1.0f);
+    u32       frameIdx = 0;
+    u32       swapW    = WINDOW_W;
+    u32       swapH    = WINDOW_H;
 
     // ─── Main loop ────────────────────────────────────────────────────────────
 
@@ -142,36 +169,61 @@ int main(int /*argc*/, char* /*argv*/[])
             }
             else if (event.type == SDL_EVENT_WINDOW_RESIZED)
             {
-                const u32 w = static_cast<u32>(event.window.data1);
-                const u32 h = static_cast<u32>(event.window.data2);
-                swapchain->resize(w, h);
+                swapW = static_cast<u32>(event.window.data1);
+                swapH = static_cast<u32>(event.window.data2);
+                swapchain->resize(swapW, swapH);
+                renderer.resize(*device, swapW, swapH);
             }
         }
 
         if (!running) { break; }
 
-        // Acquire drawable
-        ITexture* drawable = swapchain->nextDrawable();
+        // ── Timing ────────────────────────────────────────────────────────────
+        const auto  nowTP   = Clock::now();
+        const float time    = std::chrono::duration<float>(nowTP - startTP).count();
+        const float dt      = std::chrono::duration<float>(nowTP - prevTP).count();
+        prevTP = nowTP;
 
-        // Build render pass: clear to a dark midnight-blue
-        RenderPassDescriptor rpd;
-        rpd.colorAttachmentCount = 1;
-        rpd.colorAttachments[0].texture    = drawable;
-        rpd.colorAttachments[0].loadAction = LoadAction::Clear;
-        rpd.colorAttachments[0].storeAction= StoreAction::Store;
-        rpd.colorAttachments[0].clearColor = { 0.05f, 0.05f, 0.12f, 1.0f };
-        rpd.debugLabel = "Clear Pass";
+        // ── Camera: slow orbit around the room centre at head height ──────────
+        const float angle   = time * 0.25f;  // one full rotation every ~25 s
+        const float camR    = 3.5f;
+        const glm::vec3 eye    = { std::cos(angle) * camR, 1.8f, std::sin(angle) * camR };
+        const glm::vec3 target = { 0.0f, 1.8f, 0.0f };
+        const glm::vec3 up     = { 0.0f, 1.0f, 0.0f };
 
-        // Record commands
-        auto cmdBuf = queue->createCommandBuffer("Frame");
-        cmdBuf->pushDebugGroup("Frame");
+        const float fovY   = glm::radians(60.0f);
+        const float aspect = static_cast<float>(swapW) / static_cast<float>(swapH);
 
-        IRenderPassEncoder* enc = cmdBuf->beginRenderPass(rpd);
-        enc->end();
+        const glm::mat4 view = glm::lookAtLH(eye, target, up);
+        const glm::mat4 proj = glm::perspectiveLH_ZO(fovY, aspect, 0.1f, 50.0f);
 
-        cmdBuf->present(*swapchain);
-        cmdBuf->popDebugGroup();
-        cmdBuf->commit();
+        // ── Build SceneView ───────────────────────────────────────────────────
+        render::SceneView scene;
+        scene.view      = view;
+        scene.proj      = proj;
+        scene.prevView  = prevView;
+        scene.prevProj  = prevProj;
+        scene.cameraPos = eye;
+        scene.cameraDir = glm::normalize(target - eye);
+        scene.time      = time;
+        scene.deltaTime = dt;
+        scene.frameIndex = frameIdx;
+
+        // Single warm overhead point light
+        scene.pointLights.push_back({
+            glm::vec3(0.0f, 3.6f, 0.0f),  // position
+            4.0f,                           // radius
+            glm::vec3(1.0f, 0.92f, 0.78f), // warm white
+            3.5f                            // intensity
+        });
+
+        // ── Render ────────────────────────────────────────────────────────────
+        renderer.renderFrame(*device, *queue, *swapchain, scene, swapW, swapH);
+
+        // ── Save previous frame matrices ──────────────────────────────────────
+        prevView = view;
+        prevProj = proj;
+        ++frameIdx;
     }
 
     // ─── Cleanup ──────────────────────────────────────────────────────────────

@@ -124,6 +124,7 @@ struct TextureDescriptor
     u32          arrayLayers= 1;
     TextureFormat format    = TextureFormat::RGBA8Unorm;
     TextureUsage  usage     = TextureUsage::ShaderRead;
+    const void*   initData  = nullptr; ///< Optional CPU data uploaded to mip level 0.
     std::string   debugName;
 };
 
@@ -171,6 +172,95 @@ struct RenderPassDescriptor
     DepthAttachmentDescriptor depthAttachment;
     bool                 hasDepthAttachment   = false;
     std::string          debugLabel;
+};
+
+// ─── Vertex formats ───────────────────────────────────────────────────────────
+
+enum class VertexFormat : u32
+{
+    Float,               ///< 1 × f32 (4 bytes)
+    Float2,              ///< 2 × f32 (8 bytes)
+    Float3,              ///< 3 × f32 (12 bytes)
+    Float4,              ///< 4 × f32 (16 bytes)
+    Half2,               ///< 2 × f16 (4 bytes)
+    Half4,               ///< 4 × f16 (8 bytes)
+    UInt,                ///< 1 × u32 (4 bytes)
+    UInt2,               ///< 2 × u32 (8 bytes)
+    UByte4Normalized,    ///< 4 × u8 [0,1] normalized (4 bytes)
+    Short2Normalized,    ///< 2 × i16 [-1,1] normalized (4 bytes)
+};
+
+/// Describes one vertex attribute (position, normal, UV, …).
+struct VertexAttributeDescriptor
+{
+    u32          location;             ///< Shader attribute index [[attribute(N)]]
+    VertexFormat format;
+    u32          offset;               ///< Byte offset within the vertex struct
+    u32          bufferIndex = 0;      ///< Which vertex buffer this attribute comes from
+};
+
+/// Per vertex-buffer stride declaration.
+struct VertexBufferLayoutDescriptor
+{
+    u32 stride      = 0;               ///< Bytes per vertex
+    u32 bufferIndex = 0;               ///< Which GPU buffer slot this stream occupies
+};
+
+// ─── Depth / stencil ─────────────────────────────────────────────────────────
+
+enum class CompareFunction : u32
+{
+    Never,
+    Less,
+    LessEqual,
+    Equal,
+    GreaterEqual,
+    Greater,
+    NotEqual,
+    Always,
+};
+
+// ─── Cull mode ────────────────────────────────────────────────────────────────
+
+enum class CullMode : u32
+{
+    None,
+    Front,
+    Back,
+};
+
+// ─── Blend state ─────────────────────────────────────────────────────────────
+
+enum class BlendFactor : u32
+{
+    Zero,
+    One,
+    SrcAlpha,
+    OneMinusSrcAlpha,
+    DstAlpha,
+    OneMinusDstAlpha,
+    SrcColor,
+    OneMinusSrcColor,
+};
+
+enum class BlendOperation : u32
+{
+    Add,
+    Subtract,
+    ReverseSubtract,
+    Min,
+    Max,
+};
+
+struct ColorAttachmentBlendDescriptor
+{
+    bool           blendEnabled  = false;
+    BlendFactor    srcRGB        = BlendFactor::One;
+    BlendFactor    dstRGB        = BlendFactor::Zero;
+    BlendOperation rgbOp         = BlendOperation::Add;
+    BlendFactor    srcAlpha      = BlendFactor::One;
+    BlendFactor    dstAlpha      = BlendFactor::Zero;
+    BlendOperation alphaOp       = BlendOperation::Add;
 };
 
 // ─── Viewport & scissor ───────────────────────────────────────────────────────

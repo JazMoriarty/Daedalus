@@ -2,6 +2,8 @@
 
 #include "daedalus/render/rhi/rhi_types.h"
 #include "daedalus/render/rhi/i_buffer.h"
+#include "daedalus/render/rhi/i_texture.h"
+#include "daedalus/render/rhi/i_sampler.h"
 #include "daedalus/render/rhi/i_pipeline.h"
 #include "daedalus/render/rhi/i_bind_group.h"
 
@@ -28,13 +30,20 @@ public:
     virtual void setViewport(const Viewport& viewport)       = 0;
     virtual void setScissor(const ScissorRect& rect)         = 0;
 
-    virtual void setVertexBuffer(IBuffer* buffer, u32 offset, u32 bindIndex) = 0;
-    virtual void setIndexBuffer(IBuffer* buffer, u32 offset, bool use32Bit)  = 0;
-    virtual void setBindGroup(u32 index, IBindGroup* group)                  = 0;
+    virtual void setVertexBuffer  (IBuffer*  buffer,  u32 offset, u32 bindIndex) = 0;
+    virtual void setVertexTexture  (ITexture* texture,             u32 bindIndex) = 0;
+    virtual void setIndexBuffer    (IBuffer*  buffer,  u32 offset, bool use32Bit) = 0;
+    virtual void setBindGroup      (u32 index, IBindGroup* group)                 = 0;
 
-    // ─── Push constants ───────────────────────────────────────────────────────
+    // Fragment-stage resources
+    virtual void setFragmentBuffer (IBuffer*  buffer,  u32 offset, u32 bindIndex) = 0;
+    virtual void setFragmentTexture(ITexture* texture,             u32 bindIndex) = 0;
+    virtual void setFragmentSampler(ISampler* sampler,             u32 bindIndex) = 0;
+    virtual void setVertexSampler  (ISampler* sampler,             u32 bindIndex) = 0;
 
-    virtual void setVertexBytes(const void* data, u32 size, u32 bindIndex) = 0;
+    // ─── Push constants ───────────────────────────────────────────────────────────
+
+    virtual void setVertexBytes  (const void* data, u32 size, u32 bindIndex) = 0;
     virtual void setFragmentBytes(const void* data, u32 size, u32 bindIndex) = 0;
 
     // ─── Draw ─────────────────────────────────────────────────────────────────

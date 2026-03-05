@@ -2,6 +2,7 @@
 
 #include "daedalus/render/rhi/rhi_types.h"
 #include "daedalus/render/rhi/i_render_pass_encoder.h"
+#include "daedalus/render/rhi/i_compute_pass_encoder.h"
 #include "daedalus/render/rhi/i_fence.h"
 
 #include <memory>
@@ -38,12 +39,23 @@ public:
     [[nodiscard]] virtual IRenderPassEncoder*
     beginRenderPass(const RenderPassDescriptor& desc) = 0;
 
-    // ─── Resource transitions (blit / copy) ───────────────────────────────────
+    // ─── Compute pass ───────────────────────────────────────────────────────────
+
+    /// Open a compute pass.  Returns a borrowed pointer to the encoder;
+    /// the encoder is owned by this command buffer.
+    /// Must call encoder->end() before opening another pass or calling commit.
+    [[nodiscard]] virtual IComputePassEncoder*
+    beginComputePass(std::string_view debugLabel = {}) = 0;
+
+    // ─── Resource transitions (blit / copy) ────────────────────────────────────────────
 
     /// Copy a region of bytes from one buffer to another.
     virtual void copyBuffer(IBuffer* src, usize srcOffset,
                             IBuffer* dst, usize dstOffset,
                             usize    size) = 0;
+
+    /// Copy entire texture contents from src to dst (same format and dimensions).
+    virtual void copyTexture(ITexture* src, ITexture* dst) = 0;
 
     // ─── Presentation ─────────────────────────────────────────────────────────
 
