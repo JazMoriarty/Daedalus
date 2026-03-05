@@ -87,6 +87,39 @@ set(JSON_BuildTests     OFF CACHE BOOL "" FORCE)
 set(JSON_Install        OFF CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(nlohmann_json)
 
+# Dear ImGui — dockable immediate-mode UI (editor)
+FetchContent_Declare(
+    imgui
+    GIT_REPOSITORY https://github.com/ocornut/imgui.git
+    GIT_TAG        docking
+    GIT_SHALLOW    TRUE
+)
+FetchContent_MakeAvailable(imgui)
+
+# DaedalusImGui — compiles ImGui core + SDL3 + Metal backends into one static lib.
+# The Metal backend is Obj-C++ (.mm), so we need OBJCXX enabled (already set above).
+add_library(DaedalusImGui STATIC
+    ${imgui_SOURCE_DIR}/imgui.cpp
+    ${imgui_SOURCE_DIR}/imgui_draw.cpp
+    ${imgui_SOURCE_DIR}/imgui_tables.cpp
+    ${imgui_SOURCE_DIR}/imgui_widgets.cpp
+    ${imgui_SOURCE_DIR}/backends/imgui_impl_sdl3.cpp
+    ${imgui_SOURCE_DIR}/backends/imgui_impl_metal.mm
+)
+target_include_directories(DaedalusImGui PUBLIC
+    ${imgui_SOURCE_DIR}
+    ${imgui_SOURCE_DIR}/backends
+)
+target_compile_definitions(DaedalusImGui PUBLIC IMGUI_ENABLE_DOCKING)
+target_compile_features(DaedalusImGui PUBLIC cxx_std_23)
+target_link_libraries(DaedalusImGui PUBLIC SDL3::SDL3-static)
+if(APPLE)
+    target_link_libraries(DaedalusImGui PUBLIC
+        "-framework Metal"
+        "-framework QuartzCore"
+    )
+endif()
+
 # GoogleTest — unit testing
 FetchContent_Declare(
     googletest

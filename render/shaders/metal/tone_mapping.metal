@@ -30,7 +30,7 @@ vertex TonemapVertOut tonemap_vert(uint vid [[vertex_id]])
     return out;
 }
 
-constant float BLOOM_STRENGTH = 0.04;
+constant float BLOOM_STRENGTH = 0.18;
 constant float EXPOSURE       = 1.0;
 
 fragment float4 tonemap_frag(

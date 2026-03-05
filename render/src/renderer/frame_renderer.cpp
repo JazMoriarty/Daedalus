@@ -96,6 +96,7 @@ void FrameRenderer::createPSOs(IRenderDevice& device, const std::string& lib)
     auto vsTonemap       = loadVS("tonemap_vert");
     auto fsTonemap       = loadFS("tonemap_frag");
     auto csSSAO          = loadCS("ssao_main");
+    auto csSSAOBlur      = loadCS("ssao_blur");
     auto csLighting      = loadCS("lighting_main");
 
     // ── G-buffer (4 colour targets + depth write — spec §Pass 4 layout) ────────────────
@@ -147,7 +148,15 @@ void FrameRenderer::createPSOs(IRenderDevice& device, const std::string& lib)
         m_ssaoPSO = device.createComputePipeline(d);
     }
 
-    // ── Lighting compute ──────────────────────────────────────────────────────
+    // ── SSAO bilateral blur compute
+    {
+        ComputePipelineDescriptor d;
+        d.computeShader = csSSAOBlur.get();
+        d.debugName     = "SSAOBlur";
+        m_ssaoBlurPSO = device.createComputePipeline(d);
+    }
+
+    // ── Lighting compute
     {
         ComputePipelineDescriptor d;
         d.computeShader = csLighting.get();
@@ -547,6 +556,11 @@ void FrameRenderer::renderFrame(IRenderDevice& device,
         TextureUsage::ShaderRead | TextureUsage::ShaderWrite,
         "SSAO"
     });
+    const RGTextureId ssaoBlurId = m_graph.createTexture({
+        0, 0, TextureFormat::R32Float,
+        TextureUsage::ShaderRead | TextureUsage::ShaderWrite,
+        "SSAOBlur"
+    });
     const RGTextureId hdrId = m_graph.createTexture({
         0, 0, TextureFormat::RGBA16Float,
         TextureUsage::RenderTarget | TextureUsage::ShaderRead | TextureUsage::ShaderWrite,
@@ -584,6 +598,7 @@ void FrameRenderer::renderFrame(IRenderDevice& device,
     ITexture* gEmissiveTex = m_graph.get(gEmissiveId);
     ITexture* gMotionTex  = m_graph.get(gMotionId);
     ITexture* ssaoTex     = m_graph.get(ssaoId);
+    ITexture* ssaoBlurTex = m_graph.get(ssaoBlurId);
     ITexture* hdrTex      = m_graph.get(hdrId);
     ITexture* bloomATex   = m_graph.get(bloomAId);
     ITexture* bloomBTex   = m_graph.get(bloomBId);
@@ -605,6 +620,7 @@ void FrameRenderer::renderFrame(IRenderDevice& device,
     IPipeline* pGBuf         = m_gbufferPSO.get();
     IPipeline* pShadow       = m_shadowDepthPSO.get();
     IPipeline* pSSAO         = m_ssaoPSO.get();
+    IPipeline* pSSAOBlur     = m_ssaoBlurPSO.get();
     IPipeline* pLighting     = m_lightingPSO.get();
     IPipeline* pSkybox       = m_skyboxPSO.get();
     IPipeline* pTAA          = m_taaPSO.get();
@@ -722,6 +738,24 @@ void FrameRenderer::renderFrame(IRenderDevice& device,
     }
 
     // ─────────────────────────────────────────────────────────────────────────
+    // Pass 3b — SSAO bilateral blur (compute)
+    // ─────────────────────────────────────────────────────────────────────────
+    {
+        RGComputePassDesc p;
+        p.name    = "SSAOBlur";
+        p.execute = [=](IComputePassEncoder* enc)
+        {
+            enc->setComputePipeline(pSSAOBlur);
+            enc->setTexture(ssaoTex,     0);   // aoIn    (raw AO, read)
+            enc->setTexture(gDepthTex,   1);   // gDepth  (read, depth edge preservation)
+            enc->setTexture(ssaoBlurTex, 2);   // aoOut   (write, smoothed AO)
+            enc->setBuffer(frameBuf, 0, 0);
+            enc->dispatch(swapW, swapH, 1);
+        };
+        m_graph.addComputePass(std::move(p));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
     // Pass 4 — Deferred lighting (compute)
     // ─────────────────────────────────────────────────────────────────────────
     {
@@ -733,7 +767,7 @@ void FrameRenderer::renderFrame(IRenderDevice& device,
             enc->setTexture(gAlbedoTex,    0);   // gAlbedoAO
             enc->setTexture(gNormalTex,    1);   // gNormalRoughMet
             enc->setTexture(gDepthTex,     2);   // gDepth
-            enc->setTexture(ssaoTex,       3);   // ssaoTex
+            enc->setTexture(ssaoBlurTex,   3);   // ssaoTex (blurred AO)
             enc->setTexture(hdrTex,        4);   // hdrOut (write)
             enc->setTexture(shadowDepthTex, 5);  // shadow depth (PCF)
             enc->setTexture(gEmissiveTex,  6);   // gEmissive

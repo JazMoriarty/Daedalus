@@ -24,6 +24,10 @@ public:
     [[nodiscard]] virtual std::unique_ptr<ICommandBuffer>
     createCommandBuffer(std::string_view debugLabel = {}) = 0;
 
+    /// Backend-specific queue handle (e.g. id<MTLCommandQueue> on Metal).
+    /// Intended for editor/platform integration only.
+    [[nodiscard]] virtual void* nativeHandle() const noexcept = 0;
+
 protected:
     ICommandQueue() = default;
 };

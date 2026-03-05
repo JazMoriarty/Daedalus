@@ -225,6 +225,7 @@ public:
     [[nodiscard]] TextureUsage  usage()    const noexcept override { return m_usage;                               }
 
     [[nodiscard]] id<MTLTexture> mtlTexture() const noexcept { return m_texture; }
+    [[nodiscard]] void* nativeHandle() const noexcept override { return (__bridge void*)m_texture; }
 
 private:
     id<MTLTexture> m_texture;
@@ -380,7 +381,7 @@ public:
         [m_encoder setComputePipelineState:mp->computePSO()];
         NSUInteger w = mp->computePSO().threadExecutionWidth;
         m_tgWidth  = (w > 0) ? w : 64;
-        m_tgHeight = 1;
+        m_tgHeight = 8;
     }
 
     void setBuffer(IBuffer* buffer, u32 offset, u32 index) override
@@ -631,6 +632,10 @@ public:
     {
         return m_currentDrawable;
     }
+    [[nodiscard]] void* currentDrawableHandle() noexcept override
+    {
+        return (__bridge void*)m_currentDrawable;
+    }
 
 private:
     CAMetalLayer*                   m_layer;
@@ -732,10 +737,11 @@ public:
 
     void present(ISwapchain& swapchain) override
     {
-        auto& ms = static_cast<MetalSwapchain&>(swapchain);
-        if (id<CAMetalDrawable> drawable = ms.currentDrawable())
+        // Use the escape hatch so MetalOffscreenSwapchain (returns nullptr) is handled
+        // correctly without a static_cast that would crash on the wrong type.
+        if (void* handle = swapchain.currentDrawableHandle())
         {
-            [m_cmdBuf presentDrawable:drawable];
+            [m_cmdBuf presentDrawable:(__bridge id<CAMetalDrawable>)handle];
         }
     }
 
@@ -782,8 +788,71 @@ public:
         return std::make_unique<MetalCommandBuffer>(cmdbuf);
     }
 
+    [[nodiscard]] void* nativeHandle() const noexcept override
+    {
+        return (__bridge void*)m_queue;
+    }
+
 private:
     id<MTLCommandQueue> m_queue;
+};
+
+// ─── MetalOffscreenSwapchain ──────────────────────────────────────────────────────────────────
+// ISwapchain backed by a persistent MTLTexture (no CAMetalLayer / display sync).
+// Used by the editor 3D viewport: FrameRenderer renders into it; ImGui displays it.
+
+class MetalOffscreenSwapchain final : public ISwapchain
+{
+public:
+    MetalOffscreenSwapchain(id<MTLDevice> device, u32 width, u32 height)
+        : m_device(device)
+    {
+        createBacking(width, height);
+    }
+
+    ~MetalOffscreenSwapchain() override = default;
+
+    [[nodiscard]] ITexture* nextDrawable() override
+    {
+        return m_texture.get();
+    }
+
+    void present() override {} // no display sync — intentional no-op
+
+    void resize(u32 width, u32 height) override
+    {
+        if (m_texture && m_texture->width() == width && m_texture->height() == height)
+            return;
+        createBacking(width, height);
+    }
+
+    [[nodiscard]] u32          width()  const noexcept override { return m_texture ? m_texture->width()  : 0u; }
+    [[nodiscard]] u32          height() const noexcept override { return m_texture ? m_texture->height() : 0u; }
+    [[nodiscard]] TextureFormat format() const noexcept override { return TextureFormat::BGRA8Unorm; }
+
+    /// Always nullptr — no CAMetalDrawable for an offscreen surface.
+    [[nodiscard]] void* currentDrawableHandle() noexcept override { return nullptr; }
+
+private:
+    void createBacking(u32 width, u32 height)
+    {
+        DAEDALUS_ASSERT(width > 0 && height > 0, "MetalOffscreenSwapchain: degenerate size");
+        MTLTextureDescriptor* d = [[MTLTextureDescriptor alloc] init];
+        d.textureType = MTLTextureType2D;
+        d.width       = width;
+        d.height      = height;
+        d.pixelFormat = MTLPixelFormatBGRA8Unorm;
+        d.usage       = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+        d.storageMode = MTLStorageModePrivate;
+        id<MTLTexture> tex = [m_device newTextureWithDescriptor:d];
+        DAEDALUS_ASSERT(tex != nil, "MetalOffscreenSwapchain: texture creation failed");
+        tex.label = @"OffscreenViewport";
+        m_texture = std::make_unique<MetalTexture>(
+            tex, TextureUsage::RenderTarget | TextureUsage::ShaderRead);
+    }
+
+    id<MTLDevice>                 m_device;
+    std::unique_ptr<MetalTexture> m_texture;
 };
 
 // ─── MetalRenderDevice ────────────────────────────────────────────────────────
@@ -1078,10 +1147,20 @@ public:
     }
 
     // ─── Diagnostics ──────────────────────────────────────────────────────────
-
     [[nodiscard]] std::string_view deviceName() const noexcept override
     {
         return m_deviceName;
+    }
+
+    [[nodiscard]] void* nativeDevice() const noexcept override
+    {
+        return (__bridge void*)m_device;
+    }
+
+    [[nodiscard]] std::unique_ptr<ISwapchain>
+    createOffscreenSwapchain(u32 width, u32 height) override
+    {
+        return std::make_unique<MetalOffscreenSwapchain>(m_device, width, height);
     }
 
 private:

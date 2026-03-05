@@ -33,6 +33,10 @@ public:
     [[nodiscard]] virtual u32          height() const noexcept = 0;
     [[nodiscard]] virtual TextureFormat format() const noexcept = 0;
 
+    /// Backend-specific handle for the current drawable (e.g. id<CAMetalDrawable> on Metal).
+    /// Returns nullptr for offscreen swapchains or before the first nextDrawable() call.
+    [[nodiscard]] virtual void* currentDrawableHandle() noexcept = 0;
+
 protected:
     ISwapchain() = default;
 };

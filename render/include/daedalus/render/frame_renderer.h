@@ -5,6 +5,7 @@
 //   1. Shadow depth   (render, depth-only from sun POV — 2048×2048)
 //   2. G-buffer       (render, depth + colour in one pass)
 //   3. SSAO           (compute)
+//   3b.SSAOBlur       (compute, bilateral 5×5 depth-aware filter)
 //   4. Lighting       (compute, deferred PBR + PCF shadow)
 //   5. Skybox         (render, procedural sky on background pixels)
 //   6. TAA            (render, temporal anti-aliasing)
@@ -70,6 +71,7 @@ private:
     std::unique_ptr<rhi::IPipeline> m_gbufferPSO;
     std::unique_ptr<rhi::IPipeline> m_shadowDepthPSO;
     std::unique_ptr<rhi::IPipeline> m_ssaoPSO;
+    std::unique_ptr<rhi::IPipeline> m_ssaoBlurPSO;
     std::unique_ptr<rhi::IPipeline> m_lightingPSO;
     std::unique_ptr<rhi::IPipeline> m_skyboxPSO;
     std::unique_ptr<rhi::IPipeline> m_taaPSO;

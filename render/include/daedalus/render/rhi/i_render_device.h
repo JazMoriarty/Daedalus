@@ -40,7 +40,7 @@ public:
     [[nodiscard]] virtual std::unique_ptr<ICommandQueue>
     createCommandQueue(std::string_view debugName = {}) = 0;
 
-    // ─── Swapchain ────────────────────────────────────────────────────────────
+    // ─── Swapchain ─────────────────────────────────────────────────────────────────────────
 
     /// Create a swapchain connected to the native window handle.
     /// `nativeWindowHandle` is an SDL_MetalView* (macOS) or HWND (Windows).
@@ -48,6 +48,11 @@ public:
     createSwapchain(void* nativeWindowHandle,
                     u32   width,
                     u32   height) = 0;
+
+    /// Create an offscreen swapchain backed by a GPU texture (no display sync).
+    /// Used by the editor 3D viewport to render into a texture ImGui then displays.
+    [[nodiscard]] virtual std::unique_ptr<ISwapchain>
+    createOffscreenSwapchain(u32 width, u32 height) = 0;
 
     // ─── Resources ────────────────────────────────────────────────────────────
 
@@ -90,9 +95,13 @@ public:
     [[nodiscard]] virtual std::unique_ptr<IFence>
     createFence() = 0;
 
-    // ─── Diagnostics ──────────────────────────────────────────────────────────
+    // ─── Diagnostics ───────────────────────────────────────────────────────────────────────
 
     [[nodiscard]] virtual std::string_view deviceName() const noexcept = 0;
+
+    /// Backend-specific device handle (e.g. id<MTLDevice> on Metal, VkDevice on Vulkan).
+    /// Intended for editor/platform integration (e.g. ImGui backend init) only.
+    [[nodiscard]] virtual void* nativeDevice() const noexcept = 0;
 
 protected:
     IRenderDevice() = default;
