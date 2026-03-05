@@ -1,0 +1,783 @@
+// metal_render_device.mm
+// Complete Metal backend for all RHI interfaces.
+// Compiled as Objective-C++ (ARC enabled).
+
+#import <Metal/Metal.h>
+#import <QuartzCore/CAMetalLayer.h>
+
+#include "metal_render_device.h"
+
+#include "daedalus/core/assert.h"
+#include "daedalus/render/rhi/i_render_device.h"
+#include "daedalus/render/rhi/i_command_queue.h"
+#include "daedalus/render/rhi/i_command_buffer.h"
+#include "daedalus/render/rhi/i_render_pass_encoder.h"
+#include "daedalus/render/rhi/i_swapchain.h"
+#include "daedalus/render/rhi/i_buffer.h"
+#include "daedalus/render/rhi/i_texture.h"
+#include "daedalus/render/rhi/i_sampler.h"
+#include "daedalus/render/rhi/i_shader.h"
+#include "daedalus/render/rhi/i_pipeline.h"
+#include "daedalus/render/rhi/i_fence.h"
+
+#include <SDL3/SDL.h>
+#include <SDL3/SDL_metal.h>
+
+#include <string>
+#include <string_view>
+
+namespace daedalus::rhi
+{
+
+// ─── Helper: enum conversions ─────────────────────────────────────────────────
+
+static MTLPixelFormat toMTL(TextureFormat fmt) noexcept
+{
+    switch (fmt)
+    {
+        case TextureFormat::RGBA8Unorm:       return MTLPixelFormatRGBA8Unorm;
+        case TextureFormat::RGBA8Unorm_sRGB:  return MTLPixelFormatRGBA8Unorm_sRGB;
+        case TextureFormat::BGRA8Unorm:       return MTLPixelFormatBGRA8Unorm;
+        case TextureFormat::BGRA8Unorm_sRGB:  return MTLPixelFormatBGRA8Unorm_sRGB;
+        case TextureFormat::RGBA16Float:      return MTLPixelFormatRGBA16Float;
+        case TextureFormat::RG16Float:        return MTLPixelFormatRG16Float;
+        case TextureFormat::R32Float:         return MTLPixelFormatR32Float;
+        case TextureFormat::RG32Float:        return MTLPixelFormatRG32Float;
+        case TextureFormat::RGBA32Float:      return MTLPixelFormatRGBA32Float;
+        case TextureFormat::R11G11B10Float:   return MTLPixelFormatRG11B10Float;
+        case TextureFormat::Depth32Float:     return MTLPixelFormatDepth32Float;
+        case TextureFormat::Depth24Stencil8:  return MTLPixelFormatDepth24Unorm_Stencil8;
+        default:                              return MTLPixelFormatInvalid;
+    }
+}
+
+static TextureFormat fromMTL(MTLPixelFormat fmt) noexcept
+{
+    switch (fmt)
+    {
+        case MTLPixelFormatRGBA8Unorm:           return TextureFormat::RGBA8Unorm;
+        case MTLPixelFormatRGBA8Unorm_sRGB:      return TextureFormat::RGBA8Unorm_sRGB;
+        case MTLPixelFormatBGRA8Unorm:           return TextureFormat::BGRA8Unorm;
+        case MTLPixelFormatBGRA8Unorm_sRGB:      return TextureFormat::BGRA8Unorm_sRGB;
+        case MTLPixelFormatRGBA16Float:          return TextureFormat::RGBA16Float;
+        case MTLPixelFormatRG16Float:            return TextureFormat::RG16Float;
+        case MTLPixelFormatR32Float:             return TextureFormat::R32Float;
+        case MTLPixelFormatRG32Float:            return TextureFormat::RG32Float;
+        case MTLPixelFormatRGBA32Float:          return TextureFormat::RGBA32Float;
+        case MTLPixelFormatRG11B10Float:         return TextureFormat::R11G11B10Float;
+        case MTLPixelFormatDepth32Float:         return TextureFormat::Depth32Float;
+        case MTLPixelFormatDepth24Unorm_Stencil8:return TextureFormat::Depth24Stencil8;
+        default:                                 return TextureFormat::Invalid;
+    }
+}
+
+static MTLLoadAction toMTL(LoadAction a) noexcept
+{
+    switch (a)
+    {
+        case LoadAction::Load:     return MTLLoadActionLoad;
+        case LoadAction::Clear:    return MTLLoadActionClear;
+        case LoadAction::DontCare: return MTLLoadActionDontCare;
+    }
+    return MTLLoadActionDontCare;
+}
+
+static MTLStoreAction toMTL(StoreAction a) noexcept
+{
+    switch (a)
+    {
+        case StoreAction::Store:    return MTLStoreActionStore;
+        case StoreAction::DontCare: return MTLStoreActionDontCare;
+        case StoreAction::Resolve:  return MTLStoreActionMultisampleResolve;
+    }
+    return MTLStoreActionStore;
+}
+
+static MTLSamplerMinMagFilter toMTLMinMag(SamplerDescriptor::Filter f) noexcept
+{
+    return f == SamplerDescriptor::Filter::Linear
+           ? MTLSamplerMinMagFilterLinear
+           : MTLSamplerMinMagFilterNearest;
+}
+
+static MTLSamplerAddressMode toMTL(SamplerDescriptor::AddressMode m) noexcept
+{
+    switch (m)
+    {
+        case SamplerDescriptor::AddressMode::Repeat:       return MTLSamplerAddressModeRepeat;
+        case SamplerDescriptor::AddressMode::MirrorRepeat: return MTLSamplerAddressModeMirrorRepeat;
+        case SamplerDescriptor::AddressMode::ClampToEdge:  return MTLSamplerAddressModeClampToEdge;
+        case SamplerDescriptor::AddressMode::ClampToBorder:return MTLSamplerAddressModeClampToBorderColor;
+    }
+    return MTLSamplerAddressModeRepeat;
+}
+
+// ─── MetalTexture ─────────────────────────────────────────────────────────────
+
+class MetalTexture final : public ITexture
+{
+public:
+    explicit MetalTexture(id<MTLTexture> texture, TextureUsage usage = TextureUsage::ShaderRead)
+        : m_texture(texture), m_usage(usage) {}
+
+    ~MetalTexture() override = default;
+
+    [[nodiscard]] u32          width()     const noexcept override { return static_cast<u32>(m_texture.width);     }
+    [[nodiscard]] u32          height()    const noexcept override { return static_cast<u32>(m_texture.height);    }
+    [[nodiscard]] u32          mipLevels() const noexcept override { return static_cast<u32>(m_texture.mipmapLevelCount); }
+    [[nodiscard]] TextureFormat format()   const noexcept override { return fromMTL(m_texture.pixelFormat);        }
+    [[nodiscard]] TextureUsage  usage()    const noexcept override { return m_usage;                               }
+
+    [[nodiscard]] id<MTLTexture> mtlTexture() const noexcept { return m_texture; }
+
+private:
+    id<MTLTexture> m_texture;
+    TextureUsage   m_usage;
+};
+
+// ─── MetalBuffer ─────────────────────────────────────────────────────────────
+
+class MetalBuffer final : public IBuffer
+{
+public:
+    MetalBuffer(id<MTLBuffer> buffer, usize size, BufferUsage usage)
+        : m_buffer(buffer), m_size(size), m_usage(usage) {}
+
+    ~MetalBuffer() override = default;
+
+    [[nodiscard]] usize       size()  const noexcept override { return m_size;  }
+    [[nodiscard]] BufferUsage usage() const noexcept override { return m_usage; }
+
+    [[nodiscard]] void* map()          override { return m_buffer.contents; }
+    void                unmap() noexcept override { /* Metal mapping is persistent */ }
+
+    [[nodiscard]] id<MTLBuffer> mtlBuffer() const noexcept { return m_buffer; }
+
+private:
+    id<MTLBuffer> m_buffer;
+    usize         m_size;
+    BufferUsage   m_usage;
+};
+
+// ─── MetalSampler ────────────────────────────────────────────────────────────
+
+class MetalSampler final : public ISampler
+{
+public:
+    MetalSampler(id<MTLSamplerState> state, SamplerDescriptor desc)
+        : m_state(state), m_desc(std::move(desc)) {}
+
+    ~MetalSampler() override = default;
+
+    [[nodiscard]] const SamplerDescriptor& descriptor() const noexcept override
+    {
+        return m_desc;
+    }
+
+    [[nodiscard]] id<MTLSamplerState> mtlSamplerState() const noexcept { return m_state; }
+
+private:
+    id<MTLSamplerState> m_state;
+    SamplerDescriptor   m_desc;
+};
+
+// ─── MetalShader ─────────────────────────────────────────────────────────────
+
+class MetalShader final : public IShader
+{
+public:
+    MetalShader(id<MTLFunction> function,
+                ShaderStage     stage,
+                std::string     entryPoint)
+        : m_function(function)
+        , m_stage(stage)
+        , m_entryPoint(std::move(entryPoint))
+    {}
+
+    ~MetalShader() override = default;
+
+    [[nodiscard]] ShaderStage     stage()      const noexcept override { return m_stage;      }
+    [[nodiscard]] std::string_view entryPoint() const noexcept override { return m_entryPoint; }
+
+    [[nodiscard]] id<MTLFunction> mtlFunction() const noexcept { return m_function; }
+
+private:
+    id<MTLFunction> m_function;
+    ShaderStage     m_stage;
+    std::string     m_entryPoint;
+};
+
+// ─── MetalPipeline ────────────────────────────────────────────────────────────
+
+class MetalPipeline final : public IPipeline
+{
+public:
+    explicit MetalPipeline(id<MTLRenderPipelineState> pso) : m_renderPSO(pso) {}
+    explicit MetalPipeline(id<MTLComputePipelineState> pso) : m_computePSO(pso) {}
+
+    ~MetalPipeline() override = default;
+
+    [[nodiscard]] id<MTLRenderPipelineState>  renderPSO()  const noexcept { return m_renderPSO;  }
+    [[nodiscard]] id<MTLComputePipelineState> computePSO() const noexcept { return m_computePSO; }
+
+private:
+    id<MTLRenderPipelineState>  m_renderPSO  = nil;
+    id<MTLComputePipelineState> m_computePSO = nil;
+};
+
+// ─── MetalFence ──────────────────────────────────────────────────────────────
+
+class MetalFence final : public IFence
+{
+public:
+    MetalFence() : m_completed(false) {}
+    ~MetalFence() override = default;
+
+    void waitUntilCompleted() noexcept override
+    {
+        if (m_commandBuffer)
+        {
+            [m_commandBuffer waitUntilCompleted];
+        }
+    }
+
+    [[nodiscard]] bool isCompleted() const noexcept override
+    {
+        if (!m_commandBuffer) { return true; }
+        return m_commandBuffer.status == MTLCommandBufferStatusCompleted
+            || m_commandBuffer.status == MTLCommandBufferStatusError;
+    }
+
+    void attachCommandBuffer(id<MTLCommandBuffer> cmdbuf)
+    {
+        m_commandBuffer = cmdbuf;
+    }
+
+private:
+    id<MTLCommandBuffer> m_commandBuffer = nil;
+    bool                 m_completed;
+};
+
+// ─── MetalRenderPassEncoder ───────────────────────────────────────────────────
+
+class MetalRenderPassEncoder final : public IRenderPassEncoder
+{
+public:
+    explicit MetalRenderPassEncoder(id<MTLRenderCommandEncoder> enc)
+        : m_encoder(enc) {}
+
+    ~MetalRenderPassEncoder() override = default;
+
+    void setRenderPipeline(IPipeline* pipeline) override
+    {
+        auto* mp = static_cast<MetalPipeline*>(pipeline);
+        [m_encoder setRenderPipelineState:mp->renderPSO()];
+    }
+
+    void setViewport(const Viewport& vp) override
+    {
+        [m_encoder setViewport:MTLViewport{
+            .originX = vp.x,    .originY = vp.y,
+            .width   = vp.width, .height  = vp.height,
+            .znear   = vp.nearZ, .zfar    = vp.farZ
+        }];
+    }
+
+    void setScissor(const ScissorRect& r) override
+    {
+        [m_encoder setScissorRect:MTLScissorRect{
+            .x      = static_cast<NSUInteger>(r.x),
+            .y      = static_cast<NSUInteger>(r.y),
+            .width  = r.width,
+            .height = r.height
+        }];
+    }
+
+    void setVertexBuffer(IBuffer* buffer, u32 offset, u32 bindIndex) override
+    {
+        auto* mb = static_cast<MetalBuffer*>(buffer);
+        [m_encoder setVertexBuffer:mb->mtlBuffer()
+                            offset:offset
+                           atIndex:bindIndex];
+    }
+
+    void setIndexBuffer(IBuffer* /*buffer*/, u32 /*offset*/, bool /*use32Bit*/) override
+    {
+        // Index buffer is passed directly to drawIndexed in Metal.
+        // Store it here so drawIndexed can use it.
+    }
+
+    void setBindGroup(u32 /*index*/, IBindGroup* /*group*/) override
+    {
+        // Phase 1A: bind groups not yet exercised.
+    }
+
+    void setVertexBytes(const void* data, u32 size, u32 bindIndex) override
+    {
+        [m_encoder setVertexBytes:data length:size atIndex:bindIndex];
+    }
+
+    void setFragmentBytes(const void* data, u32 size, u32 bindIndex) override
+    {
+        [m_encoder setFragmentBytes:data length:size atIndex:bindIndex];
+    }
+
+    void draw(u32 vertexCount, u32 instanceCount,
+              u32 firstVertex, u32 firstInstance) override
+    {
+        [m_encoder drawPrimitives:MTLPrimitiveTypeTriangle
+                      vertexStart:firstVertex
+                      vertexCount:vertexCount
+                    instanceCount:instanceCount
+                     baseInstance:firstInstance];
+    }
+
+    void drawIndexed(u32 indexCount, u32 instanceCount, u32 firstIndex,
+                     i32 vertexOffset, u32 firstInstance) override
+    {
+        // Phase 1A: full indexed draw via stored index buffer in future iteration.
+        (void)indexCount; (void)instanceCount; (void)firstIndex;
+        (void)vertexOffset; (void)firstInstance;
+    }
+
+    void end() override
+    {
+        [m_encoder endEncoding];
+    }
+
+private:
+    id<MTLRenderCommandEncoder> m_encoder;
+};
+
+// ─── MetalSwapchain ───────────────────────────────────────────────────────────
+
+class MetalSwapchain final : public ISwapchain
+{
+public:
+    MetalSwapchain(CAMetalLayer* layer, SDL_MetalView view,
+                   u32 width, u32 height)
+        : m_layer(layer)
+        , m_view(view)
+        , m_width(width)
+        , m_height(height)
+    {
+        DAEDALUS_ASSERT(m_layer != nil, "MetalSwapchain: null CAMetalLayer");
+    }
+
+    ~MetalSwapchain() override
+    {
+        m_currentDrawable = nil;
+        SDL_Metal_DestroyView(m_view);
+    }
+
+    [[nodiscard]] ITexture* nextDrawable() override
+    {
+        m_currentDrawable = [m_layer nextDrawable];
+        DAEDALUS_ASSERT(m_currentDrawable != nil,
+                        "MetalSwapchain::nextDrawable: failed to acquire drawable");
+        m_drawableTexture = std::make_unique<MetalTexture>(
+            m_currentDrawable.texture,
+            TextureUsage::RenderTarget);
+        return m_drawableTexture.get();
+    }
+
+    void present() override
+    {
+        // Actual presentation is driven by ICommandBuffer::present() which
+        // calls presentDrawable on the command buffer.  This method is a no-op
+        // in the Metal backend.
+    }
+
+    void resize(u32 width, u32 height) override
+    {
+        m_width  = width;
+        m_height = height;
+        m_layer.drawableSize = CGSizeMake(static_cast<CGFloat>(width),
+                                          static_cast<CGFloat>(height));
+    }
+
+    [[nodiscard]] u32          width()  const noexcept override { return m_width;  }
+    [[nodiscard]] u32          height() const noexcept override { return m_height; }
+    [[nodiscard]] TextureFormat format() const noexcept override
+    {
+        return fromMTL(m_layer.pixelFormat);
+    }
+
+    [[nodiscard]] id<CAMetalDrawable> currentDrawable() const noexcept
+    {
+        return m_currentDrawable;
+    }
+
+private:
+    CAMetalLayer*                   m_layer;
+    SDL_MetalView                   m_view;
+    u32                             m_width;
+    u32                             m_height;
+    id<CAMetalDrawable>             m_currentDrawable = nil;
+    std::unique_ptr<MetalTexture>   m_drawableTexture;
+};
+
+// ─── MetalCommandBuffer ───────────────────────────────────────────────────────
+
+class MetalCommandBuffer final : public ICommandBuffer
+{
+public:
+    explicit MetalCommandBuffer(id<MTLCommandBuffer> cmdbuf)
+        : m_cmdBuf(cmdbuf) {}
+
+    ~MetalCommandBuffer() override = default;
+
+    [[nodiscard]] IRenderPassEncoder*
+    beginRenderPass(const RenderPassDescriptor& desc) override
+    {
+        MTLRenderPassDescriptor* rpd = [MTLRenderPassDescriptor renderPassDescriptor];
+
+        for (u32 i = 0; i < desc.colorAttachmentCount; ++i)
+        {
+            const ColorAttachmentDescriptor& ca = desc.colorAttachments[i];
+            DAEDALUS_ASSERT(ca.texture != nullptr,
+                            "beginRenderPass: color attachment texture is null");
+
+            auto* mt = static_cast<MetalTexture*>(ca.texture);
+            rpd.colorAttachments[i].texture     = mt->mtlTexture();
+            rpd.colorAttachments[i].loadAction  = toMTL(ca.loadAction);
+            rpd.colorAttachments[i].storeAction = toMTL(ca.storeAction);
+            rpd.colorAttachments[i].clearColor  = MTLClearColorMake(
+                ca.clearColor.r, ca.clearColor.g,
+                ca.clearColor.b, ca.clearColor.a);
+        }
+
+        if (desc.hasDepthAttachment && desc.depthAttachment.texture != nullptr)
+        {
+            auto* dt = static_cast<MetalTexture*>(desc.depthAttachment.texture);
+            rpd.depthAttachment.texture     = dt->mtlTexture();
+            rpd.depthAttachment.loadAction  = toMTL(desc.depthAttachment.loadAction);
+            rpd.depthAttachment.storeAction = toMTL(desc.depthAttachment.storeAction);
+            rpd.depthAttachment.clearDepth  = desc.depthAttachment.clearDepth;
+        }
+
+        if (!desc.debugLabel.empty())
+        {
+            rpd.renderTargetWidth  = 0; // Metal infers from attachments
+            rpd.renderTargetHeight = 0;
+        }
+
+        id<MTLRenderCommandEncoder> enc =
+            [m_cmdBuf renderCommandEncoderWithDescriptor:rpd];
+        DAEDALUS_ASSERT(enc != nil, "beginRenderPass: failed to create encoder");
+
+        if (!desc.debugLabel.empty())
+        {
+            enc.label = [NSString stringWithUTF8String:desc.debugLabel.c_str()];
+        }
+
+        m_encoder = std::make_unique<MetalRenderPassEncoder>(enc);
+        return m_encoder.get();
+    }
+
+    void copyBuffer(IBuffer* src, usize srcOffset,
+                    IBuffer* dst, usize dstOffset, usize size) override
+    {
+        id<MTLBlitCommandEncoder> blit = [m_cmdBuf blitCommandEncoder];
+        [blit copyFromBuffer:static_cast<MetalBuffer*>(src)->mtlBuffer()
+                sourceOffset:srcOffset
+                    toBuffer:static_cast<MetalBuffer*>(dst)->mtlBuffer()
+           destinationOffset:dstOffset
+                        size:size];
+        [blit endEncoding];
+    }
+
+    void present(ISwapchain& swapchain) override
+    {
+        auto& ms = static_cast<MetalSwapchain&>(swapchain);
+        if (id<CAMetalDrawable> drawable = ms.currentDrawable())
+        {
+            [m_cmdBuf presentDrawable:drawable];
+        }
+    }
+
+    void commit() override
+    {
+        [m_cmdBuf commit];
+    }
+
+    void pushDebugGroup(std::string_view label) override
+    {
+        [m_cmdBuf pushDebugGroup:[NSString stringWithUTF8String:std::string(label).c_str()]];
+    }
+
+    void popDebugGroup() override
+    {
+        [m_cmdBuf popDebugGroup];
+    }
+
+private:
+    id<MTLCommandBuffer>                m_cmdBuf;
+    std::unique_ptr<MetalRenderPassEncoder> m_encoder;
+};
+
+// ─── MetalCommandQueue ────────────────────────────────────────────────────────
+
+class MetalCommandQueue final : public ICommandQueue
+{
+public:
+    explicit MetalCommandQueue(id<MTLCommandQueue> queue) : m_queue(queue) {}
+    ~MetalCommandQueue() override = default;
+
+    [[nodiscard]] std::unique_ptr<ICommandBuffer>
+    createCommandBuffer(std::string_view debugLabel) override
+    {
+        id<MTLCommandBuffer> cmdbuf = [m_queue commandBuffer];
+        DAEDALUS_ASSERT(cmdbuf != nil, "createCommandBuffer: failed");
+
+        if (!debugLabel.empty())
+        {
+            cmdbuf.label = [NSString stringWithUTF8String:
+                            std::string(debugLabel).c_str()];
+        }
+        return std::make_unique<MetalCommandBuffer>(cmdbuf);
+    }
+
+private:
+    id<MTLCommandQueue> m_queue;
+};
+
+// ─── MetalRenderDevice ────────────────────────────────────────────────────────
+
+class MetalRenderDevice final : public IRenderDevice
+{
+public:
+    explicit MetalRenderDevice(id<MTLDevice> device)
+        : m_device(device)
+        , m_deviceName([device.name UTF8String])
+    {}
+
+    ~MetalRenderDevice() override = default;
+
+    // ─── Queues ───────────────────────────────────────────────────────────────
+
+    [[nodiscard]] std::unique_ptr<ICommandQueue>
+    createCommandQueue(std::string_view debugName) override
+    {
+        id<MTLCommandQueue> queue = [m_device newCommandQueue];
+        DAEDALUS_ASSERT(queue != nil, "createCommandQueue: failed");
+        if (!debugName.empty())
+        {
+            queue.label = [NSString stringWithUTF8String:std::string(debugName).c_str()];
+        }
+        return std::make_unique<MetalCommandQueue>(queue);
+    }
+
+    // ─── Swapchain ────────────────────────────────────────────────────────────
+
+    [[nodiscard]] std::unique_ptr<ISwapchain>
+    createSwapchain(void* nativeWindowHandle, u32 width, u32 height) override
+    {
+        auto* sdlWindow = static_cast<SDL_Window*>(nativeWindowHandle);
+        SDL_MetalView view = SDL_Metal_CreateView(sdlWindow);
+        DAEDALUS_ASSERT(view != nullptr, "createSwapchain: SDL_Metal_CreateView failed");
+
+        CAMetalLayer* layer = (__bridge CAMetalLayer*)SDL_Metal_GetLayer(view);
+        DAEDALUS_ASSERT(layer != nil, "createSwapchain: CAMetalLayer is nil");
+
+        layer.device          = m_device;
+        layer.pixelFormat     = MTLPixelFormatBGRA8Unorm;
+        layer.framebufferOnly = YES;
+        layer.drawableSize    = CGSizeMake(static_cast<CGFloat>(width),
+                                           static_cast<CGFloat>(height));
+
+        return std::make_unique<MetalSwapchain>(layer, view, width, height);
+    }
+
+    // ─── Resources ────────────────────────────────────────────────────────────
+
+    [[nodiscard]] std::unique_ptr<IBuffer>
+    createBuffer(const BufferDescriptor& desc) override
+    {
+        DAEDALUS_ASSERT(desc.size > 0, "createBuffer: size must be > 0");
+
+        MTLResourceOptions options = MTLResourceStorageModeShared;
+        id<MTLBuffer> buf = [m_device newBufferWithLength:desc.size
+                                                  options:options];
+        DAEDALUS_ASSERT(buf != nil, "createBuffer: failed");
+
+        if (desc.initData)
+        {
+            std::memcpy(buf.contents, desc.initData, desc.size);
+        }
+        if (!desc.debugName.empty())
+        {
+            buf.label = [NSString stringWithUTF8String:desc.debugName.c_str()];
+        }
+
+        return std::make_unique<MetalBuffer>(buf, desc.size, desc.usage);
+    }
+
+    [[nodiscard]] std::unique_ptr<ITexture>
+    createTexture(const TextureDescriptor& desc) override
+    {
+        MTLTextureDescriptor* mtlDesc = [[MTLTextureDescriptor alloc] init];
+        mtlDesc.textureType = MTLTextureType2D;
+        mtlDesc.width       = desc.width;
+        mtlDesc.height      = desc.height;
+        mtlDesc.depth       = desc.depth;
+        mtlDesc.mipmapLevelCount = desc.mipLevels;
+        mtlDesc.arrayLength = desc.arrayLayers;
+        mtlDesc.pixelFormat = toMTL(desc.format);
+
+        MTLTextureUsage usage = 0;
+        if (hasFlag(desc.usage, TextureUsage::ShaderRead))  usage |= MTLTextureUsageShaderRead;
+        if (hasFlag(desc.usage, TextureUsage::ShaderWrite)) usage |= MTLTextureUsageShaderWrite;
+        if (hasFlag(desc.usage, TextureUsage::RenderTarget))usage |= MTLTextureUsageRenderTarget;
+        if (hasFlag(desc.usage, TextureUsage::DepthStencil))usage |= MTLTextureUsageRenderTarget;
+        mtlDesc.usage = usage;
+        mtlDesc.storageMode = MTLStorageModePrivate;
+
+        id<MTLTexture> tex = [m_device newTextureWithDescriptor:mtlDesc];
+        DAEDALUS_ASSERT(tex != nil, "createTexture: failed");
+
+        if (!desc.debugName.empty())
+        {
+            tex.label = [NSString stringWithUTF8String:desc.debugName.c_str()];
+        }
+
+        return std::make_unique<MetalTexture>(tex, desc.usage);
+    }
+
+    [[nodiscard]] std::unique_ptr<ISampler>
+    createSampler(const SamplerDescriptor& desc) override
+    {
+        MTLSamplerDescriptor* sd = [[MTLSamplerDescriptor alloc] init];
+        sd.magFilter    = toMTLMinMag(desc.magFilter);
+        sd.minFilter    = toMTLMinMag(desc.minFilter);
+        sd.mipFilter    = desc.mipFilter == SamplerDescriptor::Filter::Linear
+                          ? MTLSamplerMipFilterLinear : MTLSamplerMipFilterNearest;
+        sd.sAddressMode = toMTL(desc.addressU);
+        sd.tAddressMode = toMTL(desc.addressV);
+        sd.rAddressMode = toMTL(desc.addressW);
+        sd.maxAnisotropy = static_cast<NSUInteger>(desc.maxAnisotropy);
+
+        id<MTLSamplerState> state = [m_device newSamplerStateWithDescriptor:sd];
+        DAEDALUS_ASSERT(state != nil, "createSampler: failed");
+
+        return std::make_unique<MetalSampler>(state, desc);
+    }
+
+    // ─── Shaders ──────────────────────────────────────────────────────────────
+
+    [[nodiscard]] std::unique_ptr<IShader>
+    createShader(std::span<const byte> source,
+                 ShaderStage           stage,
+                 std::string_view      entryPoint) override
+    {
+        // Source is MSL text.
+        NSString* src = [[NSString alloc]
+            initWithBytes:source.data()
+                   length:source.size()
+                 encoding:NSUTF8StringEncoding];
+
+        NSError* error = nil;
+        id<MTLLibrary> lib = [m_device newLibraryWithSource:src
+                                                    options:nil
+                                                      error:&error];
+        DAEDALUS_ASSERT(lib != nil,
+            error ? [[error localizedDescription] UTF8String]
+                  : "createShader: compilation failed");
+
+        NSString* name = [NSString stringWithUTF8String:std::string(entryPoint).c_str()];
+        id<MTLFunction> func = [lib newFunctionWithName:name];
+        DAEDALUS_ASSERT(func != nil, "createShader: entry point not found in MSL library");
+
+        return std::make_unique<MetalShader>(func, stage, std::string(entryPoint));
+    }
+
+    // ─── Pipelines ────────────────────────────────────────────────────────────
+
+    [[nodiscard]] std::unique_ptr<IPipeline>
+    createRenderPipeline(const RenderPipelineDescriptor& desc) override
+    {
+        MTLRenderPipelineDescriptor* pd = [[MTLRenderPipelineDescriptor alloc] init];
+
+        if (desc.vertexShader)
+        {
+            pd.vertexFunction   = static_cast<MetalShader*>(desc.vertexShader)->mtlFunction();
+        }
+        if (desc.fragmentShader)
+        {
+            pd.fragmentFunction = static_cast<MetalShader*>(desc.fragmentShader)->mtlFunction();
+        }
+
+        for (u32 i = 0; i < desc.colorAttachmentCount; ++i)
+        {
+            pd.colorAttachments[i].pixelFormat = toMTL(desc.colorFormats[i]);
+        }
+
+        if (desc.depthFormat != TextureFormat::Invalid)
+        {
+            pd.depthAttachmentPixelFormat = toMTL(desc.depthFormat);
+        }
+
+        if (!desc.debugName.empty())
+        {
+            pd.label = [NSString stringWithUTF8String:desc.debugName.c_str()];
+        }
+
+        NSError* error = nil;
+        id<MTLRenderPipelineState> pso =
+            [m_device newRenderPipelineStateWithDescriptor:pd error:&error];
+        DAEDALUS_ASSERT(pso != nil,
+            error ? [[error localizedDescription] UTF8String]
+                  : "createRenderPipeline: failed");
+
+        return std::make_unique<MetalPipeline>(pso);
+    }
+
+    [[nodiscard]] std::unique_ptr<IPipeline>
+    createComputePipeline(const ComputePipelineDescriptor& desc) override
+    {
+        DAEDALUS_ASSERT(desc.computeShader != nullptr,
+                        "createComputePipeline: null compute shader");
+
+        NSError* error = nil;
+        id<MTLComputePipelineState> pso = [m_device
+            newComputePipelineStateWithFunction:
+                static_cast<MetalShader*>(desc.computeShader)->mtlFunction()
+            error:&error];
+        DAEDALUS_ASSERT(pso != nil,
+            error ? [[error localizedDescription] UTF8String]
+                  : "createComputePipeline: failed");
+
+        return std::make_unique<MetalPipeline>(pso);
+    }
+
+    // ─── Synchronisation ──────────────────────────────────────────────────────
+
+    [[nodiscard]] std::unique_ptr<IFence>
+    createFence() override
+    {
+        return std::make_unique<MetalFence>();
+    }
+
+    // ─── Diagnostics ──────────────────────────────────────────────────────────
+
+    [[nodiscard]] std::string_view deviceName() const noexcept override
+    {
+        return m_deviceName;
+    }
+
+private:
+    id<MTLDevice> m_device;
+    std::string   m_deviceName;
+};
+
+// ─── Factory ─────────────────────────────────────────────────────────────────
+
+std::unique_ptr<IRenderDevice> createMetalRenderDevice()
+{
+    id<MTLDevice> device = MTLCreateSystemDefaultDevice();
+    DAEDALUS_ASSERT(device != nil,
+                    "createMetalRenderDevice: no Metal-capable device found");
+    return std::make_unique<MetalRenderDevice>(device);
+}
+
+} // namespace daedalus::rhi

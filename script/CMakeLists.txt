@@ -1,7 +1,7 @@
 add_library(DaedalusScript STATIC)
 
 target_sources(DaedalusScript PRIVATE
-    # Sources added here as files are created
+    src/stub.cpp
 )
 
 target_include_directories(DaedalusScript

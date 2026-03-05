@@ -1,7 +1,7 @@
 add_executable(DaedalusApp)
 
 target_sources(DaedalusApp PRIVATE
-    # Sources added here as files are created
+    src/main.cpp
 )
 
 target_include_directories(DaedalusApp
@@ -11,10 +11,11 @@ target_include_directories(DaedalusApp
 target_link_libraries(DaedalusApp PRIVATE
     DaedalusCore
     DaedalusRender
-    DaedalusWorld
-    DaedalusPhysics
-    DaedalusAudio
-    DaedalusScript
+    SDL3::SDL3-static
 )
 
 target_compile_features(DaedalusApp PRIVATE cxx_std_23)
+
+if(DAEDALUS_PLATFORM_MACOS)
+    target_compile_definitions(DaedalusApp PRIVATE DAEDALUS_BACKEND_METAL)
+endif()

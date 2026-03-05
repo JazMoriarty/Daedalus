@@ -1,7 +1,7 @@
 add_executable(DaedalusEdit)
 
 target_sources(DaedalusEdit PRIVATE
-    # Sources added here as files are created
+    src/main.cpp
 )
 
 target_include_directories(DaedalusEdit

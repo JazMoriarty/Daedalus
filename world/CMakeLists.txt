@@ -1,7 +1,7 @@
 add_library(DaedalusWorld STATIC)
 
 target_sources(DaedalusWorld PRIVATE
-    # Sources added here as files are created
+    src/stub.cpp
 )
 
 target_include_directories(DaedalusWorld

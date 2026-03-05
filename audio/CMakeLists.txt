@@ -1,7 +1,7 @@
 add_library(DaedalusAudio STATIC)
 
 target_sources(DaedalusAudio PRIVATE
-    # Sources added here as files are created
+    src/stub.cpp
 )
 
 target_include_directories(DaedalusAudio

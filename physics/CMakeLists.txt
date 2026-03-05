@@ -1,7 +1,7 @@
 add_library(DaedalusPhysics STATIC)
 
 target_sources(DaedalusPhysics PRIVATE
-    # Sources added here as files are created
+    src/stub.cpp
 )
 
 target_include_directories(DaedalusPhysics
