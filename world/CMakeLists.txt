@@ -1,7 +1,11 @@
 add_library(DaedalusWorld STATIC)
 
 target_sources(DaedalusWorld PRIVATE
-    src/stub.cpp
+    src/world_map.cpp
+    src/portal_traversal.cpp
+    src/sector_tessellator.cpp
+    src/dmap_binary.cpp
+    src/dmap_json.cpp
 )
 
 target_include_directories(DaedalusWorld
@@ -9,7 +13,10 @@ target_include_directories(DaedalusWorld
     PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src
 )
 
-target_link_libraries(DaedalusWorld PUBLIC DaedalusCore DaedalusRender)
+target_link_libraries(DaedalusWorld
+    PUBLIC  DaedalusCore DaedalusRender
+    PRIVATE nlohmann_json::nlohmann_json
+)
 target_compile_features(DaedalusWorld PUBLIC cxx_std_23)
 
 if(BUILD_TESTING)

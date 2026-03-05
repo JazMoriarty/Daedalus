@@ -2,6 +2,7 @@
 
 #include "daedalus/render/frame_renderer.h"
 #include "daedalus/render/scene_data.h"
+#include "daedalus/render/vertex_types.h"
 #include "daedalus/render/rhi/i_command_buffer.h"
 #include "daedalus/render/rhi/i_render_pass_encoder.h"
 #include "daedalus/render/rhi/i_compute_pass_encoder.h"
@@ -18,104 +19,8 @@ namespace daedalus::render
 
 using namespace rhi;
 
-// ─── Test-room geometry ───────────────────────────────────────────────────────
-// Closed box room: 10 × 4 × 10 units, centred at (0, 2, 0).
-// Room normals point inward; CCW front-face winding.
-// Centre box: 0.8 × 1.5 × 0.8 units, base at y=0, centred at (0,0,0).
-// Vertex stride: pos(12) + normal(12) + uv(8) + tangent(16) = 48 bytes.
-
-struct RoomVertex
-{
-    float pos[3];
-    float normal[3];
-    float uv[2];
-    float tangent[4];
-};
-static_assert(sizeof(RoomVertex) == 48, "RoomVertex stride must be 48 bytes");
-
 // GPU buffer slot used for vertex data (avoids colliding with constant-buffer slots 0–1).
 static constexpr u32 k_vboSlot = 30;
-
-static constexpr RoomVertex k_roomVertices[44] =
-{
-    // ── Floor  (y=0, n=(0,+1,0), t=(+1,0,0,1)) ──────────────────────────────
-    {{-5,0, 5}, {0,1,0}, {0,0}, { 1,0,0,1}},
-    {{ 5,0, 5}, {0,1,0}, {1,0}, { 1,0,0,1}},
-    {{ 5,0,-5}, {0,1,0}, {1,1}, { 1,0,0,1}},
-    {{-5,0,-5}, {0,1,0}, {0,1}, { 1,0,0,1}},
-
-    // ── Ceiling (y=4, n=(0,-1,0), t=(-1,0,0,1)) ─────────────────────────────
-    {{ 5,4, 5}, {0,-1,0}, {1,0}, {-1,0,0,1}},
-    {{-5,4, 5}, {0,-1,0}, {0,0}, {-1,0,0,1}},
-    {{-5,4,-5}, {0,-1,0}, {0,1}, {-1,0,0,1}},
-    {{ 5,4,-5}, {0,-1,0}, {1,1}, {-1,0,0,1}},
-
-    // ── Front wall (z=+5, n=(0,0,-1), t=(-1,0,0,1)) ──────────────────────────
-    {{ 5,0, 5}, {0,0,-1}, {0,1}, {-1,0,0,1}},
-    {{-5,0, 5}, {0,0,-1}, {1,1}, {-1,0,0,1}},
-    {{-5,4, 5}, {0,0,-1}, {1,0}, {-1,0,0,1}},
-    {{ 5,4, 5}, {0,0,-1}, {0,0}, {-1,0,0,1}},
-
-    // ── Back wall  (z=-5, n=(0,0,+1), t=(+1,0,0,1)) ──────────────────────────
-    {{-5,0,-5}, {0,0,1}, {0,1}, {1,0,0,1}},
-    {{ 5,0,-5}, {0,0,1}, {1,1}, {1,0,0,1}},
-    {{ 5,4,-5}, {0,0,1}, {1,0}, {1,0,0,1}},
-    {{-5,4,-5}, {0,0,1}, {0,0}, {1,0,0,1}},
-
-    // ── Left wall  (x=-5, n=(+1,0,0), t=(0,0,-1,1)) ─────────────────────────
-    {{-5,0, 5}, {1,0,0}, {0,1}, {0,0,-1,1}},
-    {{-5,0,-5}, {1,0,0}, {1,1}, {0,0,-1,1}},
-    {{-5,4,-5}, {1,0,0}, {1,0}, {0,0,-1,1}},
-    {{-5,4, 5}, {1,0,0}, {0,0}, {0,0,-1,1}},
-
-    // ── Right wall (x=+5, n=(-1,0,0), t=(0,0,+1,1)) ─────────────────────────
-    {{ 5,0,-5}, {-1,0,0}, {0,1}, {0,0,1,1}},
-    {{ 5,0, 5}, {-1,0,0}, {1,1}, {0,0,1,1}},
-    {{ 5,4, 5}, {-1,0,0}, {1,0}, {0,0,1,1}},
-    {{ 5,4,-5}, {-1,0,0}, {0,0}, {0,0,1,1}},
-
-    // ── Centre box — 0.8 × 1.5 × 0.8, base at y=0 ───────────────────────────
-    // Top  (y=1.5, n=( 0,+1, 0), t=(+1,0,0,1))
-    {{-0.4f,1.5f, 0.4f}, { 0,1, 0}, {0,0}, { 1,0,0,1}},
-    {{ 0.4f,1.5f, 0.4f}, { 0,1, 0}, {1,0}, { 1,0,0,1}},
-    {{ 0.4f,1.5f,-0.4f}, { 0,1, 0}, {1,1}, { 1,0,0,1}},
-    {{-0.4f,1.5f,-0.4f}, { 0,1, 0}, {0,1}, { 1,0,0,1}},
-    // Front (z=+0.4, n=( 0, 0,+1), t=(+1,0,0,1))
-    {{-0.4f,0.0f, 0.4f}, { 0,0, 1}, {0,1}, { 1,0,0,1}},
-    {{ 0.4f,0.0f, 0.4f}, { 0,0, 1}, {1,1}, { 1,0,0,1}},
-    {{ 0.4f,1.5f, 0.4f}, { 0,0, 1}, {1,0}, { 1,0,0,1}},
-    {{-0.4f,1.5f, 0.4f}, { 0,0, 1}, {0,0}, { 1,0,0,1}},
-    // Back  (z=-0.4, n=( 0, 0,-1), t=(-1,0,0,1))
-    {{ 0.4f,0.0f,-0.4f}, { 0,0,-1}, {0,1}, {-1,0,0,1}},
-    {{-0.4f,0.0f,-0.4f}, { 0,0,-1}, {1,1}, {-1,0,0,1}},
-    {{-0.4f,1.5f,-0.4f}, { 0,0,-1}, {1,0}, {-1,0,0,1}},
-    {{ 0.4f,1.5f,-0.4f}, { 0,0,-1}, {0,0}, {-1,0,0,1}},
-    // Left  (x=-0.4, n=(-1, 0, 0), t=(0,0,+1,1))
-    {{-0.4f,0.0f,-0.4f}, {-1,0, 0}, {0,1}, {0,0,1,1}},
-    {{-0.4f,0.0f, 0.4f}, {-1,0, 0}, {1,1}, {0,0,1,1}},
-    {{-0.4f,1.5f, 0.4f}, {-1,0, 0}, {1,0}, {0,0,1,1}},
-    {{-0.4f,1.5f,-0.4f}, {-1,0, 0}, {0,0}, {0,0,1,1}},
-    // Right (x=+0.4, n=(+1, 0, 0), t=(0,0,-1,1))
-    {{ 0.4f,0.0f, 0.4f}, { 1,0, 0}, {0,1}, {0,0,-1,1}},
-    {{ 0.4f,0.0f,-0.4f}, { 1,0, 0}, {1,1}, {0,0,-1,1}},
-    {{ 0.4f,1.5f,-0.4f}, { 1,0, 0}, {1,0}, {0,0,-1,1}},
-    {{ 0.4f,1.5f, 0.4f}, { 1,0, 0}, {0,0}, {0,0,-1,1}},
-};
-
-static constexpr u32 k_roomIndices[72] =
-{
-     0, 1, 2,  0, 2, 3,   // floor
-     4, 5, 6,  4, 6, 7,   // ceiling
-     8, 9,10,  8,10,11,   // front wall
-    12,13,14, 12,14,15,   // back wall
-    16,17,18, 16,18,19,   // left wall
-    20,21,22, 20,22,23,   // right wall
-    24,25,26, 24,26,27,   // box top
-    28,29,30, 28,30,31,   // box front
-    32,33,34, 32,34,35,   // box back
-    36,37,38, 36,38,39,   // box left
-    40,41,42, 40,42,43,   // box right
-};
 
 // ─── TAA: 8-sample Halton(base-2 × base-3) jitter ────────────────────────────
 // Values pre-shifted to [-0.5, 0.5] in pixel space.
@@ -142,17 +47,18 @@ glm::vec2 FrameRenderer::haltonJitter(u32 frameIndex) noexcept
 static std::vector<VertexAttributeDescriptor> geometryAttributes()
 {
     // All attributes source from buffer slot k_vboSlot (avoids constant-buffer conflict).
+    // Offsets match StaticMeshVertex layout (stride = 48 bytes).
     return {
-        { 0, VertexFormat::Float3, 0,  k_vboSlot },  // position
-        { 1, VertexFormat::Float3, 12, k_vboSlot },  // normal
-        { 2, VertexFormat::Float2, 24, k_vboSlot },  // uv
-        { 3, VertexFormat::Float4, 32, k_vboSlot },  // tangent
+        { 0, VertexFormat::Float3,  offsetof(StaticMeshVertex, pos),     k_vboSlot },
+        { 1, VertexFormat::Float3,  offsetof(StaticMeshVertex, normal),  k_vboSlot },
+        { 2, VertexFormat::Float2,  offsetof(StaticMeshVertex, uv),      k_vboSlot },
+        { 3, VertexFormat::Float4,  offsetof(StaticMeshVertex, tangent), k_vboSlot },
     };
 }
 
 static std::vector<VertexBufferLayoutDescriptor> geometryLayouts()
 {
-    return { { 48, k_vboSlot } };  // stride = 48 bytes, buffer slot = k_vboSlot
+    return { { sizeof(StaticMeshVertex), k_vboSlot } };
 }
 
 // ─── initialize ──────────────────────────────────────────────────────────────
@@ -166,7 +72,6 @@ void FrameRenderer::initialize(IRenderDevice&     device,
     m_height = height;
 
     createPSOs(device, shaderLibPath);
-    createGeometry(device);
     createPersistentResources(device, width, height);
 }
 
@@ -193,20 +98,21 @@ void FrameRenderer::createPSOs(IRenderDevice& device, const std::string& lib)
     auto csSSAO          = loadCS("ssao_main");
     auto csLighting      = loadCS("lighting_main");
 
-    // ── G-buffer (3 colour targets + depth write in one pass) ─────────────────
+    // ── G-buffer (4 colour targets + depth write — spec §Pass 4 layout) ────────────────
     // Depth prepass is intentionally omitted: writing depth here guarantees
     // every visible pixel gets a motion vector, which TAA reprojection requires.
     {
         RenderPipelineDescriptor d;
         d.vertexShader         = vsGBuffer.get();
         d.fragmentShader       = fsGBuffer.get();
-        d.colorAttachmentCount = 3;
-        d.colorFormats[0]      = TextureFormat::RGBA8Unorm;   // albedo + roughness
-        d.colorFormats[1]      = TextureFormat::RGBA16Float;  // normal + metalness
-        d.colorFormats[2]      = TextureFormat::RG16Float;    // motion vectors
+        d.colorAttachmentCount = 4;
+        d.colorFormats[0]      = TextureFormat::RGBA8Unorm;   // RT0: albedo + baked AO
+        d.colorFormats[1]      = TextureFormat::RGBA8Unorm;   // RT1: oct normal + roughness + metalness
+        d.colorFormats[2]      = TextureFormat::RGBA16Float;  // RT2: emissive
+        d.colorFormats[3]      = TextureFormat::RG16Float;    // RT3: motion vectors
         d.depthFormat          = TextureFormat::Depth32Float;
         d.depthTest            = true;
-        d.depthWrite           = true;    // single pass writes depth
+        d.depthWrite           = true;
         d.depthCompare         = CompareFunction::Less;
         d.cullMode             = CullMode::Back;
         d.vertexAttributes     = geometryAttributes();
@@ -326,29 +232,7 @@ void FrameRenderer::createPSOs(IRenderDevice& device, const std::string& lib)
     }
 }
 
-// ─── createGeometry ──────────────────────────────────────────────────────────
-
-void FrameRenderer::createGeometry(IRenderDevice& device)
-{
-    {
-        BufferDescriptor d;
-        d.size      = sizeof(k_roomVertices);
-        d.usage     = BufferUsage::Vertex;
-        d.initData  = k_roomVertices;
-        d.debugName = "RoomVBO";
-        m_roomVBO = device.createBuffer(d);
-    }
-    {
-        BufferDescriptor d;
-        d.size      = sizeof(k_roomIndices);
-        d.usage     = BufferUsage::Index;
-        d.initData  = k_roomIndices;
-        d.debugName = "RoomIBO";
-        m_roomIBO = device.createBuffer(d);
-    }
-}
-
-// ─── createPersistentResources ────────────────────────────────────────────────
+// ─── createPersistentResources ───────────────────────────────────────────────────────────
 
 void FrameRenderer::createPersistentResources(IRenderDevice& device, u32 w, u32 h)
 {
@@ -382,6 +266,54 @@ void FrameRenderer::createPersistentResources(IRenderDevice& device, u32 w, u32 
         d.addressW   = SamplerDescriptor::AddressMode::ClampToEdge;
         d.debugName  = "LinearClamp";
         m_linearClampSampler = device.createSampler(d);
+    }
+
+    // Linear-repeat sampler (used by G-buffer material texture sampling)
+    {
+        SamplerDescriptor d;
+        d.magFilter  = SamplerDescriptor::Filter::Linear;
+        d.minFilter  = SamplerDescriptor::Filter::Linear;
+        d.mipFilter  = SamplerDescriptor::Filter::Linear;
+        d.addressU   = SamplerDescriptor::AddressMode::Repeat;
+        d.addressV   = SamplerDescriptor::AddressMode::Repeat;
+        d.addressW   = SamplerDescriptor::AddressMode::Repeat;
+        d.debugName  = "LinearRepeat";
+        m_linearRepeatSampler = device.createSampler(d);
+    }
+
+    // Fallback 1×1 textures — bound when a MeshDraw material slot is nullptr.
+    {
+        // White albedo (RGBA 255,255,255,255)
+        const u8 whitePixel[4] = { 255, 255, 255, 255 };
+        TextureDescriptor d;
+        d.width = 1; d.height = 1;
+        d.format    = TextureFormat::RGBA8Unorm;
+        d.usage     = TextureUsage::ShaderRead;
+        d.initData  = whitePixel;
+        d.debugName = "FallbackAlbedo";
+        m_fallbackAlbedo = device.createTexture(d);
+    }
+    {
+        // Flat tangent-space normal: (0.5, 0.5, 1.0) → (128, 128, 255, 255) in RGBA8.
+        const u8 flatNormal[4] = { 128, 128, 255, 255 };
+        TextureDescriptor d;
+        d.width = 1; d.height = 1;
+        d.format    = TextureFormat::RGBA8Unorm;
+        d.usage     = TextureUsage::ShaderRead;
+        d.initData  = flatNormal;
+        d.debugName = "FallbackNormal";
+        m_fallbackNormal = device.createTexture(d);
+    }
+    {
+        // Black emissive (no emission)
+        const u8 blackPixel[4] = { 0, 0, 0, 0 };
+        TextureDescriptor d;
+        d.width = 1; d.height = 1;
+        d.format    = TextureFormat::RGBA8Unorm;
+        d.usage     = TextureUsage::ShaderRead;
+        d.initData  = blackPixel;
+        d.debugName = "FallbackEmissive";
+        m_fallbackEmissive = device.createTexture(d);
     }
 
     // Spot light constant buffer
@@ -556,34 +488,57 @@ void FrameRenderer::renderFrame(IRenderDevice& device,
         m_lightBuf->unmap();
     }
 
-    // ── Model constant (identity for the static test room) ────────────────────
-    const ModelGPU modelGPU{
-        glm::mat4(1.0f),   // model
-        glm::mat4(1.0f),   // normalMat (identity, no non-uniform scale)
-        glm::mat4(1.0f),   // prevModel
-    };
+    // ── TAA history warm-up: GPU-clear on first frame ────────────────────────────────────
+    // MTLStorageModePrivate textures start with undefined content; a previous run may have
+    // left green data in those GPU memory pages.  Issue an empty render pass (clear-on-load)
+    // for each history texture so they start black.  Both passes are committed on a separate
+    // command buffer that is enqueued before the main frame buffer — Metal serialises them on
+    // the same queue, guaranteeing the clears complete before any TAA read.
+    if (m_frameIndex == 0)
+    {
+        auto clearCmd = queue.createCommandBuffer("ClearTAAHistory");
+        for (int i = 0; i < 2; ++i)
+        {
+            RenderPassDescriptor rpd;
+            rpd.debugLabel                       = (i == 0) ? "ClearTAAHistory0" : "ClearTAAHistory1";
+            rpd.colorAttachmentCount             = 1;
+            rpd.colorAttachments[0].texture      = m_taaHistory[i].get();
+            rpd.colorAttachments[0].loadAction   = LoadAction::Clear;
+            rpd.colorAttachments[0].storeAction  = StoreAction::Store;
+            rpd.colorAttachments[0].clearColor   = { 0.0f, 0.0f, 0.0f, 0.0f };
+            IRenderPassEncoder* enc = clearCmd->beginRenderPass(rpd);
+            enc->end();
+        }
+        clearCmd->commit();
+    }
 
-    // ── Reset and populate the render graph ───────────────────────────────────
+    // ── Reset and populate the render graph ─────────────────────────────────────────────
     m_graph.reset();
 
-    // Declare transient textures (0 = "match swapchain dims")
+    // Declare transient G-buffer textures matching the spec §Pass 4 layout.
+    // Width/height = 0 means "match swapchain dimensions" in RenderGraph::compile.
     const RGTextureId gDepthId = m_graph.createTexture({
         0, 0, TextureFormat::Depth32Float,
         TextureUsage::DepthStencil | TextureUsage::ShaderRead,
         "GDepth"
     });
     const RGTextureId gAlbedoId = m_graph.createTexture({
-        0, 0, TextureFormat::RGBA8Unorm,
+        0, 0, TextureFormat::RGBA8Unorm,                          // RT0: albedo + baked AO
         TextureUsage::RenderTarget | TextureUsage::ShaderRead,
         "GAlbedo"
     });
     const RGTextureId gNormalId = m_graph.createTexture({
-        0, 0, TextureFormat::RGBA16Float,
+        0, 0, TextureFormat::RGBA8Unorm,                          // RT1: oct normal + roughness + metalness
         TextureUsage::RenderTarget | TextureUsage::ShaderRead,
         "GNormal"
     });
+    const RGTextureId gEmissiveId = m_graph.createTexture({
+        0, 0, TextureFormat::RGBA16Float,                         // RT2: emissive
+        TextureUsage::RenderTarget | TextureUsage::ShaderRead,
+        "GEmissive"
+    });
     const RGTextureId gMotionId = m_graph.createTexture({
-        0, 0, TextureFormat::RG16Float,
+        0, 0, TextureFormat::RG16Float,                           // RT3: motion vectors
         TextureUsage::RenderTarget | TextureUsage::ShaderRead,
         "GMotion"
     });
@@ -623,42 +578,50 @@ void FrameRenderer::renderFrame(IRenderDevice& device,
     m_graph.compile(device, swapW, swapH);
 
     // Resolve texture pointers (all valid after compile)
-    ITexture* gDepthTex  = m_graph.get(gDepthId);
-    ITexture* gAlbedoTex = m_graph.get(gAlbedoId);
-    ITexture* gNormalTex = m_graph.get(gNormalId);
-    ITexture* gMotionTex = m_graph.get(gMotionId);
-    ITexture* ssaoTex    = m_graph.get(ssaoId);
-    ITexture* hdrTex     = m_graph.get(hdrId);
-    ITexture* bloomATex  = m_graph.get(bloomAId);
-    ITexture* bloomBTex  = m_graph.get(bloomBId);
+    ITexture* gDepthTex   = m_graph.get(gDepthId);
+    ITexture* gAlbedoTex  = m_graph.get(gAlbedoId);
+    ITexture* gNormalTex  = m_graph.get(gNormalId);
+    ITexture* gEmissiveTex = m_graph.get(gEmissiveId);
+    ITexture* gMotionTex  = m_graph.get(gMotionId);
+    ITexture* ssaoTex     = m_graph.get(ssaoId);
+    ITexture* hdrTex      = m_graph.get(hdrId);
+    ITexture* bloomATex   = m_graph.get(bloomAId);
+    ITexture* bloomBTex   = m_graph.get(bloomBId);
     ITexture* taaOutTex      = m_taaHistory[currHist].get();
     ITexture* taaHistTex     = m_taaHistory[prevHist].get();
     ITexture* shadowDepthTex = m_shadowDepthTex.get();
 
-    // Capture resources by value for lambda use
-    IBuffer*   frameBuf   = m_frameConstBuf.get();
-    IBuffer*   lightBuf   = m_lightBuf.get();
-    IBuffer*   spotBuf    = m_spotLightBuf.get();
-    IBuffer*   vbo        = m_roomVBO.get();
-    IBuffer*   ibo        = m_roomIBO.get();
-    ISampler*  linSamp    = m_linearClampSampler.get();
-    IPipeline* pGBuf      = m_gbufferPSO.get();
-    IPipeline* pShadow    = m_shadowDepthPSO.get();
-    IPipeline* pSSAO      = m_ssaoPSO.get();
-    IPipeline* pLighting  = m_lightingPSO.get();
-    IPipeline* pSkybox    = m_skyboxPSO.get();
-    IPipeline* pTAA       = m_taaPSO.get();
-    IPipeline* pBloomEx   = m_bloomExtractPSO.get();
-    IPipeline* pBloomH    = m_bloomBlurHPSO.get();
-    IPipeline* pBloomV    = m_bloomBlurVPSO.get();
-    IPipeline* pTonemap   = m_tonemapPSO.get();
+    // Fallback textures for draws with no material assigned
+    ITexture* fallbackAlbedo   = m_fallbackAlbedo.get();
+    ITexture* fallbackNormal   = m_fallbackNormal.get();
+    ITexture* fallbackEmissive = m_fallbackEmissive.get();
+
+    // Capture pipeline + sampler state by value for lambda use
+    IBuffer*   frameBuf      = m_frameConstBuf.get();
+    IBuffer*   lightBuf      = m_lightBuf.get();
+    IBuffer*   spotBuf       = m_spotLightBuf.get();
+    ISampler*  linSamp       = m_linearClampSampler.get();
+    ISampler*  repeatSamp    = m_linearRepeatSampler.get();
+    IPipeline* pGBuf         = m_gbufferPSO.get();
+    IPipeline* pShadow       = m_shadowDepthPSO.get();
+    IPipeline* pSSAO         = m_ssaoPSO.get();
+    IPipeline* pLighting     = m_lightingPSO.get();
+    IPipeline* pSkybox       = m_skyboxPSO.get();
+    IPipeline* pTAA          = m_taaPSO.get();
+    IPipeline* pBloomEx      = m_bloomExtractPSO.get();
+    IPipeline* pBloomH       = m_bloomBlurHPSO.get();
+    IPipeline* pBloomV       = m_bloomBlurVPSO.get();
+    IPipeline* pTonemap      = m_tonemapPSO.get();
+
+    // Snapshot the draw list for lambda capture (avoids capturing scene by ref).
+    const std::vector<MeshDraw>& draws = scene.meshDraws;
 
     const Viewport    vp{ 0.0f, 0.0f, static_cast<f32>(swapW), static_cast<f32>(swapH) };
     const ScissorRect sc{ 0, 0, swapW, swapH };
 
-    // ─────────────────────────────────────────────────────────────────────────
-    // Pass 1 — Shadow depth (depth-only from sun's POV, 2048×2048)
-    // ─────────────────────────────────────────────────────────────────────────
+    // ───────────────────────────────────────────────────────────────────────────────
+    // Pass 1 — Shadow depth (depth-only, 2048×2048)
+    // ───────────────────────────────────────────────────────────────────────────────
     {
         const Viewport    shadowVP { 0.f, 0.f, 2048.f, 2048.f };
         const ScissorRect shadowSC { 0,   0,   2048u,  2048u  };
@@ -667,44 +630,75 @@ void FrameRenderer::renderFrame(IRenderDevice& device,
         p.colorOutputCount = 0;
         p.depthOutput      = shadowDepthId;
         p.clearDepth       = 1.0f;
-        p.execute = [=](IRenderPassEncoder* enc)
+        p.execute = [=, &draws](IRenderPassEncoder* enc)
         {
             enc->setViewport(shadowVP);
             enc->setScissor(shadowSC);
             enc->setRenderPipeline(pShadow);
             enc->setVertexBuffer(frameBuf, 0, 0);
-            enc->setVertexBytes(&modelGPU, sizeof(ModelGPU), 1);
-            enc->setVertexBuffer(vbo, 0, k_vboSlot);
-            enc->setIndexBuffer(ibo, 0, true);
-            enc->drawIndexed(k_roomIndexCount);
+            for (const MeshDraw& draw : draws)
+            {
+                const ModelGPU modelGPU{
+                    draw.modelMatrix,
+                    glm::mat4(glm::inverse(glm::transpose(draw.modelMatrix))),
+                    draw.prevModel
+                };
+                enc->setVertexBytes(&modelGPU, sizeof(ModelGPU), 1);
+                enc->setVertexBuffer(draw.vertexBuffer, 0, k_vboSlot);
+                enc->setIndexBuffer(draw.indexBuffer, 0, true);
+                enc->drawIndexed(draw.indexCount);
+            }
         };
         m_graph.addRenderPass(std::move(p));
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    // Pass 2 — G-buffer (writes depth + colour in one pass)
-    // ─────────────────────────────────────────────────────────────────────────
+    // ───────────────────────────────────────────────────────────────────────────────
+    // Pass 2 — G-buffer (4 colour outputs + depth, spec §Pass 4 layout)
+    // ───────────────────────────────────────────────────────────────────────────────
     {
         RGRenderPassDesc p;
-        p.name               = "GBuffer";
-        p.colorOutputs[0]    = gAlbedoId;
-        p.colorOutputs[1]    = gNormalId;
-        p.colorOutputs[2]    = gMotionId;
-        p.colorOutputCount   = 3;
-        p.depthOutput        = gDepthId;
-        p.clearDepth         = 1.0f;  // clear to far plane
-        // loadDepth = false (default): depth prepass removed, G-buffer clears+writes depth
-        p.execute = [=](IRenderPassEncoder* enc)
+        p.name             = "GBuffer";
+        p.colorOutputs[0]  = gAlbedoId;
+        p.colorOutputs[1]  = gNormalId;
+        p.colorOutputs[2]  = gEmissiveId;
+        p.colorOutputs[3]  = gMotionId;
+        p.colorOutputCount = 4;
+        p.depthOutput      = gDepthId;
+        p.clearDepth       = 1.0f;
+        p.execute = [=, &draws](IRenderPassEncoder* enc)
         {
             enc->setViewport(vp);
             enc->setScissor(sc);
             enc->setRenderPipeline(pGBuf);
-            enc->setVertexBuffer(frameBuf, 0, 0);
-            enc->setVertexBytes(&modelGPU, sizeof(ModelGPU), 1);
-            enc->setVertexBuffer(vbo, 0, k_vboSlot);
-            enc->setFragmentBuffer(frameBuf, 0, 0);
-            enc->setIndexBuffer(ibo, 0, true);
-            enc->drawIndexed(k_roomIndexCount);
+            enc->setFragmentSampler(repeatSamp, 0); // sampler(0) for all material textures
+            for (const MeshDraw& draw : draws)
+            {
+                const ModelGPU modelGPU{
+                    draw.modelMatrix,
+                    glm::mat4(glm::inverse(glm::transpose(draw.modelMatrix))),
+                    draw.prevModel
+                };
+                // Vertex stage: frame constants + per-draw model
+                enc->setVertexBuffer(frameBuf, 0, 0);
+                enc->setVertexBytes(&modelGPU, sizeof(ModelGPU), 1);
+                enc->setVertexBuffer(draw.vertexBuffer, 0, k_vboSlot);
+                // Fragment stage: frame constants
+                enc->setFragmentBuffer(frameBuf, 0, 0);
+                // Fragment stage: per-draw material constants
+                const MaterialConstantsGPU matConst{ draw.material.roughness,
+                                                     draw.material.metalness,
+                                                     0.0f, 0.0f };
+                enc->setFragmentBytes(&matConst, sizeof(MaterialConstantsGPU), 1);
+                // Fragment stage: material textures (fallback if nullptr)
+                enc->setFragmentTexture(
+                    draw.material.albedo    ? draw.material.albedo    : fallbackAlbedo,   0);
+                enc->setFragmentTexture(
+                    draw.material.normalMap ? draw.material.normalMap : fallbackNormal,   1);
+                enc->setFragmentTexture(
+                    draw.material.emissive  ? draw.material.emissive  : fallbackEmissive, 2);
+                enc->setIndexBuffer(draw.indexBuffer, 0, true);
+                enc->drawIndexed(draw.indexCount);
+            }
         };
         m_graph.addRenderPass(std::move(p));
     }
@@ -736,12 +730,13 @@ void FrameRenderer::renderFrame(IRenderDevice& device,
         p.execute = [=](IComputePassEncoder* enc)
         {
             enc->setComputePipeline(pLighting);
-            enc->setTexture(gAlbedoTex, 0);   // gAlbedoRoughness
-            enc->setTexture(gNormalTex, 1);   // gNormalMetal
-            enc->setTexture(gDepthTex,  2);   // gDepth
-            enc->setTexture(ssaoTex,    3);   // ssaoTex
+            enc->setTexture(gAlbedoTex,    0);   // gAlbedoAO
+            enc->setTexture(gNormalTex,    1);   // gNormalRoughMet
+            enc->setTexture(gDepthTex,     2);   // gDepth
+            enc->setTexture(ssaoTex,       3);   // ssaoTex
             enc->setTexture(hdrTex,        4);   // hdrOut (write)
-            enc->setTexture(shadowDepthTex, 5);   // shadow depth (PCF)
+            enc->setTexture(shadowDepthTex, 5);  // shadow depth (PCF)
+            enc->setTexture(gEmissiveTex,  6);   // gEmissive
             enc->setBuffer(frameBuf,  0, 0);
             enc->setBuffer(lightBuf,  0, 1);  // lightCount at offset 0
             enc->setBuffer(lightBuf, 16, 2);  // PointLightGPU[] at offset 16

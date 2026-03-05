@@ -28,6 +28,32 @@ message(STATUS "Daedalus: platform=${CMAKE_SYSTEM_NAME}  backend=${DAEDALUS_REND
 # ─── Third-party dependencies ─────────────────────────────────────────────────
 include(FetchContent)
 
+# stb — single-header image load/write
+FetchContent_Declare(
+    stb
+    GIT_REPOSITORY https://github.com/nothings/stb.git
+    GIT_TAG        master
+    GIT_SHALLOW    TRUE
+)
+FetchContent_MakeAvailable(stb)
+
+# cgltf — single-header glTF 2.0 parser (spec-mandated for mesh import)
+FetchContent_Declare(
+    cgltf
+    GIT_REPOSITORY https://github.com/jkuhlmann/cgltf.git
+    GIT_TAG        v1.14
+    GIT_SHALLOW    TRUE
+)
+FetchContent_MakeAvailable(cgltf)
+
+# DaedalusThirdParty — INTERFACE target exposing stb + cgltf include paths.
+# Any module that needs image or mesh loading links against this target.
+add_library(DaedalusThirdParty INTERFACE)
+target_include_directories(DaedalusThirdParty INTERFACE
+    ${stb_SOURCE_DIR}
+    ${cgltf_SOURCE_DIR}
+)
+
 # SDL3 — window, input, Metal view
 FetchContent_Declare(
     SDL3
@@ -49,6 +75,17 @@ FetchContent_Declare(
 )
 set(GLM_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(glm)
+
+# nlohmann/json — JSON serialisation for .dmap.json
+FetchContent_Declare(
+    nlohmann_json
+    GIT_REPOSITORY https://github.com/nlohmann/json.git
+    GIT_TAG        v3.11.3
+    GIT_SHALLOW    TRUE
+)
+set(JSON_BuildTests     OFF CACHE BOOL "" FORCE)
+set(JSON_Install        OFF CACHE BOOL "" FORCE)
+FetchContent_MakeAvailable(nlohmann_json)
 
 # GoogleTest — unit testing
 FetchContent_Declare(

@@ -1,13 +1,14 @@
 // lighting.metal
 // Deferred PBR lighting pass (compute).
 //
-// Inputs:
-//   texture(0) = gAlbedoRoughness  RGBA8Unorm  (read)
-//   texture(1) = gNormalMetal      RGBA16Float (read, xyz=normal, a=metalness)
-//   texture(2) = gDepth            Depth32Float (read)
-//   texture(3) = ssaoTex           R16Float    (read)
-//   texture(4) = hdrOut            RGBA16Float (write)
-//   texture(5) = shadowMap         Depth32Float (read, manual PCF compare)
+// G-buffer inputs (spec §Pass 4 layout):
+//   texture(0) = gAlbedoAO         RGBA8Unorm   albedo.rgb + baked_AO.a
+//   texture(1) = gNormalRoughMet   RGBA8Unorm   oct_normal.rg + roughness.b + metalness.a
+//   texture(2) = gDepth            Depth32Float depth
+//   texture(3) = ssaoTex           R32Float     SSAO occlusion
+//   texture(4) = hdrOut            RGBA16Float  HDR output (write)
+//   texture(5) = shadowMap         Depth32Float PCF shadow depth
+//   texture(6) = gEmissive         RGBA16Float  emissive.rgb
 //   buffer(0)  = FrameConstants
 //   buffer(1)  = point light count (u32)
 //   buffer(2)  = PointLightGPU[]
@@ -16,12 +17,13 @@
 #include "common.h"
 
 kernel void lighting_main(
-    texture2d<float, access::read>   gAlbedoRoughness [[texture(0)]],
-    texture2d<float, access::read>   gNormalMetal     [[texture(1)]],
+    texture2d<float, access::read>   gAlbedoAO        [[texture(0)]],
+    texture2d<float, access::read>   gNormalRoughMet  [[texture(1)]],
     texture2d<float, access::read>   gDepth           [[texture(2)]],
     texture2d<float, access::read>   ssaoTex          [[texture(3)]],
     texture2d<float, access::write>  hdrOut           [[texture(4)]],
     texture2d<float, access::read>   shadowMap        [[texture(5)]],
+    texture2d<float, access::read>   gEmissive        [[texture(6)]],
     constant FrameConstants&         frame            [[buffer(0)]],
     constant uint&                   lightCount       [[buffer(1)]],
     constant PointLightGPU*          lights           [[buffer(2)]],
@@ -42,15 +44,17 @@ kernel void lighting_main(
         return;
     }
 
-    // ─── Unpack G-buffer ──────────────────────────────────────────────────────
-    float4 albedoR  = gAlbedoRoughness.read(gid);
-    float4 normalM  = gNormalMetal.read(gid);
-    float  ao       = ssaoTex.read(gid).r;
+    // ─── Unpack G-buffer (spec §Pass 4 layout) ─────────────────────────────────────────────────
+    float4 albedoAO     = gAlbedoAO.read(gid);
+    float4 normalRoughM = gNormalRoughMet.read(gid);
+    float  ao           = ssaoTex.read(gid).r;
 
-    float3 albedo    = albedoR.rgb;
-    float  roughness = albedoR.a;
-    float3 N         = normalize(normalM.xyz);
-    float  metalness = normalM.a;
+    float3 albedo    = albedoAO.rgb;
+    // RT1.rg stores octahedral normal packed as [0,1]; remap to [-1,+1] before decoding.
+    float2 octN      = normalRoughM.rg * 2.0 - 1.0;
+    float3 N         = decode_normal(octN);
+    float  roughness = normalRoughM.b;
+    float  metalness = normalRoughM.a;
 
     float3 worldPos = reconstruct_world_pos(depth, uv, frame.invViewProj);
     float3 V        = normalize(frame.cameraPos.xyz - worldPos);
@@ -129,9 +133,12 @@ kernel void lighting_main(
                     * lCol * lIntens * attenuation;
     }
 
-    // ─── Ambient (AO-modulated) ───────────────────────────────────────────────
+    // ─── Ambient (AO-modulated) ─────────────────────────────────────────────────────
     float3 ambient = frame.ambientColor.xyz * albedo * ao;
 
-    float3 colour = radiance + ambient;
-    hdrOut.write(float4(colour, 1.0f), gid);
+    // ─── Emissive (additive, not scaled by lights or AO) ─────────────────────────────
+    float3 emissive = gEmissive.read(gid).rgb;
+
+    float3 hdr = radiance + ambient + emissive;
+    hdrOut.write(float4(hdr, 1.0f), gid);
 }

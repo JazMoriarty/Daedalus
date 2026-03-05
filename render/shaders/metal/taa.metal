@@ -71,6 +71,14 @@ fragment float4 taa_frag(
     float2 uvPrev = uv - vel;
     uvPrev        = clamp(uvPrev, float2(0), float2(1));
 
+    // ─── Bootstrap guard ──────────────────────────────────────────────────────
+    // For the first 8 frames the history textures are either uncleared GPU
+    // memory (possibly green from a previous run) or have only been written once.
+    // Bypass history entirely and return the current HDR frame so the history
+    // ping-pong warms up cleanly before the temporal blend begins.
+    if (frame.frameIndex < 8.5f)
+        return float4(curr, 1.0f);
+
     float3 hist = history.sample(samp, uvPrev).rgb;
 
     // ─── 3×3 neighbourhood variance clamp ────────────────────────────────────
@@ -96,15 +104,11 @@ fragment float4 taa_frag(
     hist = clip_aabb(cMin, cMax, hist);
 
     // ─── Luminance-weighted blend ─────────────────────────────────────────────
-    float blendAlpha = 0.1;  // 10% current, 90% history
-
-    // Increase blend on first frame (history is invalid)
-    if (frame.frameIndex < 1.5) blendAlpha = 1.0;
-
-    // Increase blend when velocity is large
+    float blendAlpha = 0.1f;   // 10% current, 90% history
+    // Increase blend weight when velocity is large (fast-moving objects).
     float speed = length(vel);
-    blendAlpha  = mix(blendAlpha, 0.5, saturate(speed * 100.0));
+    blendAlpha  = mix(blendAlpha, 0.5f, saturate(speed * 100.0f));
 
     float3 result = mix(hist, curr, blendAlpha);
-    return float4(result, 1.0);
+    return float4(result, 1.0f);
 }

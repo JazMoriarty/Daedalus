@@ -1,32 +1,42 @@
 // gbuffer.metal
 // Geometry pass: fills the G-buffer with surface properties.
 //
-// G-buffer layout:
-//   RT0 (RGBA8Unorm)  : albedo.rgb + roughness.a
-//   RT1 (RGBA16Float) : world normal.xyz + metalness.a
-//   RT2 (RG16Float)   : motion vectors (in UV-delta space)
+// G-buffer layout (spec §Pass 4):
+//   RT0 (RGBA8Unorm)  : albedo.rgb + baked_AO.a  (AO defaults to 1.0 until SSAO is wired)
+//   RT1 (RGBA8Unorm)  : octahedral_normal.rg + roughness.b + metalness.a
+//   RT2 (RGBA16Float) : emissive.rgb  (a unused)
+//   RT3 (RG16Float)   : motion vectors (UV-delta space)
 //
 // Depth attachment: Depth32Float (written by hardware).
+//
+// Per-draw resources:
+//   texture(0) = albedo map     (RGBA8, sRGB or linear)
+//   texture(1) = normal map     (RGBA8, tangent-space)
+//   texture(2) = emissive map   (RGBA8, linear)
+//   sampler(0) = linear-repeat
+//   buffer(1)  = MaterialConstants (roughness, metalness scalars)
 
 #include "common.h"
 
-// ─── Vertex ──────────────────────────────────────────────────────────────────
+// ─── Vertex ──────────────────────────────────────────────────────────────────────────────────
 
 struct GBufVertIn
 {
     float3 position [[attribute(0)]];
     float3 normal   [[attribute(1)]];
     float2 uv       [[attribute(2)]];
-    float4 tangent  [[attribute(3)]];
+    float4 tangent  [[attribute(3)]];  // xyz = tangent, w = handedness (+1 or -1)
 };
 
 struct GBufVertOut
 {
-    float4 position     [[position]];
+    float4 position      [[position]];
     float3 worldNormal;
+    float3 worldTangent;
+    float3 worldBitangent;
     float2 uv;
-    float4 currClip;    // jittered clip pos (for motion)
-    float4 prevClip;    // previous jittered clip pos
+    float4 currClip;     // jittered clip pos (for motion vectors)
+    float4 prevClip;     // previous jittered clip pos
 };
 
 vertex GBufVertOut gbuffer_vert(
@@ -36,52 +46,77 @@ vertex GBufVertOut gbuffer_vert(
 {
     GBufVertOut out;
 
-    float4 worldPos = model.model * float4(in.position, 1.0);
-    // TAA jitter is already baked into frame.viewProj by the CPU-side jitter matrix.
-    float4 clipPos  = frame.viewProj * worldPos;
-    out.position    = clipPos;
+    float4 worldPos  = model.model * float4(in.position, 1.0);
+    float4 clipPos   = frame.viewProj * worldPos;
+    out.position     = clipPos;
+    out.currClip     = clipPos;
 
-    // Previous-frame clip position (for motion vectors, uses unjittered prevViewProj)
     float4 prevWorld = model.prevModel * float4(in.position, 1.0);
     out.prevClip     = frame.prevViewProj * prevWorld;
 
-    out.currClip    = clipPos;
-    out.worldNormal = normalize((model.normalMat * float4(in.normal, 0.0)).xyz);
-    out.uv          = in.uv;
+    // Transform normal and tangent to world space via the normal matrix.
+    float3 N = normalize((model.normalMat * float4(in.normal,      0.0)).xyz);
+    float3 T = normalize((model.normalMat * float4(in.tangent.xyz, 0.0)).xyz);
+    // Re-orthogonalise T against N (Gram-Schmidt).
+    T = normalize(T - dot(T, N) * N);
+    // Compute bitangent; handedness is stored in tangent.w.
+    float3 B = cross(N, T) * in.tangent.w;
+
+    out.worldNormal    = N;
+    out.worldTangent   = T;
+    out.worldBitangent = B;
+    out.uv             = in.uv;
     return out;
 }
 
-// ─── Fragment ─────────────────────────────────────────────────────────────────
+// ─── Fragment ─────────────────────────────────────────────────────────────────────────────────
 
 struct GBufFragOut
 {
-    float4 albedoRoughness [[color(0)]];  // RGBA8Unorm
-    float4 normalMetalness [[color(1)]];  // RGBA16Float
-    float2 motionVectors   [[color(2)]];  // RG16Float
+    float4 albedoAO       [[color(0)]];  // RGBA8Unorm  — albedo.rgb + baked_AO.a
+    float4 normalRoughMet [[color(1)]];  // RGBA8Unorm  — oct_normal.rg + roughness.b + metalness.a
+    float4 emissive       [[color(2)]];  // RGBA16Float — emissive.rgb (a unused)
+    float2 motionVectors  [[color(3)]];  // RG16Float   — UV-space motion delta
 };
 
 fragment GBufFragOut gbuffer_frag(
-    GBufVertOut              in    [[stage_in]],
-    constant FrameConstants& frame [[buffer(0)]])
+    GBufVertOut                    in         [[stage_in]],
+    texture2d<float>               albedoTex  [[texture(0)]],
+    texture2d<float>               normalTex  [[texture(1)]],
+    texture2d<float>               emissiveTex [[texture(2)]],
+    sampler                        samp       [[sampler(0)]],
+    constant FrameConstants&       frame      [[buffer(0)]],
+    constant MaterialConstants&    mat        [[buffer(1)]])
 {
     GBufFragOut out;
 
-    // ─── Procedural checkerboard albedo ───────────────────────────────────────
-    float2 scaled = in.uv * 4.0;
-    float  check  = fmod(floor(scaled.x) + floor(scaled.y), 2.0);
-    float3 albedo = mix(float3(0.85, 0.85, 0.85), float3(0.15, 0.15, 0.15), check);
+    // ─── Albedo ─────────────────────────────────────────────────────────────────────
+    float3 albedo = albedoTex.sample(samp, in.uv).rgb;
 
-    out.albedoRoughness = float4(albedo, 0.5);       // roughness = 0.5
-    out.normalMetalness = float4(normalize(in.worldNormal), 0.0); // metalness = 0
+    // RT0: albedo.rgb + baked AO stub (1.0 until SSAO is wired into the G-buffer)
+    out.albedoAO = float4(albedo, 1.0);
 
-    // ─── Motion vectors (NDC delta → UV delta) ────────────────────────────────
-    float2 currNDC  = in.currClip.xy / in.currClip.w;  // jittered (frame.viewProj)
-    float2 prevNDC  = in.prevClip.xy / in.prevClip.w;  // unjittered (frame.prevViewProj)
-    // Remove TAA jitter from current NDC.
-    // frame.jitter is in pixel space; NDC shift = jitter_px * (2 / screenSize).
+    // ─── Tangent-space normal mapping ───────────────────────────────────────────────
+    // Sample [0,1] normal map and remap to [-1,+1] tangent-space vector.
+    float3 tNormal = normalTex.sample(samp, in.uv).xyz * 2.0 - 1.0;
+    // Build TBN and transform to world space.
+    float3x3 TBN    = float3x3(in.worldTangent, in.worldBitangent, in.worldNormal);
+    float3   wNormal = normalize(TBN * tNormal);
+
+    // RT1: octahedral-encoded normal (RG) + roughness (B) + metalness (A)
+    float2 octN = encode_normal(wNormal);
+    // Remap [-1,+1] → [0,1] for RGBA8Unorm storage.
+    out.normalRoughMet = float4(octN * 0.5 + 0.5, mat.roughness, mat.metalness);
+
+    // ─── Emissive ─────────────────────────────────────────────────────────────────────
+    out.emissive = float4(emissiveTex.sample(samp, in.uv).rgb, 0.0);
+
+    // ─── Motion vectors (NDC delta → UV delta) ──────────────────────────────────────
+    float2 currNDC   = in.currClip.xy / in.currClip.w;
+    float2 prevNDC   = in.prevClip.xy / in.prevClip.w;
     float2 jitterNDC = frame.jitter * frame.screenSize.zw * 2.0;
-    float2 currUV   = ndc_to_uv(currNDC - jitterNDC);
-    float2 prevUV   = ndc_to_uv(prevNDC);   // already unjittered
+    float2 currUV    = ndc_to_uv(currNDC - jitterNDC);
+    float2 prevUV    = ndc_to_uv(prevNDC);
     out.motionVectors = currUV - prevUV;
 
     return out;

@@ -84,7 +84,20 @@ struct alignas(16) SpotLightGPU
 };
 static_assert(sizeof(SpotLightGPU) == 64, "SpotLightGPU size mismatch");
 
-// ─── LightBufferGPU ───────────────────────────────────────────────────────────────
+// ─── MaterialConstantsGPU ─────────────────────────────────────────────────────────────────
+// Per-draw material scalars uploaded to the G-buffer fragment stage.
+// Matches MaterialConstants in common.h.
+
+struct alignas(16) MaterialConstantsGPU
+{
+    f32 roughness = 0.5f;
+    f32 metalness = 0.0f;
+    f32 pad0      = 0.0f;
+    f32 pad1      = 0.0f;
+};
+static_assert(sizeof(MaterialConstantsGPU) == 16, "MaterialConstantsGPU must be 16 bytes");
+
+// ─── LightBufferGPU ───────────────────────────────────────────────────────────────────
 // Header placed at the front of the light storage buffer.
 
 struct alignas(16) LightBufferHeader

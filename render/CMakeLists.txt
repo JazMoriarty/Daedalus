@@ -6,12 +6,14 @@ target_include_directories(DaedalusRender
 )
 
 target_link_libraries(DaedalusRender PUBLIC DaedalusCore)
+target_link_libraries(DaedalusRender PRIVATE DaedalusThirdParty)
 target_compile_features(DaedalusRender PUBLIC cxx_std_23)
 
-# ─── Cross-platform render-graph + frame renderer sources ───────────────────
+# ─── Cross-platform render-graph + frame renderer sources ───────────────────────
 target_sources(DaedalusRender PRIVATE
     src/render_graph/render_graph.cpp
     src/renderer/frame_renderer.cpp
+    src/asset_loader.cpp
 )
 
 # ─── Platform backend ───────────────────────────────────────────────────────

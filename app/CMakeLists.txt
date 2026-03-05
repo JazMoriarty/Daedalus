@@ -11,6 +11,8 @@ target_include_directories(DaedalusApp
 target_link_libraries(DaedalusApp PRIVATE
     DaedalusCore
     DaedalusRender
+    DaedalusWorld
+    DaedalusThirdParty
     SDL3::SDL3-static
 )
 

@@ -5,6 +5,7 @@
 
 #include "daedalus/core/types.h"
 #include "daedalus/render/rhi/i_buffer.h"
+#include "daedalus/render/rhi/i_texture.h"
 
 #include <glm/glm.hpp>
 #include <vector>
@@ -12,17 +13,33 @@
 namespace daedalus::render
 {
 
+// ─── Material ─────────────────────────────────────────────────────────────────
+// PBR material properties for a single draw call.
+// All texture pointers are non-owning; the owner is responsible for lifetime.
+// nullptr textures fall back to 1×1 engine-owned defaults in FrameRenderer.
+
+struct Material
+{
+    rhi::ITexture* albedo    = nullptr;  ///< sRGB albedo map.  nullptr → opaque white.
+    rhi::ITexture* normalMap = nullptr;  ///< Tangent-space normal map. nullptr → flat (0,0,1).
+    rhi::ITexture* emissive  = nullptr;  ///< Linear emissive map.     nullptr → black.
+    f32 roughness = 0.5f;               ///< Scalar override (0 = mirror, 1 = fully rough).
+    f32 metalness = 0.0f;               ///< Scalar override (0 = dielectric, 1 = metal).
+};
+
 // ─── MeshDraw ─────────────────────────────────────────────────────────────────
-// A single draw call: geometry pointers + per-instance transform.
+// A single draw call: geometry pointers + per-instance transform + material.
 
 struct MeshDraw
 {
-    rhi::IBuffer* vertexBuffer  = nullptr;  ///< Interleaved vertices (stride 48B)
-    rhi::IBuffer* indexBuffer   = nullptr;  ///< u32 indices
-    u32           indexCount    = 0;
+    rhi::IBuffer*  vertexBuffer = nullptr;         ///< Interleaved vertices (stride 48B)
+    rhi::IBuffer*  indexBuffer  = nullptr;         ///< u32 indices
+    u32            indexCount   = 0;
 
-    glm::mat4     modelMatrix   = glm::mat4(1.0f);
-    glm::mat4     prevModel     = glm::mat4(1.0f);  ///< For TAA motion vectors
+    glm::mat4      modelMatrix  = glm::mat4(1.0f);
+    glm::mat4      prevModel    = glm::mat4(1.0f); ///< For TAA motion vectors
+
+    Material       material;                       ///< PBR material for this draw
 };
 
 // ─── PointLight ───────────────────────────────────────────────────────────────
@@ -79,6 +96,12 @@ struct SceneView
     // Only the first spot light casts a shadow map.
 
     std::vector<SpotLight> spotLights;
+
+    // ─── Mesh draw list ───────────────────────────────────────────────────────
+    // Populated by the application each frame.  FrameRenderer iterates this
+    // list for both the shadow depth pass and the G-buffer pass.
+
+    std::vector<MeshDraw> meshDraws;
 
     // ─── Timing ───────────────────────────────────────────────────────────────
 

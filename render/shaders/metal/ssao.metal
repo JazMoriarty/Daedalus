@@ -34,7 +34,10 @@ kernel void ssao_main(
     }
 
     float3 worldPos = reconstruct_world_pos(depth, uv, frame.invViewProj);
-    float3 N        = normalize(gNormalMetal.read(gid).xyz);
+    // RT1 stores octahedral-encoded normal in RG (packed [0,1]) — decode properly.
+    float4 normalData = gNormalMetal.read(gid);
+    float2 octN_raw   = normalData.rg * 2.0f - 1.0f;  // remap [0,1] → [-1,1]
+    float3 N          = decode_normal(octN_raw);
 
     // Build a tangent frame around the normal
     float3 up     = (abs(N.y) < 0.999f) ? float3(0, 1, 0) : float3(1, 0, 0);

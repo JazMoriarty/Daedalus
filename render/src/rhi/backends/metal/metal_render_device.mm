@@ -451,6 +451,9 @@ public:
         [m_encoder setRenderPipelineState:mp->renderPSO()];
         if (mp->depthStencilState())
             [m_encoder setDepthStencilState:mp->depthStencilState()];
+        // Generated world geometry (sector tessellator) uses CCW winding for front faces.
+        // Metal defaults front-facing winding to clockwise, which culls floor/ceiling.
+        [m_encoder setFrontFacingWinding:MTLWindingCounterClockwise];
         [m_encoder setCullMode:mp->cullMode()];
     }
 

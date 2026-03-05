@@ -42,7 +42,8 @@ public:
     // ─── Lifecycle ────────────────────────────────────────────────────────────
 
     /// Load shaders from `shaderLibPath` (.metallib), create all PSOs,
-    /// allocate persistent GPU resources, and build the test-room geometry.
+    /// and allocate persistent GPU resources.
+    /// Geometry is supplied per-frame via SceneView::meshDraws.
     void initialize(rhi::IRenderDevice& device,
                     const std::string&  shaderLibPath,
                     u32                 width,
@@ -77,16 +78,13 @@ private:
     std::unique_ptr<rhi::IPipeline> m_bloomBlurVPSO;
     std::unique_ptr<rhi::IPipeline> m_tonemapPSO;
 
-    // ─── Test-room geometry ───────────────────────────────────────────────────
-
-    std::unique_ptr<rhi::IBuffer> m_roomVBO;        ///< 44 vertices × 48 B
-    std::unique_ptr<rhi::IBuffer> m_roomIBO;        ///< 72 u32 indices
-    static constexpr u32          k_roomIndexCount = 72;
-
     // ─── Per-frame GPU buffers ────────────────────────────────────────────────
 
     std::unique_ptr<rhi::IBuffer> m_frameConstBuf;  ///< FrameGPU  (512 B)
     std::unique_ptr<rhi::IBuffer> m_lightBuf;       ///< u32 header + PointLightGPU[]
+
+    /// Spot light constant buffer (SpotLightGPU, 64 B) — uploaded every frame.
+    std::unique_ptr<rhi::IBuffer> m_spotLightBuf;
 
     // ─── Persistent textures ─────────────────────────────────────────────────
 
@@ -96,12 +94,15 @@ private:
     /// Sun shadow depth map (2048×2048 Depth32Float, persistent).
     std::unique_ptr<rhi::ITexture> m_shadowDepthTex;
 
-    // ─── Sampler ─────────────────────────────────────────────────────────────
+    /// 1×1 fallback textures bound when a MeshDraw material slot is nullptr.
+    std::unique_ptr<rhi::ITexture> m_fallbackAlbedo;    ///< Opaque white  (RGBA8Unorm)
+    std::unique_ptr<rhi::ITexture> m_fallbackNormal;    ///< Flat normal   (RGBA8Unorm, 128,128,255,255)
+    std::unique_ptr<rhi::ITexture> m_fallbackEmissive;  ///< Black emissive (RGBA8Unorm)
+
+    // ─── Samplers ─────────────────────────────────────────────────────────────
 
     std::unique_ptr<rhi::ISampler> m_linearClampSampler;
-
-    /// Spot light constant buffer (SpotLightGPU, 64 B) — uploaded every frame.
-    std::unique_ptr<rhi::IBuffer> m_spotLightBuf;
+    std::unique_ptr<rhi::ISampler> m_linearRepeatSampler; ///< Used by G-buffer texture sampling.
 
     // ─── Render graph ─────────────────────────────────────────────────────────
 
@@ -116,7 +117,6 @@ private:
     // ─── Internal helpers ─────────────────────────────────────────────────────
 
     void createPSOs(rhi::IRenderDevice& device, const std::string& libPath);
-    void createGeometry(rhi::IRenderDevice& device);
     void createPersistentResources(rhi::IRenderDevice& device, u32 w, u32 h);
     void recreateTAAHistory(rhi::IRenderDevice& device, u32 w, u32 h);
 
