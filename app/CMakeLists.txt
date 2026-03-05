@@ -32,5 +32,8 @@ if(DAEDALUS_PLATFORM_MACOS)
         COMMENT "Copying daedalus_shaders.metallib to app output directory"
     )
     add_custom_target(CopyDaedalusShaders ALL DEPENDS "${METALLIB_APP_COPY}")
+    # Ensure the render-side DaedalusShaders target runs (and recompiles changed
+    # .metal files) before we attempt to copy the metallib to the app directory.
+    add_dependencies(CopyDaedalusShaders DaedalusShaders)
     add_dependencies(DaedalusApp CopyDaedalusShaders)
 endif()

@@ -51,6 +51,14 @@ struct PointLightGPU
     float4 colorIntensity;  // xyz = colour, w = intensity
 };
 
+struct SpotLightGPU       // buffer(3) in lighting compute, 64 bytes
+{
+    float4 positionRange;      // xyz = world pos,     w = range
+    float4 directionOuterCos;  // xyz = normalised dir, w = cos(outerConeAngle)
+    float4 colorIntensity;     // xyz = colour,         w = intensity
+    float4 innerCosAndPad;     // x   = cos(innerConeAngle), yzw = 0
+};
+
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 /// Reconstruct world-space position from NDC depth and screen UV.

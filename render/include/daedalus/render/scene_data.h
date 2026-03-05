@@ -71,7 +71,20 @@ struct alignas(16) PointLightGPU
 };
 static_assert(sizeof(PointLightGPU) == 32, "PointLightGPU size mismatch");
 
-// ─── LightBufferGPU ───────────────────────────────────────────────────────────
+// ─── SpotLightGPU ───────────────────────────────────────────────────────────────
+// Constant buffer (64 bytes) for the single shadow-casting spot light.
+// All 4×float4 to avoid cross-platform padding issues.
+
+struct alignas(16) SpotLightGPU
+{
+    glm::vec4 positionRange;      // xyz = world pos,     w = range
+    glm::vec4 directionOuterCos; // xyz = normalised dir, w = cos(outerConeAngle)
+    glm::vec4 colorIntensity;    // xyz = colour,         w = intensity
+    glm::vec4 innerCosAndPad;    // x   = cos(innerConeAngle), yzw = 0
+};
+static_assert(sizeof(SpotLightGPU) == 64, "SpotLightGPU size mismatch");
+
+// ─── LightBufferGPU ───────────────────────────────────────────────────────────────
 // Header placed at the front of the light storage buffer.
 
 struct alignas(16) LightBufferHeader

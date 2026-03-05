@@ -209,12 +209,26 @@ int main(int /*argc*/, char* /*argv*/[])
         scene.deltaTime = dt;
         scene.frameIndex = frameIdx;
 
-        // Single warm overhead point light
+        // Interior — sun does not penetrate a closed room
+        scene.sunIntensity = 0.0f;
+
+        // Soft fill: low-intensity overhead point light
         scene.pointLights.push_back({
             glm::vec3(0.0f, 3.6f, 0.0f),  // position
-            4.0f,                           // radius
+            6.0f,                           // radius
             glm::vec3(1.0f, 0.92f, 0.78f), // warm white
-            3.5f                            // intensity
+            1.2f                            // low fill — spot is the key light
+        });
+
+        // Key spot light: upper-left corner pointing at the centre box
+        scene.spotLights.push_back({
+            glm::vec3(-2.0f, 3.5f, 0.0f),                   // position
+            glm::normalize(glm::vec3(2.0f, -2.75f, 0.0f)),  // direction → box
+            glm::radians(15.0f),                              // inner cone
+            glm::radians(30.0f),                              // outer cone
+            8.0f,                                             // range
+            glm::vec3(1.0f, 0.92f, 0.75f),                  // warm white
+            20.0f                                             // intensity
         });
 
         // ── Render ────────────────────────────────────────────────────────────

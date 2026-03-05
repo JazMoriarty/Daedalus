@@ -10,6 +10,7 @@
 #include <glm/gtc/matrix_inverse.hpp>
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 
 namespace daedalus::render
@@ -383,6 +384,15 @@ void FrameRenderer::createPersistentResources(IRenderDevice& device, u32 w, u32 
         m_linearClampSampler = device.createSampler(d);
     }
 
+    // Spot light constant buffer
+    {
+        BufferDescriptor d;
+        d.size      = sizeof(SpotLightGPU);
+        d.usage     = BufferUsage::Uniform;
+        d.debugName = "SpotLightConstants";
+        m_spotLightBuf = device.createBuffer(d);
+    }
+
     // Shadow depth map — 2048×2048, persistent across frames
     {
         TextureDescriptor d;
@@ -475,8 +485,31 @@ void FrameRenderer::renderFrame(IRenderDevice& device,
     frame.jitter     = jitterPx;
     frame.pad1       = glm::vec2(0.0f);
 
-    // ── Sun view-projection for shadow map ────────────────────────────────────
+    // ── Shadow-casting light view-projection ──────────────────────────────────────
+    // Spot light (first in list) takes priority; falls back to sun for outdoor.
+    SpotLightGPU spotGPU{};
+    if (!scene.spotLights.empty())
     {
+        const SpotLight& spot   = scene.spotLights[0];
+        const glm::vec3  pos    = spot.position;
+        const glm::vec3  dir    = glm::normalize(spot.direction);
+        const glm::vec3  up     = (std::abs(dir.y) > 0.99f)
+                                  ? glm::vec3(1.f, 0.f, 0.f)
+                                  : glm::vec3(0.f, 1.f, 0.f);
+        const glm::mat4 spotView = glm::lookAtLH(pos, pos + dir, up);
+        const glm::mat4 spotProj = glm::perspectiveLH_ZO(
+                                       spot.outerConeAngle * 2.0f, 1.0f,
+                                       0.5f, spot.range);  // 0.5 near: no surface closer; much better NDC depth precision
+        frame.sunViewProj = spotProj * spotView;
+
+        spotGPU.positionRange     = glm::vec4(pos, spot.range);
+        spotGPU.directionOuterCos = glm::vec4(dir, std::cos(spot.outerConeAngle));
+        spotGPU.colorIntensity    = glm::vec4(spot.color, spot.intensity);
+        spotGPU.innerCosAndPad    = glm::vec4(std::cos(spot.innerConeAngle), 0.f, 0.f, 0.f);
+    }
+    else
+    {
+        // Outdoor fallback: orthographic sun shadow
         const glm::vec3 lightDir = glm::normalize(scene.sunDirection);
         const glm::vec3 up       = (std::abs(lightDir.y) > 0.99f)
                                    ? glm::vec3(0.f, 0.f, 1.f)
@@ -485,6 +518,13 @@ void FrameRenderer::renderFrame(IRenderDevice& device,
         const glm::mat4 lightView = glm::lookAtLH(center + lightDir * 20.f, center, up);
         const glm::mat4 lightProj = glm::orthoLH_ZO(-12.f, 12.f, -12.f, 12.f, 0.1f, 40.f);
         frame.sunViewProj = lightProj * lightView;
+    }
+
+    // Upload spot light buffer
+    {
+        void* p = m_spotLightBuf->map();
+        std::memcpy(p, &spotGPU, sizeof(SpotLightGPU));
+        m_spotLightBuf->unmap();
     }
 
     {
@@ -598,6 +638,7 @@ void FrameRenderer::renderFrame(IRenderDevice& device,
     // Capture resources by value for lambda use
     IBuffer*   frameBuf   = m_frameConstBuf.get();
     IBuffer*   lightBuf   = m_lightBuf.get();
+    IBuffer*   spotBuf    = m_spotLightBuf.get();
     IBuffer*   vbo        = m_roomVBO.get();
     IBuffer*   ibo        = m_roomIBO.get();
     ISampler*  linSamp    = m_linearClampSampler.get();
@@ -704,6 +745,7 @@ void FrameRenderer::renderFrame(IRenderDevice& device,
             enc->setBuffer(frameBuf,  0, 0);
             enc->setBuffer(lightBuf,  0, 1);  // lightCount at offset 0
             enc->setBuffer(lightBuf, 16, 2);  // PointLightGPU[] at offset 16
+            enc->setBuffer(spotBuf,   0, 3);  // SpotLightGPU
             enc->dispatch(swapW, swapH, 1);
         };
         m_graph.addComputePass(std::move(p));

@@ -35,6 +35,20 @@ struct PointLight
     f32       intensity = 1.0f;
 };
 
+// ─── SpotLight ────────────────────────────────────────────────────────────────
+// A cone-shaped light that casts a shadow map.
+
+struct SpotLight
+{
+    glm::vec3 position;
+    glm::vec3 direction;                          ///< Normalised, points into cone
+    f32       innerConeAngle = glm::radians(15.0f); ///< radians — full brightness inside
+    f32       outerConeAngle = glm::radians(30.0f); ///< radians — falloff to zero at edge
+    f32       range          = 10.0f;
+    glm::vec3 color          = glm::vec3(1.0f);
+    f32       intensity      = 10.0f;
+};
+
 // ─── SceneView ────────────────────────────────────────────────────────────────
 // Complete frame description: camera + lights + draw list.
 
@@ -61,9 +75,10 @@ struct SceneView
 
     std::vector<PointLight> pointLights;
 
-    // ─── Geometry ─────────────────────────────────────────────────────────────
+    // ─── Spot lights ───────────────────────────────────────────────────────────────
+    // Only the first spot light casts a shadow map.
 
-    std::vector<MeshDraw> meshDraws;
+    std::vector<SpotLight> spotLights;
 
     // ─── Timing ───────────────────────────────────────────────────────────────
 

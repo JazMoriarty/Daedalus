@@ -100,6 +100,9 @@ private:
 
     std::unique_ptr<rhi::ISampler> m_linearClampSampler;
 
+    /// Spot light constant buffer (SpotLightGPU, 64 B) — uploaded every frame.
+    std::unique_ptr<rhi::IBuffer> m_spotLightBuf;
+
     // ─── Render graph ─────────────────────────────────────────────────────────
 
     RenderGraph m_graph;
