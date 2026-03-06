@@ -18,12 +18,15 @@
 #include "cgltf.h"
 
 #include "daedalus/render/i_asset_loader.h"
+#include "daedalus/render/vox_types.h"
+#include "daedalus/render/vox_mesher.h"
 #include "daedalus/render/rhi/rhi_types.h"
 #include "daedalus/core/assert.h"
 
 #include <cmath>
 #include <cstring>
 #include <array>
+#include <fstream>
 
 namespace daedalus::render
 {
@@ -108,6 +111,142 @@ public:
             return std::unexpected(AssetError::UploadError);
 
         return texture;
+    }
+
+    // ─── Mesh loading ─────────────────────────────────────────────────────────
+
+    // ─── Vox loading ──────────────────────────────────────────────────────────
+
+    [[nodiscard]] std::expected<VoxMeshResult, AssetError>
+    loadVox(const std::filesystem::path& path) override
+    {
+        // ── Read file into memory ────────────────────────────────────────────
+        std::ifstream f(path, std::ios::binary | std::ios::ate);
+        if (!f)
+            return std::unexpected(AssetError::FileNotFound);
+
+        const auto fileSize = static_cast<std::size_t>(f.tellg());
+        f.seekg(0, std::ios::beg);
+        std::vector<u8> buf(fileSize);
+        if (!f.read(reinterpret_cast<char*>(buf.data()),
+                    static_cast<std::streamsize>(fileSize)))
+            return std::unexpected(AssetError::ParseError);
+
+        const u8* p   = buf.data();
+        const u8* end = p + buf.size();
+
+        // ── Read helpers ────────────────────────────────────────────────────
+        auto readU32 = [](const u8*& ptr) -> u32
+        {
+            u32 v = 0;
+            std::memcpy(&v, ptr, 4);
+            ptr += 4;
+            return v;
+        };
+
+        // ── Validate magic + version ─────────────────────────────────────────
+        if (end - p < 8 ||
+            p[0] != 'V' || p[1] != 'O' || p[2] != 'X' || p[3] != ' ')
+            return std::unexpected(AssetError::ParseError);
+        p += 4;
+        const u32 version = readU32(p);
+        (void)version;  // 150 or 200 — we do not need to branch on this
+
+        // ── Expect MAIN chunk ────────────────────────────────────────────────
+        if (end - p < 12 ||
+            p[0] != 'M' || p[1] != 'A' || p[2] != 'I' || p[3] != 'N')
+            return std::unexpected(AssetError::ParseError);
+        p += 4;
+        const u32 mainContent  = readU32(p);
+        const u32 mainChildren = readU32(p);
+        p += mainContent;  // MAIN content is always 0 bytes in practice
+
+        const u8* childEnd = p + mainChildren;
+
+        // ── Walk child chunks ────────────────────────────────────────────────
+        VoxData vox;
+        bool    hasPalette = false;
+        std::array<u8, 256 * 4> rgba{};
+
+        while (p + 12 <= childEnd)
+        {
+            char id[4];
+            std::memcpy(id, p, 4); p += 4;
+            const u32 contentSize  = readU32(p);
+            const u32 childrenSize = readU32(p);
+            const u8* chunkEnd     = p + contentSize;
+
+            if (std::memcmp(id, "SIZE", 4) == 0 && contentSize >= 12)
+            {
+                vox.sizeX = readU32(p);
+                vox.sizeY = readU32(p);
+                vox.sizeZ = readU32(p);
+            }
+            else if (std::memcmp(id, "XYZI", 4) == 0 && contentSize >= 4)
+            {
+                const u32 numVoxels = readU32(p);
+                vox.voxels.assign(
+                    static_cast<std::size_t>(vox.sizeX) *
+                    static_cast<std::size_t>(vox.sizeY) *
+                    static_cast<std::size_t>(vox.sizeZ), 0u);
+
+                const u32 avail = (contentSize - 4) / 4;
+                const u32 count = (numVoxels < avail) ? numVoxels : avail;
+                for (u32 i = 0; i < count; ++i)
+                {
+                    const u8 vx = *p++;
+                    const u8 vy = *p++;
+                    const u8 vz = *p++;
+                    const u8 ci = *p++;
+                    if (vx < vox.sizeX && vy < vox.sizeY && vz < vox.sizeZ && ci != 0)
+                        vox.voxels[vx + vox.sizeX * (vy + vox.sizeY * vz)] = ci;
+                }
+            }
+            else if (std::memcmp(id, "RGBA", 4) == 0 && contentSize >= 256 * 4)
+            {
+                std::memcpy(rgba.data(), p, 256 * 4);
+                hasPalette = true;
+            }
+            // else: unknown chunk — skip
+
+            p = chunkEnd;
+            p += childrenSize;  // skip sub-chunks (e.g. nGRP, nSHP in VOX 200)
+        }
+
+        if (vox.sizeX == 0 || vox.voxels.empty())
+            return std::unexpected(AssetError::ParseError);
+
+        // ── Default palette fallback (HSV rainbow, 255 entries, index 0 unused) ──
+        if (!hasPalette)
+        {
+            for (int i = 1; i < 256; ++i)
+            {
+                const float t  = static_cast<float>(i - 1) / 254.0f;  // 0..1
+                const float h6 = t * 6.0f;
+                const int   sec = static_cast<int>(h6);
+                const float fr  = h6 - static_cast<float>(sec);
+                const u8    f_  = static_cast<u8>(fr * 255.0f + 0.5f);
+                u8 r = 0, g = 0, b = 0;
+                switch (sec % 6)
+                {
+                    case 0: r=255;    g=f_;     b=0;      break;
+                    case 1: r=255-f_; g=255;    b=0;      break;
+                    case 2: r=0;      g=255;    b=f_;     break;
+                    case 3: r=0;      g=255-f_; b=255;    break;
+                    case 4: r=f_;     g=0;      b=255;    break;
+                    default:r=255;    g=0;      b=255-f_; break;
+                }
+                rgba[i * 4 + 0] = r;
+                rgba[i * 4 + 1] = g;
+                rgba[i * 4 + 2] = b;
+                rgba[i * 4 + 3] = 255u;
+            }
+        }
+
+        VoxMeshResult res;
+        res.mesh       = greedyMeshVoxels(vox);
+        res.paletteRGBA = rgba;
+        return res;
     }
 
     // ─── Mesh loading ─────────────────────────────────────────────────────────

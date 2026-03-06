@@ -31,6 +31,12 @@ struct Material
     /// Ignored by the opaque G-buffer shader; consumed by the transparent forward shader.
     /// Default: opaque white (no tint, no opacity change).
     glm::vec4 tint = glm::vec4(1.0f);
+
+    /// Sprite sheet UV crop applied in both the G-buffer and transparent shaders.
+    /// uv_sampled = in.uv * uvScale + uvOffset
+    /// Static geometry leaves these at their defaults (full texture, no offset).
+    glm::vec2 uvOffset = glm::vec2(0.0f);  ///< UV origin of the active frame cell.
+    glm::vec2 uvScale  = glm::vec2(1.0f);  ///< UV size of one frame cell.
 };
 
 // ─── MeshDraw ─────────────────────────────────────────────────────────────────

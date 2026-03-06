@@ -27,7 +27,7 @@ Build 2.0 capabilities inform what Daedalus must match and exceed. Every Build 2
 
 **Build 2.0 had:** sector-over-sector, dynamic CPU shadows, 32-bit color, voxel sprites, multi-user editing, EVALDRAW scripting, skyboxes, no sector limits, 6DOF camera.
 
-**Build 2.0 lacked:** GPU rendering, transparency, PBR materials, normal/parallax mapping, post-processing, cross-platform support, skeletal animation, modern scripting, physics, hot-reload.
+**Build 2.0 lacked:** GPU rendering, transparency, PBR materials, normal/parallax mapping, post-processing, cross-platform support, modern scripting, physics, hot-reload, voxel character pipeline.
 
 **Daedalus resolves all of the above.**
 
@@ -156,7 +156,7 @@ Runs on the CPU before any GPU work is submitted. Starting from the camera's sec
 
 #### Pass 2 — Animation Update
 
-Skeletal mesh bone matrices computed on CPU or in a compute dispatch, uploaded to per-entity GPU storage buffers. Particle system updated in a compute pass.
+Sprite sheet and rotated sprite set frame indices are advanced on the CPU each tick according to each entity's active animation state and playback rate. Results are written to per-entity GPU storage buffers as a single integer frame index — no skinning, no bone hierarchy. Particle system simulation is updated in a compute dispatch.
 
 #### Pass 3 — Depth Pre-Pass
 
@@ -251,11 +251,10 @@ Final image submitted to the RHI swapchain for OS presentation.
 
 ### Entity Visual Rendering
 
-- **Billboard Sprite:** quad oriented to face the camera (full) or camera yaw only (cylindrical). Cutout → G-buffer; blended → transparent pass.
-- **Rotated Sprite Set:** billboard with frame selected by view angle (8 or 16 sectors). Instant frame transitions preserve the retro aesthetic.
-- **Voxel Object:** asset pipeline converts voxel data to optimised meshes offline (greedy surface extraction). Rendered identically to static meshes at runtime.
+- **Billboard Sprite:** quad oriented to face the camera (full) or camera yaw only (cylindrical). Cutout → G-buffer; blended → transparent pass. Supports sprite sheet animation: the asset defines rows of frames; an `AnimationState` component selects the active row and advances the column each tick.
+- **Rotated Sprite Set:** billboard with frame selected by view angle (8 or 16 sectors) combined with animation row. Enemies and characters use this type — identical in spirit to Doom and Duke Nukem 3D. Instant frame transitions preserve the retro aesthetic.
+- **Voxel Object:** asset pipeline converts source voxel data (`.vox` format) or GLTF meshes to optimised voxel meshes offline via greedy surface extraction. For characters, the pipeline accepts a GLTF model and a target voxel resolution and produces a static voxel mesh per animation frame — skeletal animation is baked offline; the runtime has no concept of bones or skinning. Rendered identically to static meshes at runtime.
 - **Static Mesh:** indexed draw call, GPU-instanced per mesh+material pair. Instance buffers built from ECS archetype queries each frame.
-- **Skeletal Mesh:** bone matrices in per-entity GPU storage buffers. Skinning in vertex shader. Blend shape morph targets supported.
 
 ### PBR Material System
 
@@ -397,11 +396,10 @@ Left-click any surface (wall, floor, ceiling) to select it — the Property Insp
 
 All placeable world objects are unified ECS entities. The visual representation is a property of the entity's asset. Supported visual types:
 
-- **Billboard Sprite** — flat 2D image that always faces the camera
-- **Rotated Sprite Set** — multiple 2D frames selected by viewing angle (8 or 16 directions)
-- **Voxel Object** — 3D voxel model, correct from any angle and pitch
+- **Billboard Sprite** — flat 2D image that always faces the camera; supports sprite sheet animation rows/columns
+- **Rotated Sprite Set** — 2D frames selected by viewing angle (8 or 16 directions) combined with animation row; the standard type for enemies and characters
+- **Voxel Object** — 3D voxel model, correct from any angle and pitch; the asset pipeline can bake a GLTF mesh (including an animated source mesh) into per-frame voxel geometry offline, with no runtime bone or skinning data
 - **3D Mesh** — static low-poly GLTF model
-- **Skeletal Mesh** — GLTF model with bone animations
 
 ### Object Browser
 
@@ -610,9 +608,10 @@ Prefab system. Multi-user editing.
 
 ### Phase 1D — Extended Renderer
 
-Voxel sprite rendering. 3D mesh sprite rendering. Skeletal animation.
+Voxel sprite rendering. 3D mesh sprite rendering. Sprite sheet animation system (frame advancement, AnimationState component).
 GPU particle system. Decal system. Volumetric fog.
 Transparency pass. SSR. Portal/mirror rendering.
+Asset pipeline: GLTF-to-voxel offline bake tool (target resolution, per-frame voxel mesh output).
 
 ### Phase 2 — Game Layer
 

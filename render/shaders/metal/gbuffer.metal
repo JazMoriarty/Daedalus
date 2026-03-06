@@ -90,8 +90,13 @@ fragment GBufFragOut gbuffer_frag(
 {
     GBufFragOut out;
 
-    // ─── Albedo ─────────────────────────────────────────────────────────────────────
-    float4 albedoSample = albedoTex.sample(samp, in.uv);
+    // ─── Sprite sheet UV crop ───────────────────────────────────────────────────────────────────
+    // For static geometry uvOffset=(0,0) and uvScale=(1,1) are identity (no crop).
+    // For animated sprites the system writes the active frame cell before submission.
+    float2 uv = in.uv * mat.uvScale + mat.uvOffset;
+
+    // ─── Albedo ─────────────────────────────────────────────────────────────────────────────────
+    float4 albedoSample = albedoTex.sample(samp, uv);
 
     // Alpha-cutout: discard pixels where the sprite/decal alpha mask is transparent.
     // Opaque geometry is unaffected (solid textures + the 1×1 white default have alpha=1).
@@ -102,9 +107,9 @@ fragment GBufFragOut gbuffer_frag(
     // RT0: albedo.rgb + baked AO stub (1.0 until SSAO is wired into the G-buffer)
     out.albedoAO = float4(albedo, 1.0);
 
-    // ─── Tangent-space normal mapping ───────────────────────────────────────────────
+    // ─── Tangent-space normal mapping ──────────────────────────────────────────────────────────
     // Sample [0,1] normal map and remap to [-1,+1] tangent-space vector.
-    float3 tNormal = normalTex.sample(samp, in.uv).xyz * 2.0 - 1.0;
+    float3 tNormal = normalTex.sample(samp, uv).xyz * 2.0 - 1.0;
     // Build TBN and transform to world space.
     float3x3 TBN    = float3x3(in.worldTangent, in.worldBitangent, in.worldNormal);
     float3   wNormal = normalize(TBN * tNormal);
@@ -114,8 +119,8 @@ fragment GBufFragOut gbuffer_frag(
     // Remap [-1,+1] → [0,1] for RGBA8Unorm storage.
     out.normalRoughMet = float4(octN * 0.5 + 0.5, mat.roughness, mat.metalness);
 
-    // ─── Emissive ─────────────────────────────────────────────────────────────────────
-    out.emissive = float4(emissiveTex.sample(samp, in.uv).rgb, 0.0);
+    // ─── Emissive ────────────────────────────────────────────────────────────────────────────────────
+    out.emissive = float4(emissiveTex.sample(samp, uv).rgb, 0.0);
 
     // ─── Motion vectors (NDC delta → UV delta) ──────────────────────────────────────
     float2 currNDC   = in.currClip.xy / in.currClip.w;

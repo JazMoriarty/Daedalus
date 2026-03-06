@@ -41,6 +41,13 @@ struct BillboardSpriteComponent
     /// Applied on top of the texture sample in the transparent forward shader.
     /// Only used when alphaMode == AlphaMode::Blended.
     glm::vec4 tint = glm::vec4(1.0f);  ///< Default: opaque white (no tint).
+
+    /// Sprite sheet UV crop — set automatically each frame by spriteAnimationSystem().
+    /// Static sprites can leave these at their defaults (no crop applied).
+    /// uvOffset: top-left UV of the current frame cell within the sprite sheet.
+    /// uvScale:  UV extent of a single frame cell (1/frameCount, 1/rowCount).
+    glm::vec2 uvOffset = glm::vec2(0.0f);  ///< UV origin of the active frame cell.
+    glm::vec2 uvScale  = glm::vec2(1.0f);  ///< UV size of one frame cell.
 };
 
 } // namespace daedalus::render

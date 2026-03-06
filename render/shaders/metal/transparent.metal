@@ -91,13 +91,16 @@ fragment float4 transparent_frag(
     constant MaterialConstants&    mat         [[buffer(1)]],
     constant SpotLightGPU&         spotLight   [[buffer(3)]])
 {
-    // ─── Sample albedo + apply tint ───────────────────────────────────────────
-    const float4 albedoSample = albedoTex.sample(repeatSamp, in.uv);
+    // ─── Sprite sheet UV crop ────────────────────────────────────────────────
+    const float2 uv = in.uv * mat.uvScale + mat.uvOffset;
+
+    // ─── Sample albedo + apply tint ───────────────────────────────────────────────
+    const float4 albedoSample = albedoTex.sample(repeatSamp, uv);
     const float3 albedo       = albedoSample.rgb * mat.tint.rgb;
     const float  alpha        = albedoSample.a   * mat.tint.a;
 
-    // ─── World-space normal from normal map ───────────────────────────────────
-    const float3 tNormal  = normalTex.sample(repeatSamp, in.uv).xyz * 2.0 - 1.0;
+    // ─── World-space normal from normal map ─────────────────────────────────────────
+    const float3 tNormal  = normalTex.sample(repeatSamp, uv).xyz * 2.0 - 1.0;
     const float3x3 TBN    = float3x3(in.worldTangent, in.worldBitangent, in.worldNormal);
     const float3 N        = normalize(TBN * tNormal);
     const float3 V        = normalize(frame.cameraPos.xyz - in.worldPos);

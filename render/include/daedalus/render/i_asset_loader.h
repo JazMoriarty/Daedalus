@@ -13,18 +13,18 @@
 
 #include "daedalus/render/rhi/i_render_device.h"
 #include "daedalus/render/rhi/i_texture.h"
-#include "daedalus/render/vertex_types.h"
+#include "daedalus/render/mesh_data.h"    // MeshData (extracted to break circular dep with vox_types.h)
+#include "daedalus/render/vox_types.h"    // VoxMeshResult — safe now that vox_types.h no longer includes i_asset_loader.h
 #include "daedalus/core/types.h"
 
 #include <expected>
 #include <filesystem>
 #include <memory>
-#include <vector>
 
 namespace daedalus::render
 {
 
-// ─── AssetError ───────────────────────────────────────────────────────────────
+// ─── AssetError ──────────────────────────────────────────────────────────────────────────────
 // Typed error code returned by all IAssetLoader operations.
 
 enum class AssetError : u32
@@ -34,17 +34,7 @@ enum class AssetError : u32
     UploadError,    ///< GPU resource creation failed.
 };
 
-// ─── MeshData ─────────────────────────────────────────────────────────────────
-// CPU-side mesh data returned by IAssetLoader::loadMesh().
-// The caller is responsible for uploading this to GPU buffers.
-
-struct MeshData
-{
-    std::vector<StaticMeshVertex> vertices;
-    std::vector<u32>              indices;
-};
-
-// ─── IAssetLoader ─────────────────────────────────────────────────────────────
+// ─── IAssetLoader ───────────────────────────────────────────────────────────────────────────────
 // Loads source assets from disk into GPU-ready or CPU-ready data structures.
 // Obtain a concrete instance via makeAssetLoader().
 
@@ -82,6 +72,17 @@ public:
     /// @return        CPU-side mesh data, or AssetError.
     [[nodiscard]] virtual std::expected<MeshData, AssetError>
     loadMesh(const std::filesystem::path& path) = 0;
+
+    /// Load a MagicaVoxel (.vox) file, greedy-mesh it, and return the baked
+    /// mesh alongside the raw 256×1 RGBA8 palette bytes.
+    ///
+    /// The caller uploads mesh to VBO/IBO and paletteRGBA to a 256×1 texture
+    /// (RGBA8Unorm).  Vertex UVs already point to the correct palette texel.
+    ///
+    /// @param path    Absolute or relative path to the .vox file.
+    /// @return        VoxMeshResult (mesh + palette), or AssetError.
+    [[nodiscard]] virtual std::expected<VoxMeshResult, AssetError>
+    loadVox(const std::filesystem::path& path) = 0;
 
 protected:
     IAssetLoader() = default;

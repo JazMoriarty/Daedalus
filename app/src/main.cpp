@@ -31,6 +31,12 @@
 #include "daedalus/render/components/billboard_sprite_component.h"
 #include "daedalus/render/systems/mesh_render_system.h"
 #include "daedalus/render/systems/billboard_render_system.h"
+#include "daedalus/render/components/animation_state_component.h"
+#include "daedalus/render/systems/sprite_animation_system.h"
+#include "daedalus/render/vox_types.h"
+#include "daedalus/render/vox_mesher.h"
+#include "daedalus/render/components/voxel_object_component.h"
+#include "daedalus/render/systems/voxel_render_system.h"
 
 #include <SDL3/SDL.h>
 #include <glm/glm.hpp>
@@ -603,7 +609,211 @@ int main(int /*argc*/, char* /*argv*/[])
 
     std::printf("[Daedalus] Blended billboard sprite entity created.\n");
 
-    // Camera sector tracking — updated each frame.
+    // ─── Animated sprite entity (sprite sheet animation demo) ─────────────────
+    // 4-frame × 2-row sprite sheet (128×64): each frame cell is 32×32 pixels.
+    //   Row 0: idle cycle  (4 frames, 6 fps)
+    //   Row 1: walk cycle  (4 frames, 12 fps)
+    // The entity starts on row 0 (idle) and will cycle automatically.
+    // Placed at (-2, 1.5, 2) so it is visible alongside the cutout sprite.
+
+    std::unique_ptr<rhi::ITexture> animSpriteTexture;
+    {
+        constexpr int SHEET_W = 128, SHEET_H = 64;
+        constexpr int CELL_W  =  32, CELL_H  = 32;
+        constexpr int COLS = SHEET_W / CELL_W;  // 4
+        constexpr int ROWS = SHEET_H / CELL_H;  // 2
+
+        std::vector<u8> pixels(SHEET_W * SHEET_H * 4, 0u);
+
+        // Draw each frame cell with a distinct hue so animated cycling is visible.
+        // Row 0 (idle): warm reds/oranges; Row 1 (walk): cool blues/greens.
+        const u8 cellColors[ROWS][COLS][3] =
+        {
+            { {220, 60,  40},  {240, 120, 30},  {200, 200, 40},  {180, 80,  60}  },  // row 0
+            { {40,  80,  220}, {30,  160, 200},  {50,  200, 120}, {80,  120, 220} },  // row 1
+        };
+
+        for (int row = 0; row < ROWS; ++row)
+        {
+            for (int col = 0; col < COLS; ++col)
+            {
+                const int ox = col * CELL_W;
+                const int oy = row * CELL_H;
+                const float cx = ox + CELL_W  * 0.5f;
+                const float cy = oy + CELL_H * 0.5f;
+                const float radius = CELL_W * 0.4f;
+
+                for (int y = oy; y < oy + CELL_H; ++y)
+                {
+                    for (int x = ox; x < ox + CELL_W; ++x)
+                    {
+                        const float dx   = static_cast<float>(x) - cx;
+                        const float dy   = static_cast<float>(y) - cy;
+                        const float dist = std::sqrt(dx * dx + dy * dy);
+                        const int   idx  = (y * SHEET_W + x) * 4;
+
+                        if (dist < radius)
+                        {
+                            pixels[idx + 0] = cellColors[row][col][0];
+                            pixels[idx + 1] = cellColors[row][col][1];
+                            pixels[idx + 2] = cellColors[row][col][2];
+                            pixels[idx + 3] = 255u;  // fully opaque
+                        }
+                    }
+                }
+            }
+        }
+
+        rhi::TextureDescriptor td;
+        td.width     = static_cast<u32>(SHEET_W);
+        td.height    = static_cast<u32>(SHEET_H);
+        td.format    = rhi::TextureFormat::RGBA8Unorm_sRGB;
+        td.usage     = rhi::TextureUsage::ShaderRead;
+        td.initData  = pixels.data();
+        td.debugName = "sprite_sheet_test";
+        animSpriteTexture = device->createTexture(td);
+        DAEDALUS_ASSERT(animSpriteTexture != nullptr, "Failed to create animated sprite texture");
+    }
+
+    {
+        TransformComponent animTransform;
+        animTransform.position = glm::vec3(-2.0f, 1.5f, 2.0f);
+
+        render::BillboardSpriteComponent animSprite;
+        animSprite.texture   = animSpriteTexture.get();
+        animSprite.size      = glm::vec2(1.2f);
+        animSprite.alphaMode = render::AlphaMode::Cutout;
+        // uvOffset / uvScale will be set by spriteAnimationSystem each frame.
+
+        render::AnimationStateComponent animState;
+        animState.frameCount  = 4;
+        animState.rowCount    = 2;
+        animState.currentRow  = 0;    // start on idle row
+        animState.fps         = 6.0f; // idle: slow cycle
+        animState.loop        = true;
+
+        EntityId animEntity = world.createEntity();
+        world.addComponent(animEntity, animTransform);
+        world.addComponent(animEntity, std::move(animSprite));
+        world.addComponent(animEntity, std::move(animState));
+    }
+
+    std::printf("[Daedalus] Animated sprite-sheet entity created (4 frames × 2 rows, 6 fps).\n");
+
+    // ─── Voxel object entity (voxel sprite demo) ──────────────────────────────
+    // Programmatic 4×4×4 coloured volume: each column (x,z) gets a distinct
+    // palette colour so all 6 face directions and the greedy merge path are
+    // exercised.  Placed at (3, 0, -2) in sector 0, slightly offset from the
+    // box mesh so both objects are independently visible.
+
+    std::unique_ptr<rhi::ITexture> voxPaletteTex;
+    std::unique_ptr<rhi::IBuffer>  voxVBO;
+    std::unique_ptr<rhi::IBuffer>  voxIBO;
+
+    {
+        using namespace render;
+
+        VoxData testVox;
+        testVox.sizeX = 4;
+        testVox.sizeY = 4;
+        testVox.sizeZ = 4;
+        testVox.voxels.resize(4 * 4 * 4, 0u);
+
+        // Fill: skip the top centre to make the shape slightly non-trivial and
+        // produce an interesting silhouette (hollow top-centre cell).
+        for (u32 x = 0; x < 4; ++x)
+        {
+            for (u32 y = 0; y < 4; ++y)
+            {
+                for (u32 z = 0; z < 4; ++z)
+                {
+                    const bool topCentre = (y == 3 && x >= 1 && x <= 2 && z >= 1 && z <= 2);
+                    if (!topCentre)
+                    {
+                        // Each (x,z) column gets a distinct 1-based palette index
+                        // (1..16) so the different-colour boundary test path fires.
+                        const u8 ci = static_cast<u8>(1 + x + 4 * z);
+                        testVox.voxels[x + 4 * (y + 4 * z)] = ci;
+                    }
+                }
+            }
+        }
+
+        // Build a simple 16-colour palette (bright hues for indices 1-16;
+        // the remaining 239 slots stay zero which is fine — they are not used).
+        std::array<u8, 256 * 4> paletteBytes{};
+        const u8 swatchRGB[16][3] =
+        {
+            {220, 60,  40},  {240,120, 30},  {200,200, 40},  {60, 180,  60},
+            {40, 180, 220},  { 60, 80,220},  {160, 60,220},  {220, 60,160},
+            {200,200,200},  {120,120,120},  {255,160,  0},  {  0,200,160},
+            {160,240, 80},  { 80,160,240},  {240, 80,160},  {255,240,  80},
+        };
+        for (int i = 0; i < 16; ++i)
+        {
+            paletteBytes[(i + 1) * 4 + 0] = swatchRGB[i][0];
+            paletteBytes[(i + 1) * 4 + 1] = swatchRGB[i][1];
+            paletteBytes[(i + 1) * 4 + 2] = swatchRGB[i][2];
+            paletteBytes[(i + 1) * 4 + 3] = 255u;
+        }
+
+        // Upload 256×1 palette texture (RGBA8Unorm — linear, not sRGB, so
+        // the G-buffer shader sees exact palette values).
+        {
+            rhi::TextureDescriptor td;
+            td.width     = 256u;
+            td.height    = 1u;
+            td.format    = rhi::TextureFormat::RGBA8Unorm;
+            td.usage     = rhi::TextureUsage::ShaderRead;
+            td.initData  = paletteBytes.data();
+            td.debugName = "vox_palette";
+            voxPaletteTex = device->createTexture(td);
+            DAEDALUS_ASSERT(voxPaletteTex != nullptr, "Failed to create vox palette texture");
+        }
+
+        // Greedy-mesh the voxel volume on the CPU.
+        const MeshData voxMesh = greedyMeshVoxels(testVox);
+        std::printf("[Daedalus] Vox mesh: %zu verts, %zu indices.\n",
+                    voxMesh.vertices.size(), voxMesh.indices.size());
+
+        // Upload geometry.
+        {
+            rhi::BufferDescriptor d;
+            d.size      = voxMesh.vertices.size() * sizeof(StaticMeshVertex);
+            d.usage     = rhi::BufferUsage::Vertex;
+            d.initData  = voxMesh.vertices.data();
+            d.debugName = "VoxVBO";
+            voxVBO = device->createBuffer(d);
+        }
+        {
+            rhi::BufferDescriptor d;
+            d.size      = voxMesh.indices.size() * sizeof(u32);
+            d.usage     = rhi::BufferUsage::Index;
+            d.initData  = voxMesh.indices.data();
+            d.debugName = "VoxIBO";
+            voxIBO = device->createBuffer(d);
+        }
+
+        // Create ECS entity.
+        VoxelObjectComponent voxComp;
+        voxComp.vertexBuffer    = voxVBO.get();
+        voxComp.indexBuffer     = voxIBO.get();
+        voxComp.indexCount      = static_cast<u32>(voxMesh.indices.size());
+        voxComp.material.albedo = voxPaletteTex.get();
+        voxComp.material.roughness = 0.8f;
+        voxComp.material.metalness = 0.0f;
+
+        TransformComponent voxTransform;
+        voxTransform.position = glm::vec3(3.0f, 0.0f, -2.0f);
+
+        EntityId voxEntity = world.createEntity();
+        world.addComponent(voxEntity, voxTransform);
+        world.addComponent(voxEntity, std::move(voxComp));
+    }
+
+    std::printf("[Daedalus] Voxel object entity created (4×4×4 volume).\n");
+
+    // Camera sector tracking
     world::SectorId cameraSector = 0u;
 
     // ─── Frame timing + camera state ─────────────────────────────────────────
@@ -691,9 +901,11 @@ int main(int /*argc*/, char* /*argv*/[])
         }
 
         // Submit ECS entities: static meshes and billboard sprites.
-        // billboardRenderSystem routes each sprite to meshDraws (Cutout) or
-        // transparentDraws (Blended) based on its AlphaMode.
+        // spriteAnimationSystem advances frame indices and writes UV crop data
+        // into each BillboardSpriteComponent before billboardRenderSystem reads them.
+        render::spriteAnimationSystem(world, dt);
         render::meshRenderSystem(world, scene);
+        render::voxelRenderSystem(world, scene);
         render::billboardRenderSystem(world, scene, view,
                                       unitQuadVBO.get(), unitQuadIBO.get());
 

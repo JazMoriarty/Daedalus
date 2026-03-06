@@ -748,7 +748,9 @@ void FrameRenderer::renderFrame(IRenderDevice& device,
                 const MaterialConstantsGPU matConst{ draw.material.roughness,
                                                      draw.material.metalness,
                                                      0.0f, 0.0f,
-                                                     draw.material.tint };
+                                                     draw.material.tint,
+                                                     draw.material.uvOffset,
+                                                     draw.material.uvScale };
                 enc->setFragmentBytes(&matConst, sizeof(MaterialConstantsGPU), 1);
                 // Fragment stage: material textures (fallback if nullptr)
                 enc->setFragmentTexture(
@@ -882,11 +884,13 @@ void FrameRenderer::renderFrame(IRenderDevice& device,
                 enc->setVertexBuffer(draw.vertexBuffer, 0, k_vboSlot);
                 // Fragment stage: frame constants
                 enc->setFragmentBuffer(frameBuf, 0, 0);
-                // Fragment stage: material constants (roughness, metalness, tint)
+                // Fragment stage: material constants (roughness, metalness, tint, uv crop)
                 const MaterialConstantsGPU matConst{ draw.material.roughness,
                                                      draw.material.metalness,
                                                      0.0f, 0.0f,
-                                                     draw.material.tint };
+                                                     draw.material.tint,
+                                                     draw.material.uvOffset,
+                                                     draw.material.uvScale };
                 enc->setFragmentBytes(&matConst, sizeof(MaterialConstantsGPU), 1);
                 // Fragment stage: spot light
                 enc->setFragmentBuffer(spotBuf, 0, 3);

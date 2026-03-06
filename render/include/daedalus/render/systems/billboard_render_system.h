@@ -163,6 +163,11 @@ inline void billboardRenderSystem(daedalus::World&  world,
             draw.material.roughness = 1.0f;
             draw.material.metalness = 0.0f;
 
+            // Copy UV crop from sprite component (written by spriteAnimationSystem each frame;
+            // static sprites carry the identity defaults (0,0) / (1,1) which are a no-op).
+            draw.material.uvOffset = sprite.uvOffset;
+            draw.material.uvScale  = sprite.uvScale;
+
             if (sprite.alphaMode == AlphaMode::Blended)
             {
                 // Copy tint for the forward transparent shader; route to transparent list.
