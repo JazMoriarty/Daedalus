@@ -1,0 +1,149 @@
+// transparent.metal
+// Forward PBR pass for alpha-blended transparent geometry (spec §Pass 11).
+//
+// This shader is used for AlphaMode::Blended billboard sprites and any other
+// geometry that needs per-pixel alpha blending rather than hard cutout.
+//
+// Per-draw resources:
+//   texture(0)  = albedo map     (RGBA8, sRGB or linear)
+//   texture(1)  = normal map     (RGBA8, tangent-space)
+//   texture(2)  = shadow depth   (Depth32Float, read as float for bias compare)
+//   sampler(0)  = linear-repeat  (material textures)
+//   sampler(1)  = linear-clamp   (shadow depth lookup)
+//   buffer(0)   = FrameConstants  (vertex + fragment)
+//   buffer(1)   = ModelConstants  (vertex only)
+//   buffer(1)   = MaterialConstants (fragment only — includes roughness, metalness, tint)
+//   buffer(3)   = SpotLightGPU    (fragment only)
+//
+// Lighting model:
+//   Final HDR colour = ambient + Cook-Torrance spot light contribution.
+//   Shadow: single-sample bias test against the shadow atlas (same as lighting.metal).
+//   No IBL — not yet available in Phase 1D.  The ambient term uses scene.ambientColor.
+//
+// Alpha:
+//   output.a = albedoSample.a * mat.tint.a
+//   The PSO blend state is SrcAlpha / OneMinusSrcAlpha on the HDR render target.
+//
+// TAA limitation (Phase 1D):
+//   Transparent objects do not write to the G-buffer motion vector attachment.
+//   TAA reprojection uses zero motion for transparent pixels, which may produce
+//   minor ghosting for fast-moving blended sprites.  This will be resolved in a
+//   later phase when transparent objects write their own motion vectors.
+
+#include "common.h"
+
+// ─── Vertex ───────────────────────────────────────────────────────────────────
+
+struct TransVertIn
+{
+    float3 position [[attribute(0)]];
+    float3 normal   [[attribute(1)]];
+    float2 uv       [[attribute(2)]];
+    float4 tangent  [[attribute(3)]];  // xyz = tangent, w = handedness (+1 or -1)
+};
+
+struct TransVertOut
+{
+    float4 position     [[position]];
+    float3 worldPos;
+    float3 worldNormal;
+    float3 worldTangent;
+    float3 worldBitangent;
+    float2 uv;
+};
+
+vertex TransVertOut transparent_vert(
+    TransVertIn              in    [[stage_in]],
+    constant FrameConstants& frame [[buffer(0)]],
+    constant ModelConstants& model [[buffer(1)]])
+{
+    TransVertOut out;
+
+    float4 worldPos4 = model.model * float4(in.position, 1.0);
+    out.worldPos     = worldPos4.xyz;
+    out.position     = frame.viewProj * worldPos4;
+
+    // Transform normal and tangent to world space via the normal matrix.
+    float3 N = normalize((model.normalMat * float4(in.normal,      0.0)).xyz);
+    float3 T = normalize((model.normalMat * float4(in.tangent.xyz, 0.0)).xyz);
+    // Re-orthogonalise T against N (Gram-Schmidt).
+    T = normalize(T - dot(T, N) * N);
+    // Compute bitangent; handedness is stored in tangent.w.
+    float3 B = cross(N, T) * in.tangent.w;
+
+    out.worldNormal    = N;
+    out.worldTangent   = T;
+    out.worldBitangent = B;
+    out.uv             = in.uv;
+    return out;
+}
+
+// ─── Fragment ─────────────────────────────────────────────────────────────────
+
+fragment float4 transparent_frag(
+    TransVertOut                   in          [[stage_in]],
+    texture2d<float>               albedoTex   [[texture(0)]],
+    texture2d<float>               normalTex   [[texture(1)]],
+    texture2d<float>               shadowTex   [[texture(2)]],
+    sampler                        repeatSamp  [[sampler(0)]],
+    sampler                        clampSamp   [[sampler(1)]],
+    constant FrameConstants&       frame       [[buffer(0)]],
+    constant MaterialConstants&    mat         [[buffer(1)]],
+    constant SpotLightGPU&         spotLight   [[buffer(3)]])
+{
+    // ─── Sample albedo + apply tint ───────────────────────────────────────────
+    const float4 albedoSample = albedoTex.sample(repeatSamp, in.uv);
+    const float3 albedo       = albedoSample.rgb * mat.tint.rgb;
+    const float  alpha        = albedoSample.a   * mat.tint.a;
+
+    // ─── World-space normal from normal map ───────────────────────────────────
+    const float3 tNormal  = normalTex.sample(repeatSamp, in.uv).xyz * 2.0 - 1.0;
+    const float3x3 TBN    = float3x3(in.worldTangent, in.worldBitangent, in.worldNormal);
+    const float3 N        = normalize(TBN * tNormal);
+    const float3 V        = normalize(frame.cameraPos.xyz - in.worldPos);
+
+    // ─── Ambient term ─────────────────────────────────────────────────────────
+    const float3 ambient = frame.ambientColor.rgb * albedo;
+
+    // ─── Spot light contribution ──────────────────────────────────────────────
+    float3 spotContrib = float3(0.0);
+    {
+        const float3 toLight  = spotLight.positionRange.xyz - in.worldPos;
+        const float3 L        = normalize(toLight);
+        const float  dist     = length(toLight);
+        const float  range    = spotLight.positionRange.w;
+
+        // Inverse-square attenuation with smooth range cutoff.
+        const float attenuation =
+            saturate(1.0 - (dist / range)) / (dist * dist + 1.0);
+
+        // Cone angle attenuation.
+        const float spotCos    = dot(-L, normalize(spotLight.directionOuterCos.xyz));
+        const float outerCos   = spotLight.directionOuterCos.w;
+        const float innerCos   = spotLight.innerCosAndPad.x;
+        const float coneAtten  = saturate((spotCos - outerCos) /
+                                          (innerCos - outerCos + 0.0001));
+
+        // Shadow: reconstruct position in light clip space and bias-compare.
+        const float4 shadowClip   = frame.sunViewProj * float4(in.worldPos, 1.0);
+        const float3 shadowNDC    = shadowClip.xyz / shadowClip.w;
+        const float2 shadowUV     = shadowNDC.xy * float2(0.5, -0.5) + 0.5;
+        const float  surfaceDepth = shadowNDC.z;
+
+        float shadow = 1.0;
+        if (all(shadowUV >= 0.0) && all(shadowUV <= 1.0))
+        {
+            const float storedDepth = shadowTex.sample(clampSamp, shadowUV).r;
+            shadow = (surfaceDepth - 0.002 <= storedDepth) ? 1.0 : 0.0;
+        }
+
+        const float3 lightColor = spotLight.colorIntensity.rgb
+                                  * spotLight.colorIntensity.w;
+        spotContrib = cook_torrance(N, V, L, albedo, mat.roughness, mat.metalness)
+                    * lightColor * attenuation * coneAtten * shadow;
+    }
+
+    // ─── Combine and output ───────────────────────────────────────────────────
+    const float3 hdrColor = ambient + spotContrib;
+    return float4(hdrColor, alpha);
+}

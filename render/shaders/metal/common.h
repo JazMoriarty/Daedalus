@@ -59,12 +59,13 @@ struct SpotLightGPU       // buffer(3) in lighting compute, 64 bytes
     float4 innerCosAndPad;     // x   = cos(innerConeAngle), yzw = 0
 };
 
-struct MaterialConstants   // buffer(1) in G-buffer fragment, 16 bytes
+struct MaterialConstants   // buffer(1) in G-buffer + transparent fragment, 32 bytes
 {
-    float roughness;
-    float metalness;
-    float pad0;
-    float pad1;
+    float  roughness;
+    float  metalness;
+    float  pad0;
+    float  pad1;
+    float4 tint;  ///< Albedo tint (rgb) + opacity override (a); default = (1,1,1,1).
 };
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────

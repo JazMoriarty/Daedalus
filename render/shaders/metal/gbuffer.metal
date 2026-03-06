@@ -91,7 +91,13 @@ fragment GBufFragOut gbuffer_frag(
     GBufFragOut out;
 
     // ─── Albedo ─────────────────────────────────────────────────────────────────────
-    float3 albedo = albedoTex.sample(samp, in.uv).rgb;
+    float4 albedoSample = albedoTex.sample(samp, in.uv);
+
+    // Alpha-cutout: discard pixels where the sprite/decal alpha mask is transparent.
+    // Opaque geometry is unaffected (solid textures + the 1×1 white default have alpha=1).
+    if (albedoSample.a < 0.5) { discard_fragment(); }
+
+    float3 albedo = albedoSample.rgb;
 
     // RT0: albedo.rgb + baked AO stub (1.0 until SSAO is wired into the G-buffer)
     out.albedoAO = float4(albedo, 1.0);

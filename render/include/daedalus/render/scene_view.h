@@ -8,6 +8,7 @@
 #include "daedalus/render/rhi/i_texture.h"
 
 #include <glm/glm.hpp>
+#include <algorithm>
 #include <vector>
 
 namespace daedalus::render
@@ -25,6 +26,11 @@ struct Material
     rhi::ITexture* emissive  = nullptr;  ///< Linear emissive map.     nullptr → black.
     f32 roughness = 0.5f;               ///< Scalar override (0 = mirror, 1 = fully rough).
     f32 metalness = 0.0f;               ///< Scalar override (0 = dielectric, 1 = metal).
+
+    /// Per-draw albedo tint (rgb) and opacity multiplier (a).
+    /// Ignored by the opaque G-buffer shader; consumed by the transparent forward shader.
+    /// Default: opaque white (no tint, no opacity change).
+    glm::vec4 tint = glm::vec4(1.0f);
 };
 
 // ─── MeshDraw ─────────────────────────────────────────────────────────────────
@@ -97,17 +103,47 @@ struct SceneView
 
     std::vector<SpotLight> spotLights;
 
-    // ─── Mesh draw list ───────────────────────────────────────────────────────
+    // ─── Mesh draw list ─────────────────────────────────────────────────
     // Populated by the application each frame.  FrameRenderer iterates this
     // list for both the shadow depth pass and the G-buffer pass.
 
     std::vector<MeshDraw> meshDraws;
 
-    // ─── Timing ───────────────────────────────────────────────────────────────
+    // ─── Transparent draw list ─────────────────────────────────────────────────────────
+    // Alpha-blended draws rendered in the forward transparency pass (Pass 6).
+    // Must be sorted back-to-front with sortTransparentDraws() before submission
+    // to FrameRenderer.  Not submitted to the shadow or G-buffer passes.
+
+    std::vector<MeshDraw> transparentDraws;
+
+    // ─── Timing ───────────────────────────────────────────────────────────────────────────
 
     f32 time      = 0.0f;
     f32 deltaTime = 0.0f;
     u32 frameIndex = 0;
 };
+
+// ─── sortTransparentDraws ───────────────────────────────────────────────────────────────────────
+// Sort SceneView::transparentDraws back-to-front (farthest first) by squared
+// distance from scene.cameraPos.  Must be called after all transparent draws
+// are appended and before FrameRenderer::renderFrame.
+//
+// Position is taken from the translation column of each draw's modelMatrix,
+// which is exact for billboard sprites and a good approximation for meshes.
+//
+// @param scene  SceneView whose transparentDraws list is sorted in place.
+inline void sortTransparentDraws(SceneView& scene) noexcept
+{
+    const glm::vec3 cam = scene.cameraPos;
+    std::sort(scene.transparentDraws.begin(), scene.transparentDraws.end(),
+        [&cam](const MeshDraw& a, const MeshDraw& b) noexcept
+        {
+            const glm::vec3 pa = glm::vec3(a.modelMatrix[3]);
+            const glm::vec3 pb = glm::vec3(b.modelMatrix[3]);
+            const float da = glm::dot(pa - cam, pa - cam);
+            const float db = glm::dot(pb - cam, pb - cam);
+            return da > db;  // back-to-front: farthest draw first
+        });
+}
 
 } // namespace daedalus::render

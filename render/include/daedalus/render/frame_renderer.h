@@ -8,11 +8,12 @@
 //   3b.SSAOBlur       (compute, bilateral 5×5 depth-aware filter)
 //   4. Lighting       (compute, deferred PBR + PCF shadow)
 //   5. Skybox         (render, procedural sky on background pixels)
-//   6. TAA            (render, temporal anti-aliasing)
-//   7. Bloom extract  (render)
-//   8. Bloom blur H   (render)
-//   9. Bloom blur V   (render)
-//  10. Tone mapping   (render → swapchain)
+//   6. Transparent    (render, forward PBR + alpha blend, sorted back-to-front)
+//   7. TAA            (render, temporal anti-aliasing)
+//   8. Bloom extract  (render)
+//   9. Bloom blur H   (render)
+//  10. Bloom blur V   (render)
+//  11. Tone mapping   (render → swapchain)
 
 #pragma once
 
@@ -74,6 +75,7 @@ private:
     std::unique_ptr<rhi::IPipeline> m_ssaoBlurPSO;
     std::unique_ptr<rhi::IPipeline> m_lightingPSO;
     std::unique_ptr<rhi::IPipeline> m_skyboxPSO;
+    std::unique_ptr<rhi::IPipeline> m_transparentPSO;  ///< Pass 6: forward PBR alpha-blend.
     std::unique_ptr<rhi::IPipeline> m_taaPSO;
     std::unique_ptr<rhi::IPipeline> m_bloomExtractPSO;
     std::unique_ptr<rhi::IPipeline> m_bloomBlurHPSO;

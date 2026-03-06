@@ -84,18 +84,26 @@ struct alignas(16) SpotLightGPU
 };
 static_assert(sizeof(SpotLightGPU) == 64, "SpotLightGPU size mismatch");
 
-// ─── MaterialConstantsGPU ─────────────────────────────────────────────────────────────────
-// Per-draw material scalars uploaded to the G-buffer fragment stage.
-// Matches MaterialConstants in common.h.
+// ─── MaterialConstantsGPU ───────────────────────────────────────────────────────────────────────────────────
+// Per-draw material scalars uploaded to the G-buffer and transparent fragment stages.
+// Matches MaterialConstants in common.h exactly.
+//
+// Layout (32 bytes):
+//   [0]  roughness  f32
+//   [1]  metalness  f32
+//   [2]  pad0       f32
+//   [3]  pad1       f32
+//   [4–7] tint      vec4  (rgba multiplier; rgb=albedo tint, a=opacity; default=1,1,1,1)
 
 struct alignas(16) MaterialConstantsGPU
 {
-    f32 roughness = 0.5f;
-    f32 metalness = 0.0f;
-    f32 pad0      = 0.0f;
-    f32 pad1      = 0.0f;
+    f32       roughness = 0.5f;
+    f32       metalness = 0.0f;
+    f32       pad0      = 0.0f;
+    f32       pad1      = 0.0f;
+    glm::vec4 tint      = glm::vec4(1.0f);  ///< Albedo tint (rgb) + opacity override (a).
 };
-static_assert(sizeof(MaterialConstantsGPU) == 16, "MaterialConstantsGPU must be 16 bytes");
+static_assert(sizeof(MaterialConstantsGPU) == 32, "MaterialConstantsGPU must be 32 bytes");
 
 // ─── LightBufferGPU ───────────────────────────────────────────────────────────────────
 // Header placed at the front of the light storage buffer.

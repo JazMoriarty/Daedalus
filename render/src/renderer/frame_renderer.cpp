@@ -180,6 +180,34 @@ void FrameRenderer::createPSOs(IRenderDevice& device, const std::string& lib)
         m_skyboxPSO = device.createRenderPipeline(d);
     }
 
+    // ── Transparent forward pass (alpha-blended, depth-test no write) ────────────
+    {
+        auto vsTransparent = loadVS("transparent_vert");
+        auto fsTransparent = loadFS("transparent_frag");
+        RenderPipelineDescriptor d;
+        d.vertexShader         = vsTransparent.get();
+        d.fragmentShader       = fsTransparent.get();
+        d.colorAttachmentCount = 1;
+        d.colorFormats[0]      = TextureFormat::RGBA16Float;
+        // Standard alpha blending: out.rgb = src.rgb * src.a + dst.rgb * (1 - src.a)
+        d.blendStates[0].blendEnabled  = true;
+        d.blendStates[0].srcRGB        = BlendFactor::SrcAlpha;
+        d.blendStates[0].dstRGB        = BlendFactor::OneMinusSrcAlpha;
+        d.blendStates[0].rgbOp         = BlendOperation::Add;
+        d.blendStates[0].srcAlpha      = BlendFactor::One;
+        d.blendStates[0].dstAlpha      = BlendFactor::OneMinusSrcAlpha;
+        d.blendStates[0].alphaOp       = BlendOperation::Add;
+        d.depthFormat          = TextureFormat::Depth32Float;
+        d.depthTest            = true;
+        d.depthWrite           = false;   // read-only depth: transparent objects don't occlude
+        d.depthCompare         = CompareFunction::LessEqual;
+        d.cullMode             = CullMode::None;  // sprites are always face-on; None is safest
+        d.vertexAttributes     = geometryAttributes();
+        d.vertexBufferLayouts  = geometryLayouts();
+        d.debugName            = "Transparent";
+        m_transparentPSO = device.createRenderPipeline(d);
+    }
+
     // ── TAA ───────────────────────────────────────────────────────────────────
     {
         RenderPipelineDescriptor d;
@@ -623,14 +651,29 @@ void FrameRenderer::renderFrame(IRenderDevice& device,
     IPipeline* pSSAOBlur     = m_ssaoBlurPSO.get();
     IPipeline* pLighting     = m_lightingPSO.get();
     IPipeline* pSkybox       = m_skyboxPSO.get();
+    IPipeline* pTransparent  = m_transparentPSO.get();
     IPipeline* pTAA          = m_taaPSO.get();
     IPipeline* pBloomEx      = m_bloomExtractPSO.get();
     IPipeline* pBloomH       = m_bloomBlurHPSO.get();
     IPipeline* pBloomV       = m_bloomBlurVPSO.get();
     IPipeline* pTonemap      = m_tonemapPSO.get();
 
-    // Snapshot the draw list for lambda capture (avoids capturing scene by ref).
+    // Snapshot the opaque draw list for lambda capture.
     const std::vector<MeshDraw>& draws = scene.meshDraws;
+
+    // Sort transparent draws back-to-front and snapshot for lambda capture.
+    // Back-to-front order ensures correct alpha blending without depth writes.
+    std::vector<MeshDraw> transparentDraws = scene.transparentDraws;
+    {
+        const glm::vec3 cam = scene.cameraPos;
+        std::sort(transparentDraws.begin(), transparentDraws.end(),
+            [&cam](const MeshDraw& a, const MeshDraw& b) noexcept
+            {
+                const glm::vec3 pa = glm::vec3(a.modelMatrix[3]);
+                const glm::vec3 pb = glm::vec3(b.modelMatrix[3]);
+                return glm::dot(pa - cam, pa - cam) > glm::dot(pb - cam, pb - cam);
+            });
+    }
 
     const Viewport    vp{ 0.0f, 0.0f, static_cast<f32>(swapW), static_cast<f32>(swapH) };
     const ScissorRect sc{ 0, 0, swapW, swapH };
@@ -701,9 +744,11 @@ void FrameRenderer::renderFrame(IRenderDevice& device,
                 // Fragment stage: frame constants
                 enc->setFragmentBuffer(frameBuf, 0, 0);
                 // Fragment stage: per-draw material constants
+                // Note: tint is passed but ignored by the G-buffer shader (opaque geometry).
                 const MaterialConstantsGPU matConst{ draw.material.roughness,
                                                      draw.material.metalness,
-                                                     0.0f, 0.0f };
+                                                     0.0f, 0.0f,
+                                                     draw.material.tint };
                 enc->setFragmentBytes(&matConst, sizeof(MaterialConstantsGPU), 1);
                 // Fragment stage: material textures (fallback if nullptr)
                 enc->setFragmentTexture(
@@ -802,8 +847,64 @@ void FrameRenderer::renderFrame(IRenderDevice& device,
         m_graph.addRenderPass(std::move(p));
     }
 
+    // ──────────────────────────────────────────────────────────────────────────────────
+    // Pass 6 — Transparent (forward PBR, alpha blend, back-to-front sorted)
+    // Reads G-buffer depth (test only, no write) and accumulates into HDR.
+    // ──────────────────────────────────────────────────────────────────────────────────
+    {
+        RGRenderPassDesc p;
+        p.name             = "Transparent";
+        p.colorOutputs[0]  = hdrId;
+        p.colorOutputCount = 1;
+        p.depthOutput      = gDepthId;
+        p.loadColors       = true;  // preserve HDR output from lighting + skybox
+        p.loadDepth        = true;  // use G-buffer depth for occlusion testing
+        p.execute = [=, &transparentDraws](IRenderPassEncoder* enc)
+        {
+            if (transparentDraws.empty()) { return; }
+
+            enc->setViewport(vp);
+            enc->setScissor(sc);
+            enc->setRenderPipeline(pTransparent);
+            enc->setFragmentSampler(repeatSamp, 0);  // sampler(0): repeat for material textures
+            enc->setFragmentSampler(linSamp,    1);  // sampler(1): clamp for shadow depth
+
+            for (const MeshDraw& draw : transparentDraws)
+            {
+                const ModelGPU modelGPU{
+                    draw.modelMatrix,
+                    glm::mat4(glm::inverse(glm::transpose(draw.modelMatrix))),
+                    draw.prevModel
+                };
+                // Vertex stage
+                enc->setVertexBuffer(frameBuf, 0, 0);
+                enc->setVertexBytes(&modelGPU, sizeof(ModelGPU), 1);
+                enc->setVertexBuffer(draw.vertexBuffer, 0, k_vboSlot);
+                // Fragment stage: frame constants
+                enc->setFragmentBuffer(frameBuf, 0, 0);
+                // Fragment stage: material constants (roughness, metalness, tint)
+                const MaterialConstantsGPU matConst{ draw.material.roughness,
+                                                     draw.material.metalness,
+                                                     0.0f, 0.0f,
+                                                     draw.material.tint };
+                enc->setFragmentBytes(&matConst, sizeof(MaterialConstantsGPU), 1);
+                // Fragment stage: spot light
+                enc->setFragmentBuffer(spotBuf, 0, 3);
+                // Fragment stage: material textures (fallback if nullptr)
+                enc->setFragmentTexture(
+                    draw.material.albedo    ? draw.material.albedo    : fallbackAlbedo,   0);
+                enc->setFragmentTexture(
+                    draw.material.normalMap ? draw.material.normalMap : fallbackNormal,   1);
+                enc->setFragmentTexture(shadowDepthTex, 2);  // shadow depth atlas
+                enc->setIndexBuffer(draw.indexBuffer, 0, true);
+                enc->drawIndexed(draw.indexCount);
+            }
+        };
+        m_graph.addRenderPass(std::move(p));
+    }
+
     // ─────────────────────────────────────────────────────────────────────────
-    // Pass 6 — TAA
+    // Pass 7 — TAA
     // ─────────────────────────────────────────────────────────────────────────
     {
         RGRenderPassDesc p;
@@ -826,7 +927,7 @@ void FrameRenderer::renderFrame(IRenderDevice& device,
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // Pass 7 — Bloom extract
+    // Pass 8 — Bloom extract
     // ─────────────────────────────────────────────────────────────────────────
     {
         RGRenderPassDesc p;
@@ -847,7 +948,7 @@ void FrameRenderer::renderFrame(IRenderDevice& device,
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // Pass 8 — Bloom horizontal blur (bloomA → bloomB)
+    // Pass 9 — Bloom horizontal blur (bloomA → bloomB)
     // ─────────────────────────────────────────────────────────────────────────
     {
         RGRenderPassDesc p;
@@ -868,7 +969,7 @@ void FrameRenderer::renderFrame(IRenderDevice& device,
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // Pass 9 — Bloom vertical blur (bloomB → bloomA)
+    // Pass 10 — Bloom vertical blur (bloomB → bloomA)
     // ─────────────────────────────────────────────────────────────────────────
     {
         RGRenderPassDesc p;
@@ -889,7 +990,7 @@ void FrameRenderer::renderFrame(IRenderDevice& device,
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // Pass 10 — Tone mapping → swapchain
+    // Pass 11 — Tone mapping → swapchain
     // ─────────────────────────────────────────────────────────────────────────
     {
         RGRenderPassDesc p;

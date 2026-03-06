@@ -1,5 +1,5 @@
 // Daedalus Engine — Application Entry Point
-// Phase 3: DaedalusWorld — .dmap format, sector graph, portal traversal.
+// Phase 1D: ECS static mesh + billboard sprite rendering.
 
 // stb_image_write implementation (compiled once in this TU).
 #define STB_IMAGE_WRITE_IMPLEMENTATION
@@ -25,6 +25,12 @@
 #include "daedalus/world/i_portal_traversal.h"
 #include "daedalus/world/sector_tessellator.h"
 #include "daedalus/world/dmap_io.h"
+
+#include "daedalus/core/components/transform_component.h"
+#include "daedalus/render/components/static_mesh_component.h"
+#include "daedalus/render/components/billboard_sprite_component.h"
+#include "daedalus/render/systems/mesh_render_system.h"
+#include "daedalus/render/systems/billboard_render_system.h"
 
 #include <SDL3/SDL.h>
 #include <glm/glm.hpp>
@@ -173,18 +179,6 @@ static render::MeshData makeBoxMesh(
     return mesh;
 }
 
-// ─── Example components (ECS smoke test) ────────────────────────────────────────────
-
-struct TransformComponent
-{
-    float x = 0.0f, y = 0.0f, z = 0.0f;
-};
-
-struct VelocityComponent
-{
-    float vx = 0.0f, vy = 0.0f, vz = 0.0f;
-};
-
 // ─── Entry point ──────────────────────────────────────────────────────────────
 
 int main(int /*argc*/, char* /*argv*/[])
@@ -213,29 +207,9 @@ int main(int /*argc*/, char* /*argv*/[])
                                           SDL_WINDOW_METAL | SDL_WINDOW_RESIZABLE);
     DAEDALUS_ASSERT(window != nullptr, "Failed to create SDL window");
 
-    // ─── ECS smoke test ───────────────────────────────────────────────────────
-
-    {
-        World world;
-        EntityId e1 = world.createEntity();
-        EntityId e2 = world.createEntity();
-
-        world.addComponent(e1, TransformComponent{ 1.0f, 2.0f, 3.0f });
-        world.addComponent(e1, VelocityComponent{ 0.1f, 0.0f, 0.0f });
-        world.addComponent(e2, TransformComponent{ 5.0f, 0.0f, 0.0f });
-
-        world.each<TransformComponent, VelocityComponent>(
-            [](EntityId, TransformComponent& t, VelocityComponent& v)
-            {
-                t.x += v.vx;
-                t.y += v.vy;
-                t.z += v.vz;
-            });
-
-        DAEDALUS_ASSERT(world.getComponent<TransformComponent>(e1).x > 1.0f,
-                        "ECS transform update failed");
-        std::printf("[Daedalus] ECS smoke test passed.\n");
-    }
+    // ─── ECS World ─────────────────────────────────────────────────────────────
+    // Main ECS container — persists for the application’s lifetime.
+    World world;
 
     // ─── EventBus smoke test ──────────────────────────────────────────────────
 
@@ -458,44 +432,176 @@ int main(int /*argc*/, char* /*argv*/[])
 
     std::printf("[Daedalus] World loaded: %zu sector(s)\n", numSectors);
 
-    // ─── Test block ───────────────────────────────────────────────────────────
-    // 1.5 × 1.5 × 1.5 unit box sitting on the floor at the centre of sector 0.
+    // ─── Test block → ECS static mesh entity ──────────────────────────────────────────────
+    // 1.5 × 1.5 × 1.5 unit box at the centre of sector 0, driven by ECS.
 
     const render::MeshData boxMesh = makeBoxMesh(0.0f, 0.0f, 1.5f, 0.75f, 0.75f);
 
     std::unique_ptr<rhi::IBuffer> boxVBO;
     std::unique_ptr<rhi::IBuffer> boxIBO;
-    render::MeshDraw               boxDraw;
 
     {
         rhi::BufferDescriptor d;
-        d.size     = boxMesh.vertices.size() * sizeof(render::StaticMeshVertex);
-        d.usage    = rhi::BufferUsage::Vertex;
-        d.initData = boxMesh.vertices.data();
+        d.size      = boxMesh.vertices.size() * sizeof(render::StaticMeshVertex);
+        d.usage     = rhi::BufferUsage::Vertex;
+        d.initData  = boxMesh.vertices.data();
         d.debugName = "BoxVBO";
         boxVBO = device->createBuffer(d);
     }
     {
         rhi::BufferDescriptor d;
-        d.size     = boxMesh.indices.size() * sizeof(u32);
-        d.usage    = rhi::BufferUsage::Index;
-        d.initData = boxMesh.indices.data();
+        d.size      = boxMesh.indices.size() * sizeof(u32);
+        d.usage     = rhi::BufferUsage::Index;
+        d.initData  = boxMesh.indices.data();
         d.debugName = "BoxIBO";
         boxIBO = device->createBuffer(d);
     }
 
-    boxDraw.vertexBuffer       = boxVBO.get();
-    boxDraw.indexBuffer        = boxIBO.get();
-    boxDraw.indexCount         = static_cast<u32>(boxMesh.indices.size());
-    boxDraw.modelMatrix        = glm::mat4(1.0f);
-    boxDraw.prevModel          = glm::mat4(1.0f);
-    boxDraw.material.albedo    = wallAlbedo.get();
-    boxDraw.material.normalMap = wallNormal.get();
-    boxDraw.material.roughness = 0.75f;
-    boxDraw.material.metalness = 0.0f;
+    {
+        render::StaticMeshComponent meshComp;
+        meshComp.vertexBuffer       = boxVBO.get();
+        meshComp.indexBuffer        = boxIBO.get();
+        meshComp.indexCount         = static_cast<u32>(boxMesh.indices.size());
+        meshComp.material.albedo    = wallAlbedo.get();
+        meshComp.material.normalMap = wallNormal.get();
+        meshComp.material.roughness = 0.75f;
+        meshComp.material.metalness = 0.0f;
+        // prevModelMatrix defaults to identity — correct for this static object.
 
-    std::printf("[Daedalus] Test block created (%zu verts, %zu indices).\n",
+        EntityId boxEntity = world.createEntity();
+        world.addComponent(boxEntity, TransformComponent{});  // origin, identity, unit scale
+        world.addComponent(boxEntity, std::move(meshComp));
+    }
+
+    std::printf("[Daedalus] Box entity created (%zu verts, %zu indices).\n",
                 boxMesh.vertices.size(), boxMesh.indices.size());
+
+    // ─── Shared unit quad (billboard sprites) ────────────────────────────────────────────
+    // All billboard sprites share a single 1×1 quad.  The BillboardRenderSystem
+    // applies a per-entity spherical billboard model matrix each frame.
+
+    const render::MeshData unitQuadMesh = render::makeUnitQuadMesh();
+
+    std::unique_ptr<rhi::IBuffer> unitQuadVBO;
+    std::unique_ptr<rhi::IBuffer> unitQuadIBO;
+
+    {
+        rhi::BufferDescriptor d;
+        d.size      = unitQuadMesh.vertices.size() * sizeof(render::StaticMeshVertex);
+        d.usage     = rhi::BufferUsage::Vertex;
+        d.initData  = unitQuadMesh.vertices.data();
+        d.debugName = "UnitQuadVBO";
+        unitQuadVBO = device->createBuffer(d);
+    }
+    {
+        rhi::BufferDescriptor d;
+        d.size      = unitQuadMesh.indices.size() * sizeof(u32);
+        d.usage     = rhi::BufferUsage::Index;
+        d.initData  = unitQuadMesh.indices.data();
+        d.debugName = "UnitQuadIBO";
+        unitQuadIBO = device->createBuffer(d);
+    }
+
+    // ─── Test billboard sprite entity ──────────────────────────────────────────────────
+    // 64×64 RGBA texture: warm orange circle with a hard alpha-cutout boundary.
+    // Placed at (−2, 1.5, 0) in sector 0 so it is lit by the ceiling spot light.
+
+    std::unique_ptr<rhi::ITexture> spriteTexture;
+    {
+        constexpr int SPR_W = 64, SPR_H = 64;
+        std::vector<u8> pixels(SPR_W * SPR_H * 4, 0u);
+
+        const float cx = 31.5f, cy = 31.5f, radius = 27.0f;
+        for (int y = 0; y < SPR_H; ++y)
+        {
+            for (int x = 0; x < SPR_W; ++x)
+            {
+                const float dx   = static_cast<float>(x) - cx;
+                const float dy   = static_cast<float>(y) - cy;
+                const float dist = std::sqrt(dx * dx + dy * dy);
+                const int   idx  = (y * SPR_W + x) * 4;
+
+                if (dist < radius)
+                {
+                    // Sphere-shaded warm circle: bright yellow centre → deep orange edge.
+                    const float t    = 1.0f - (dist / radius);
+                    pixels[idx + 0]  = 255u;
+                    pixels[idx + 1]  = static_cast<u8>(60 + static_cast<int>(t * 180));
+                    pixels[idx + 2]  = 0u;
+                    pixels[idx + 3]  = 255u;  // fully opaque
+                }
+                // else: all zeros — transparent outside the circle
+            }
+        }
+
+        rhi::TextureDescriptor td;
+        td.width    = static_cast<u32>(SPR_W);
+        td.height   = static_cast<u32>(SPR_H);
+        td.format   = rhi::TextureFormat::RGBA8Unorm_sRGB;
+        td.usage    = rhi::TextureUsage::ShaderRead;
+        td.initData = pixels.data();
+        td.debugName = "sprite_test";
+        spriteTexture = device->createTexture(td);
+        DAEDALUS_ASSERT(spriteTexture != nullptr, "Failed to create sprite texture");
+    }
+
+    {
+        TransformComponent spriteTransform;
+        spriteTransform.position = glm::vec3(-2.0f, 1.5f, 0.0f);
+
+        render::BillboardSpriteComponent spriteComp;
+        spriteComp.texture = spriteTexture.get();
+        spriteComp.size    = glm::vec2(1.2f);  // 1.2 × 1.2 world units
+
+        EntityId spriteEntity = world.createEntity();
+        world.addComponent(spriteEntity, spriteTransform);
+        world.addComponent(spriteEntity, spriteComp);
+    }
+
+    std::printf("[Daedalus] Billboard sprite entity created.\n");
+
+    // ─── Blended billboard sprite entity (transparency pass demo) ─────────────────────
+    // 64×64 RGBA texture: filled white square (all pixels fully opaque).
+    // AlphaMode::Blended + a semi-transparent cyan tint demonstrates the forward
+    // transparency pass: the sprite composites over whatever is behind it with
+    // alpha = texture.a * tint.a = 1.0 * 0.65 = 0.65.
+    // Placed at (2, 1.5, 2) — in sector 0, slightly behind the box, so depth
+    // ordering exercises both the depth-test and the back-to-front sort.
+
+    std::unique_ptr<rhi::ITexture> blendedSpriteTexture;
+    {
+        constexpr int W = 64, H = 64;
+        std::vector<u8> pixels(W * H * 4, 255u);  // all fully opaque white
+
+        rhi::TextureDescriptor td;
+        td.width     = static_cast<u32>(W);
+        td.height    = static_cast<u32>(H);
+        td.format    = rhi::TextureFormat::RGBA8Unorm;
+        td.usage     = rhi::TextureUsage::ShaderRead;
+        td.initData  = pixels.data();
+        td.debugName = "sprite_blended_test";
+        blendedSpriteTexture = device->createTexture(td);
+        DAEDALUS_ASSERT(blendedSpriteTexture != nullptr, "Failed to create blended sprite texture");
+    }
+
+    {
+        TransformComponent blendedTransform;
+        blendedTransform.position = glm::vec3(2.0f, 1.5f, 2.0f);
+
+        render::BillboardSpriteComponent blendedComp;
+        blendedComp.texture   = blendedSpriteTexture.get();
+        blendedComp.size      = glm::vec2(1.2f);
+        blendedComp.alphaMode = render::AlphaMode::Blended;
+        // Cyan tint at 65% opacity: demonstrates tint.rgb modulates albedo (white → cyan)
+        // and tint.a controls the overall transparency.
+        blendedComp.tint      = glm::vec4(0.20f, 0.82f, 1.00f, 0.65f);
+
+        EntityId blendedEntity = world.createEntity();
+        world.addComponent(blendedEntity, blendedTransform);
+        world.addComponent(blendedEntity, blendedComp);
+    }
+
+    std::printf("[Daedalus] Blended billboard sprite entity created.\n");
 
     // Camera sector tracking — updated each frame.
     world::SectorId cameraSector = 0u;
@@ -575,7 +681,6 @@ int main(int /*argc*/, char* /*argv*/[])
         render::SceneView scene;
 
         // Submit only visible sectors from portal traversal.
-        bool sector0Visible = false;
         for (const auto& vs : visibleSectors)
         {
             if (vs.sectorId < sectorDraws.size() &&
@@ -583,11 +688,18 @@ int main(int /*argc*/, char* /*argv*/[])
             {
                 scene.meshDraws.push_back(sectorDraws[vs.sectorId]);
             }
-            if (vs.sectorId == 0u) { sector0Visible = true; }
         }
 
-        // Include the test block whenever sector 0 is visible.
-        if (sector0Visible) { scene.meshDraws.push_back(boxDraw); }
+        // Submit ECS entities: static meshes and billboard sprites.
+        // billboardRenderSystem routes each sprite to meshDraws (Cutout) or
+        // transparentDraws (Blended) based on its AlphaMode.
+        render::meshRenderSystem(world, scene);
+        render::billboardRenderSystem(world, scene, view,
+                                      unitQuadVBO.get(), unitQuadIBO.get());
+
+        // Sort transparent draws back-to-front before submission.
+        // Explicit call per the spec's "Explicit over Implicit" principle.
+        render::sortTransparentDraws(scene);
 
         scene.view      = view;
         scene.proj      = proj;
