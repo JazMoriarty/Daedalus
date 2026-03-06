@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <cstdio>
 
 namespace daedalus::render
 {
@@ -293,7 +294,7 @@ void FrameRenderer::createPSOs(IRenderDevice& device, const std::string& lib)
         m_bloomBlurVPSO = device.createRenderPipeline(d);
     }
 
-    // ── Tone mapping → swapchain ──────────────────────────────────────────────
+    // ── Tone mapping → swapchain ─────────────────────────────────────────────
     {
         RenderPipelineDescriptor d;
         d.vertexShader         = vsTonemap.get();
@@ -303,6 +304,15 @@ void FrameRenderer::createPSOs(IRenderDevice& device, const std::string& lib)
         d.cullMode             = CullMode::None;
         d.debugName            = "ToneMapping";
         m_tonemapPSO = device.createRenderPipeline(d);
+    }
+
+    // ── Depth copy (compute): Depth32Float → R32Float — eliminates decal depth feedback loop ───
+    {
+        auto csDepthCopy = loadCS("depth_copy_main");
+        ComputePipelineDescriptor d;
+        d.computeShader = csDepthCopy.get();
+        d.debugName     = "DepthCopy";
+        m_depthCopyPSO = device.createComputePipeline(d);
     }
 }
 
@@ -397,6 +407,19 @@ void FrameRenderer::createPersistentResources(IRenderDevice& device, u32 w, u32 
         d.usage     = BufferUsage::Uniform;
         d.debugName = "SpotLightConstants";
         m_spotLightBuf = device.createBuffer(d);
+    }
+
+    // Decal diagnostic: 1×u32 atomic fragment counter.
+    // The decal fragment shader atomically increments this for every live fragment
+    // that passes all OBB/depth checks.  CPU reads the previous frame's count at
+    // the start of each frame to confirm decals are actually rendering.
+    {
+        BufferDescriptor d;
+        d.size      = sizeof(u32);
+        d.usage     = BufferUsage::Storage;
+        d.debugName = "DecalDebugCounter";
+        m_decalDebugBuf = device.createBuffer(d);
+        *static_cast<u32*>(m_decalDebugBuf->map()) = 0u;
     }
 
     // Shadow depth map — 2048×2048, persistent across frames
@@ -629,7 +652,18 @@ void FrameRenderer::renderFrame(IRenderDevice& device,
         clearCmd->commit();
     }
 
-    // ── Reset and populate the render graph ─────────────────────────────────────────────
+    // ── Decal diagnostic: read previous frame's fragment count, zero for this frame ──────
+    {
+        u32* pCount = static_cast<u32*>(m_decalDebugBuf->map());
+        if (m_frameIndex % 60 == 0)
+        {
+            std::printf("[Decals] frame %u: %u fragments rendered\n",
+                        m_frameIndex, *pCount);
+        }
+        *pCount = 0u;  // zero before current frame's GPU work
+    }
+
+    // ── Reset and populate the render graph ──────────────────────────────────────────
     m_graph.reset();
 
     // Declare transient G-buffer textures matching the spec §Pass 4 layout.
@@ -638,6 +672,13 @@ void FrameRenderer::renderFrame(IRenderDevice& device,
         0, 0, TextureFormat::Depth32Float,
         TextureUsage::DepthStencil | TextureUsage::ShaderRead,
         "GDepth"
+    });
+    // Depth copy: R32Float snapshot of gDepth taken BEFORE the decal pass so
+    // gDepth can remain as the depth attachment without a shader-read feedback loop.
+    const RGTextureId gDepthCopyId = m_graph.createTexture({
+        0, 0, TextureFormat::R32Float,
+        TextureUsage::ShaderRead | TextureUsage::ShaderWrite,
+        "GDepthCopy"
     });
     const RGTextureId gAlbedoId = m_graph.createTexture({
         0, 0, TextureFormat::RGBA8Unorm,                          // RT0: albedo + baked AO
@@ -700,8 +741,9 @@ void FrameRenderer::renderFrame(IRenderDevice& device,
     m_graph.compile(device, swapW, swapH);
 
     // Resolve texture pointers (all valid after compile)
-    ITexture* gDepthTex   = m_graph.get(gDepthId);
-    ITexture* gAlbedoTex  = m_graph.get(gAlbedoId);
+    ITexture* gDepthTex     = m_graph.get(gDepthId);
+    ITexture* gDepthCopyTex = m_graph.get(gDepthCopyId);
+    ITexture* gAlbedoTex    = m_graph.get(gAlbedoId);
     ITexture* gNormalTex  = m_graph.get(gNormalId);
     ITexture* gEmissiveTex = m_graph.get(gEmissiveId);
     ITexture* gMotionTex  = m_graph.get(gMotionId);
@@ -738,6 +780,8 @@ void FrameRenderer::renderFrame(IRenderDevice& device,
     IPipeline* pBloomV       = m_bloomBlurVPSO.get();
     IPipeline* pTonemap      = m_tonemapPSO.get();
     IPipeline* pDecal        = m_decalPSO.get();
+    IPipeline* pDepthCopy    = m_depthCopyPSO.get();
+    IBuffer*   decalDebugBuf = m_decalDebugBuf.get();
 
     // Unit cube GPU mesh (shared by all decal draws)
     IBuffer*   cubeVBO       = m_unitCubeVBO.get();
@@ -854,7 +898,25 @@ void FrameRenderer::renderFrame(IRenderDevice& device,
         m_graph.addRenderPass(std::move(p));
     }
 
-    // ──────────────────────────────────────────────────────────────────────────────────
+    // ──────────────────────────────────────────────────────────────────────────────────────
+    // Pass 2.4 — Depth copy (compute): Depth32Float → R32Float
+    // Must run AFTER the G-buffer pass (so gDepth contains scene depth) and BEFORE
+    // the Decal pass (so gDepthCopy is ready for fragment shader sampling).
+    // ──────────────────────────────────────────────────────────────────────────────────────
+    {
+        RGComputePassDesc p;
+        p.name    = "DepthCopy";
+        p.execute = [=](IComputePassEncoder* enc)
+        {
+            enc->setComputePipeline(pDepthCopy);
+            enc->setTexture(gDepthTex,     0);  // source: Depth32Float (ShaderRead)
+            enc->setTexture(gDepthCopyTex, 1);  // dest:   R32Float     (ShaderWrite)
+            enc->dispatch(swapW, swapH, 1);
+        };
+        m_graph.addComputePass(std::move(p));
+    }
+
+    // ──────────────────────────────────────────────────────────────────────────────────────
     // Pass 2.5 — Deferred Decals (G-buffer alpha blend)
     // Alpha-blends decal albedo and normals into G-buffer RT0 (albedo) and RT1
     // (normal/roughness/metalness).  Depth is tested but NOT written; the depth
@@ -878,6 +940,8 @@ void FrameRenderer::renderFrame(IRenderDevice& device,
             enc->setScissor(sc);
             enc->setRenderPipeline(pDecal);
             enc->setFragmentSampler(repeatSamp, 0);  // sampler(0): linear-repeat
+            // Diagnostic counter: shared by all draws in this pass.
+            enc->setFragmentBuffer(decalDebugBuf, 0, 2);  // atomic fragCount  buffer(2)
 
             for (const DecalDraw& draw : decalDraws)
             {
@@ -889,15 +953,15 @@ void FrameRenderer::renderFrame(IRenderDevice& device,
                 dc.opacity   = draw.opacity;
                 dc.pad       = 0.0f;
 
-                // ── Vertex stage ─────────────────────────────────────────────
+                // ── Vertex stage ────────────────────────────────────────────────────
                 enc->setVertexBuffer(frameBuf,    0,          0);       // FrameConstants  buffer(0)
                 enc->setVertexBytes (&dc, sizeof(dc),         1);       // DecalConstants  buffer(1)
                 enc->setVertexBuffer(cubeVBO,     0, k_vboSlot);       // unit cube VBO
 
-                // ── Fragment stage ────────────────────────────────────────────
+                // ── Fragment stage ──────────────────────────────────────────────────
                 enc->setFragmentBuffer (frameBuf,                   0, 0);  // FrameConstants  buffer(0)
                 enc->setFragmentBytes  (&dc, sizeof(dc),               1);  // DecalConstants  buffer(1)
-                enc->setFragmentTexture(gDepthTex,                     0);  // G-buffer depth  texture(0)
+                enc->setFragmentTexture(gDepthCopyTex,                 0);  // depth copy      texture(0)
                 enc->setFragmentTexture(draw.albedoTexture,            1);  // decal albedo    texture(1)
                 enc->setFragmentTexture(
                     draw.normalTexture ? draw.normalTexture : fallbackNormal, 2); // decal normal texture(2)

@@ -17,7 +17,8 @@
 // Resource bindings:
 //   buffer(0)  = FrameConstants  (vertex + fragment)
 //   buffer(1)  = DecalConstants  (vertex + fragment)
-//   texture(0) = G-buffer depth  (Depth32Float, fragment only)
+//   buffer(2)  = fragCount       (device atomic_uint*, diagnostic counter, fragment only)
+//   texture(0) = gDepthCopy      (R32Float copy of G-buffer depth, fragment only)
 //   texture(1) = decal albedo    (RGBA8Unorm,   fragment only)
 //   texture(2) = decal normal    (RGBA8Unorm,   fragment only — flat default when absent)
 //   sampler(0) = linear-repeat   (fragment only)
@@ -61,12 +62,13 @@ struct DecalFragOut
 
 fragment DecalFragOut decal_frag(
     DecalVertOut             in        [[stage_in]],
-    texture2d<float>         gDepth    [[texture(0)]],
+    texture2d<float>         gDepthCopy [[texture(0)]],  // R32Float copy — no feedback loop
     texture2d<float>         albedoTex [[texture(1)]],
     texture2d<float>         normalTex [[texture(2)]],
     sampler                  samp      [[sampler(0)]],
     constant FrameConstants& frame     [[buffer(0)]],
-    constant DecalConstants& decal     [[buffer(1)]])
+    constant DecalConstants& decal     [[buffer(1)]],
+    device   atomic_uint*    fragCount [[buffer(2)]])   // diagnostic: counts live fragments
 {
     // ─── Screen UV ───────────────────────────────────────────────────────────
     // in.position is window coords: x ∈ [0, width), y ∈ [0, height).
@@ -78,12 +80,13 @@ fragment DecalFragOut decal_frag(
     constexpr sampler depthSamp(filter::nearest,
                                 mip_filter::none,
                                 address::clamp_to_edge);
-    float depth = gDepth.sample(depthSamp, screenUV).r;
+    float depth = gDepthCopy.sample(depthSamp, screenUV).r;
 
     // Sky pixels have depth ≈ 1.0 — no surface to project onto.
     if (depth >= 0.9999f) { discard_fragment(); }
 
     // ─── Reconstruct world-space surface position ─────────────────────────────
+    // depth comes from gDepthCopy (R32Float), not the live depth attachment.
     float3 worldPos = reconstruct_world_pos(depth, screenUV, frame.invViewProj);
 
     // ─── Transform to decal local space ──────────────────────────────────────
@@ -127,6 +130,9 @@ fragment DecalFragOut decal_frag(
     //   Alpha blend: srcFactor = Zero,         dstFactor = One
     // This means `alpha` drives the RGB lerp weight while the destination alpha
     // (AO for RT0, metalness for RT1) is left completely untouched.
+    // Increment the diagnostic counter so the CPU can verify fragments are landing.
+    atomic_fetch_add_explicit(fragCount, 1u, memory_order_relaxed);
+
     DecalFragOut out;
     out.albedoAO       = float4(albedoSample.rgb, alpha);
     out.normalRoughMet = float4(octN * 0.5 + 0.5, decal.roughness, alpha);

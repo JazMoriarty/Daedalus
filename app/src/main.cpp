@@ -862,12 +862,12 @@ int main(int /*argc*/, char* /*argv*/[])
 
     // Three floor decals at different positions in sectors 0 and 1.
     // TransformComponent: position = OBB centre; scale = OBB full extents.
-    // A thin Y scale (0.15) produces a flat OBB that straddles y=0 so the
-    // fragment shader catches floor fragments within the XZ footprint.
+    // Decal centre must be ON the floor (y=0) so the thin Y extent [-0.075, +0.075]
+    // straddles the floor plane and the fragment shader catches floor fragments.
     {
         // Decal 1 — centre of sector 0 (directly below the spotlight).
         TransformComponent t1;
-        t1.position = glm::vec3( 0.0f, 0.08f,  0.0f);
+        t1.position = glm::vec3( 0.0f, 0.0f,  0.0f);
         t1.scale    = glm::vec3( 2.0f, 0.15f,  2.0f);
 
         render::DecalComponent d1;
@@ -883,7 +883,7 @@ int main(int /*argc*/, char* /*argv*/[])
     {
         // Decal 2 — near the box, slightly offset to show overlap.
         TransformComponent t2;
-        t2.position = glm::vec3(-2.0f, 0.08f,  2.0f);
+        t2.position = glm::vec3(-2.0f, 0.0f,  2.0f);
         t2.scale    = glm::vec3( 1.5f, 0.15f,  1.5f);
 
         render::DecalComponent d2;
@@ -899,7 +899,7 @@ int main(int /*argc*/, char* /*argv*/[])
     {
         // Decal 3 — sector 1 floor (cross-sector decal projection).
         TransformComponent t3;
-        t3.position = glm::vec3( 9.0f, 0.08f,  0.0f);
+        t3.position = glm::vec3( 9.0f, 0.0f,  0.0f);
         t3.scale    = glm::vec3( 1.8f, 0.15f,  1.8f);
 
         render::DecalComponent d3;
@@ -913,7 +913,7 @@ int main(int /*argc*/, char* /*argv*/[])
         world.addComponent(dec3, std::move(d3));
     }
 
-    std::printf("[Daedalus] Deferred decal entities created (3 floor decals).\n");
+    std::printf("[Daedalus] Deferred decal entities created (3 floor decals, y=0 centred).\n");
 
     // Camera sector tracking
     world::SectorId cameraSector = 0u;

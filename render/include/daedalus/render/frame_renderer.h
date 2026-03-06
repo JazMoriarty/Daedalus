@@ -4,6 +4,7 @@
 // Pass order:
 //   1.  Shadow depth   (render, depth-only from sun POV — 2048×2048)
 //   2.  G-buffer       (render, depth + colour in one pass)
+//   2.4 DepthCopy      (compute, Depth32Float → R32Float — breaks decal feedback loop)
 //   2.5 Decal          (render, alpha-blend into G-buffer RT0+RT1)
 //   3.  SSAO           (compute)
 //   3b. SSAOBlur       (compute, bilateral 5×5 depth-aware filter)
@@ -83,8 +84,9 @@ private:
     std::unique_ptr<rhi::IPipeline> m_bloomBlurHPSO;
     std::unique_ptr<rhi::IPipeline> m_bloomBlurVPSO;
     std::unique_ptr<rhi::IPipeline> m_tonemapPSO;
+    std::unique_ptr<rhi::IPipeline> m_depthCopyPSO;  ///< Pass 2.4: Depth32Float → R32Float copy (compute).
 
-    // ─── Unit cube mesh (shared by all decal draws) ──────────────────────────
+    // ─── Unit cube mesh (shared by all decal draws) ────────────────────────
 
     std::unique_ptr<rhi::IBuffer> m_unitCubeVBO;  ///< 8 StaticMeshVertex positions (384 B)
     std::unique_ptr<rhi::IBuffer> m_unitCubeIBO;  ///< 36 u32 indices, CCW front-faces
@@ -96,6 +98,11 @@ private:
 
     /// Spot light constant buffer (SpotLightGPU, 64 B) — uploaded every frame.
     std::unique_ptr<rhi::IBuffer> m_spotLightBuf;
+
+    /// 1×u32 atomic fragment counter for decal diagnostics.
+    /// Zeroed each frame by CPU; incremented by decal_frag for every live fragment.
+    /// CPU reads on frame N+1 to report how many decal fragments rendered on frame N.
+    std::unique_ptr<rhi::IBuffer> m_decalDebugBuf;
 
     // ─── Persistent textures ─────────────────────────────────────────────────
 
