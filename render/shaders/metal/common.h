@@ -59,6 +59,16 @@ struct SpotLightGPU       // buffer(3) in lighting compute, 64 bytes
     float4 innerCosAndPad;     // x   = cos(innerConeAngle), yzw = 0
 };
 
+struct DecalConstants      // buffer(1) in decal vertex + fragment, 144 bytes
+{
+    float4x4 model;      // local unit-cube → world  (vertex: positions the OBB)
+    float4x4 invModel;   // world → local unit-cube  (fragment: bounds test + UV)
+    float    roughness;
+    float    metalness;
+    float    opacity;
+    float    pad;
+};
+
 struct MaterialConstants   // buffer(1) in G-buffer + transparent fragment, 48 bytes
 {
     float  roughness;

@@ -129,6 +129,17 @@ namespace daedalus::render
 ///   AlphaMode::Cutout  → scene.meshDraws       (G-buffer, hard alpha cutout)
 ///   AlphaMode::Blended → scene.transparentDraws (forward transparency pass)
 ///
+/// Self-illumination:
+///   Billboard quads always face the camera, so their world-space normal is
+///   horizontal.  A downward or side-lighting spot light yields NdotL ≈ 0,
+///   making the sprite nearly black without self-illumination.
+///   • Cutout sprites: draw.material.emissive = sprite.texture so the G-buffer
+///     emissive channel carries the full texture colour.  The deferred lighting
+///     pass adds emissive unconditionally (hdr = radiance + ambient + emissive).
+///   • Blended sprites: draw.material.emissive = sprite.emissiveTexture (may be
+///     nullptr).  The transparent forward shader adds emissive unconditionally;
+///     set emissiveTexture = texture on the component for a self-lit sprite.
+///
 /// Uses the shared unit-quad buffers for geometry; a per-entity spherical
 /// billboard model matrix is computed via makeBillboardMatrix() each frame.
 ///
@@ -159,7 +170,9 @@ inline void billboardRenderSystem(daedalus::World&  world,
             draw.prevModel          = model;   // Phase 1D: no per-sprite prev tracking
             draw.material.albedo    = sprite.texture;
             draw.material.normalMap = nullptr; // flat normal (engine default)
-            draw.material.emissive  = nullptr; // no emission
+            // Emissive is set per-path below: Cutout sprites are self-illuminated
+            // (see doc comment above); Blended sprites use the transparent forward
+            // shader which handles its own lighting.
             draw.material.roughness = 1.0f;
             draw.material.metalness = 0.0f;
 
@@ -170,13 +183,20 @@ inline void billboardRenderSystem(daedalus::World&  world,
 
             if (sprite.alphaMode == AlphaMode::Blended)
             {
-                // Copy tint for the forward transparent shader; route to transparent list.
+                // Copy tint and optional emissive for the forward transparent shader;
+                // route to transparent list.  emissiveTexture may be nullptr (no
+                // self-illumination) or equal to sprite.texture for self-lit sprites.
+                draw.material.emissive = sprite.emissiveTexture;
                 draw.material.tint = sprite.tint;
                 scene.transparentDraws.push_back(draw);
             }
             else
             {
-                // Cutout: tint is irrelevant — keep default (1,1,1,1); route to G-buffer.
+                // Cutout: route to G-buffer.  Set emissive = albedo texture so the
+                // sprite self-illuminates at its full texture colour regardless of the
+                // scene light direction (billboard normal is always horizontal; deferred
+                // NdotL against a downward spot light would otherwise be ≈ 0).
+                draw.material.emissive = sprite.texture;
                 scene.meshDraws.push_back(draw);
             }
         });

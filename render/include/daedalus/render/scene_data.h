@@ -109,6 +109,29 @@ struct alignas(16) MaterialConstantsGPU
 };
 static_assert(sizeof(MaterialConstantsGPU) == 48, "MaterialConstantsGPU must be 48 bytes");
 
+// ─── DecalConstantsGPU ──────────────────────────────────────────────────────────────────────────
+// Per-decal data uploaded to vertex and fragment stages.
+// Matches DecalConstants in common.h exactly.
+//
+// Layout (144 bytes):
+//   [0..3]   model     mat4   (local unit-cube → world, vertex stage)
+//   [4..7]   invModel  mat4   (world → local unit-cube, fragment stage)
+//   [8]      roughness f32    (written into G-buffer RT1.b)
+//   [9]      metalness f32    (written into G-buffer RT1.a)
+//   [10]     opacity   f32    (global fade multiplier)
+//   [11]     pad       f32
+
+struct alignas(16) DecalConstantsGPU
+{
+    glm::mat4 model;
+    glm::mat4 invModel;
+    f32       roughness = 0.5f;
+    f32       metalness = 0.0f;
+    f32       opacity   = 1.0f;
+    f32       pad       = 0.0f;
+};
+static_assert(sizeof(DecalConstantsGPU) == 144, "DecalConstantsGPU size mismatch");
+
 // ─── LightBufferGPU ───────────────────────────────────────────────────────────────────
 // Header placed at the front of the light storage buffer.
 

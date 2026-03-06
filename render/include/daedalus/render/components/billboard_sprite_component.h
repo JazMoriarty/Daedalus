@@ -42,6 +42,13 @@ struct BillboardSpriteComponent
     /// Only used when alphaMode == AlphaMode::Blended.
     glm::vec4 tint = glm::vec4(1.0f);  ///< Default: opaque white (no tint).
 
+    /// Optional emissive texture for self-illumination (Blended sprites only).
+    /// When set, the transparent forward shader adds this colour unconditionally
+    /// so the sprite is visible regardless of scene light direction or NdotL ≈ 0.
+    /// Cutout sprites always self-illuminate via the G-buffer emissive channel;
+    /// this field is ignored for AlphaMode::Cutout.
+    rhi::ITexture* emissiveTexture = nullptr;
+
     /// Sprite sheet UV crop — set automatically each frame by spriteAnimationSystem().
     /// Static sprites can leave these at their defaults (no crop applied).
     /// uvOffset: top-left UV of the current frame cell within the sprite sheet.

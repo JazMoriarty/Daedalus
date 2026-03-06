@@ -37,6 +37,8 @@
 #include "daedalus/render/vox_mesher.h"
 #include "daedalus/render/components/voxel_object_component.h"
 #include "daedalus/render/systems/voxel_render_system.h"
+#include "daedalus/render/components/decal_component.h"
+#include "daedalus/render/systems/decal_render_system.h"
 
 #include <SDL3/SDL.h>
 #include <glm/glm.hpp>
@@ -611,10 +613,11 @@ int main(int /*argc*/, char* /*argv*/[])
 
     // ─── Animated sprite entity (sprite sheet animation demo) ─────────────────
     // 4-frame × 2-row sprite sheet (128×64): each frame cell is 32×32 pixels.
-    //   Row 0: idle cycle  (4 frames, 6 fps)
-    //   Row 1: walk cycle  (4 frames, 12 fps)
+    //   Row 0: idle cycle  (4 frames, 2 fps)
+    //   Row 1: walk cycle  (4 frames, 2 fps)
     // The entity starts on row 0 (idle) and will cycle automatically.
-    // Placed at (-2, 1.5, 2) so it is visible alongside the cutout sprite.
+    // Orbits above the brick box (box top = y 1.5) so it acts as a spinning
+    // pickup indicator — position is updated every frame in the main loop.
 
     std::unique_ptr<rhi::ITexture> animSpriteTexture;
     {
@@ -675,30 +678,34 @@ int main(int /*argc*/, char* /*argv*/[])
         DAEDALUS_ASSERT(animSpriteTexture != nullptr, "Failed to create animated sprite texture");
     }
 
+    // animEntity is declared here so the main loop can update its position each frame.
+    EntityId animEntity;
     {
         TransformComponent animTransform;
-        animTransform.position = glm::vec3(-2.0f, 1.5f, 2.0f);
+        animTransform.position = glm::vec3(0.3f, 2.0f, 0.0f);  // initial angle=0 of orbit
 
         render::BillboardSpriteComponent animSprite;
-        animSprite.texture   = animSpriteTexture.get();
-        animSprite.size      = glm::vec2(1.2f);
-        animSprite.alphaMode = render::AlphaMode::Cutout;
+        animSprite.texture         = animSpriteTexture.get();
+        animSprite.size            = glm::vec2(0.9f);  // fits neatly above the 1.5-unit box
+        animSprite.alphaMode       = render::AlphaMode::Blended;  // transparent pass: CullMode::None
+        animSprite.tint            = glm::vec4(1.0f);             // fully opaque circles, transparent bg
+        animSprite.emissiveTexture = animSpriteTexture.get();      // self-illuminate: visible regardless of NdotL
         // uvOffset / uvScale will be set by spriteAnimationSystem each frame.
 
         render::AnimationStateComponent animState;
         animState.frameCount  = 4;
         animState.rowCount    = 2;
         animState.currentRow  = 0;    // start on idle row
-        animState.fps         = 6.0f; // idle: slow cycle
+        animState.fps         = 2.0f; // one frame every 0.5 s — easily readable
         animState.loop        = true;
 
-        EntityId animEntity = world.createEntity();
+        animEntity = world.createEntity();
         world.addComponent(animEntity, animTransform);
         world.addComponent(animEntity, std::move(animSprite));
         world.addComponent(animEntity, std::move(animState));
     }
 
-    std::printf("[Daedalus] Animated sprite-sheet entity created (4 frames × 2 rows, 6 fps).\n");
+    std::printf("[Daedalus] Animated sprite-sheet entity created (4 frames × 2 rows, 2 fps).\n");
 
     // ─── Voxel object entity (voxel sprite demo) ──────────────────────────────
     // Programmatic 4×4×4 coloured volume: each column (x,z) gets a distinct
@@ -719,25 +726,15 @@ int main(int /*argc*/, char* /*argv*/[])
         testVox.sizeZ = 4;
         testVox.voxels.resize(4 * 4 * 4, 0u);
 
-        // Fill: skip the top centre to make the shape slightly non-trivial and
-        // produce an interesting silhouette (hollow top-centre cell).
+        // Solid 4×4×4 cube: each (x,z) column gets a distinct palette index
+        // (1..16) so all 6 face directions and the greedy merge path are exercised.
         for (u32 x = 0; x < 4; ++x)
-        {
             for (u32 y = 0; y < 4; ++y)
-            {
                 for (u32 z = 0; z < 4; ++z)
                 {
-                    const bool topCentre = (y == 3 && x >= 1 && x <= 2 && z >= 1 && z <= 2);
-                    if (!topCentre)
-                    {
-                        // Each (x,z) column gets a distinct 1-based palette index
-                        // (1..16) so the different-colour boundary test path fires.
-                        const u8 ci = static_cast<u8>(1 + x + 4 * z);
-                        testVox.voxels[x + 4 * (y + 4 * z)] = ci;
-                    }
+                    const u8 ci = static_cast<u8>(1 + x + 4 * z);
+                    testVox.voxels[x + 4 * (y + 4 * z)] = ci;
                 }
-            }
-        }
 
         // Build a simple 16-colour palette (bright hues for indices 1-16;
         // the remaining 239 slots stay zero which is fine — they are not used).
@@ -800,18 +797,123 @@ int main(int /*argc*/, char* /*argv*/[])
         voxComp.indexBuffer     = voxIBO.get();
         voxComp.indexCount      = static_cast<u32>(voxMesh.indices.size());
         voxComp.material.albedo = voxPaletteTex.get();
-        voxComp.material.roughness = 0.8f;
+        voxComp.material.roughness = 1.0f;  // fully matte — eliminates view-dependent specular sweep on flat voxel faces
         voxComp.material.metalness = 0.0f;
 
         TransformComponent voxTransform;
-        voxTransform.position = glm::vec3(3.0f, 0.0f, -2.0f);
+        voxTransform.position = glm::vec3(3.0f, 0.1f, -2.0f);  // 0.1 lift clears floor z-fighting
+        voxTransform.scale    = glm::vec3(0.3f);  // 4×4×4 voxels × 0.3 = 1.2 world units per side
 
         EntityId voxEntity = world.createEntity();
         world.addComponent(voxEntity, voxTransform);
         world.addComponent(voxEntity, std::move(voxComp));
     }
 
-    std::printf("[Daedalus] Voxel object entity created (4×4×4 volume).\n");
+    std::printf("[Daedalus] Voxel object entity created (4\u00d74\u00d74 volume).\n");
+
+    // ─── Deferred decal entities (Pass 2.5 demo) ─────────────────────────────────────
+    // Procedural 128×128 "damage mark" texture: dark reddish-brown disc with
+    // a quadratic alpha fall-off so the edges blend smoothly into the floor.
+    // Three DecalComponent entities at floor level (y ≈0.08) demonstrate
+    // G-buffer alpha blending in sector 0 and sector 1.
+
+    std::unique_ptr<rhi::ITexture> decalTexture;
+    {
+        constexpr int DEC_W = 128, DEC_H = 128;
+        std::vector<u8> pixels(DEC_W * DEC_H * 4, 0u);
+
+        const float dcx    = (DEC_W - 1) * 0.5f;
+        const float dcy    = (DEC_H - 1) * 0.5f;
+        const float radius = DEC_W * 0.45f;
+
+        for (int y = 0; y < DEC_H; ++y)
+        {
+            for (int x = 0; x < DEC_W; ++x)
+            {
+                const float ddx  = static_cast<float>(x) - dcx;
+                const float ddy  = static_cast<float>(y) - dcy;
+                const float dist = std::sqrt(ddx * ddx + ddy * ddy);
+                const int   idx  = (y * DEC_W + x) * 4;
+
+                if (dist < radius)
+                {
+                    // Quadratic fall-off: fully opaque centre, transparent edge.
+                    const float t     = 1.0f - (dist / radius);
+                    const u8    alpha = static_cast<u8>(t * t * 220.0f);  // 0–220
+                    // Dark reddish-brown (damage / burn mark).
+                    pixels[idx + 0] = static_cast<u8>(60  + static_cast<int>(t * 40));  // R 60–100
+                    pixels[idx + 1] = static_cast<u8>(20  + static_cast<int>(t * 20));  // G 20–40
+                    pixels[idx + 2] = static_cast<u8>(10  + static_cast<int>(t * 10));  // B 10–20
+                    pixels[idx + 3] = alpha;
+                }
+            }
+        }
+
+        rhi::TextureDescriptor td;
+        td.width     = static_cast<u32>(DEC_W);
+        td.height    = static_cast<u32>(DEC_H);
+        td.format    = rhi::TextureFormat::RGBA8Unorm;  // linear (not sRGB)
+        td.usage     = rhi::TextureUsage::ShaderRead;
+        td.initData  = pixels.data();
+        td.debugName = "decal_damage_mark";
+        decalTexture = device->createTexture(td);
+        DAEDALUS_ASSERT(decalTexture != nullptr, "Failed to create decal texture");
+    }
+
+    // Three floor decals at different positions in sectors 0 and 1.
+    // TransformComponent: position = OBB centre; scale = OBB full extents.
+    // A thin Y scale (0.15) produces a flat OBB that straddles y=0 so the
+    // fragment shader catches floor fragments within the XZ footprint.
+    {
+        // Decal 1 — centre of sector 0 (directly below the spotlight).
+        TransformComponent t1;
+        t1.position = glm::vec3( 0.0f, 0.08f,  0.0f);
+        t1.scale    = glm::vec3( 2.0f, 0.15f,  2.0f);
+
+        render::DecalComponent d1;
+        d1.albedoTexture = decalTexture.get();
+        d1.roughness     = 0.95f;
+        d1.metalness     = 0.0f;
+        d1.opacity       = 0.85f;
+
+        EntityId dec1 = world.createEntity();
+        world.addComponent(dec1, t1);
+        world.addComponent(dec1, std::move(d1));
+    }
+    {
+        // Decal 2 — near the box, slightly offset to show overlap.
+        TransformComponent t2;
+        t2.position = glm::vec3(-2.0f, 0.08f,  2.0f);
+        t2.scale    = glm::vec3( 1.5f, 0.15f,  1.5f);
+
+        render::DecalComponent d2;
+        d2.albedoTexture = decalTexture.get();
+        d2.roughness     = 0.9f;
+        d2.metalness     = 0.0f;
+        d2.opacity       = 0.70f;
+
+        EntityId dec2 = world.createEntity();
+        world.addComponent(dec2, t2);
+        world.addComponent(dec2, std::move(d2));
+    }
+    {
+        // Decal 3 — sector 1 floor (cross-sector decal projection).
+        TransformComponent t3;
+        t3.position = glm::vec3( 9.0f, 0.08f,  0.0f);
+        t3.scale    = glm::vec3( 1.8f, 0.15f,  1.8f);
+
+        render::DecalComponent d3;
+        d3.albedoTexture = decalTexture.get();
+        d3.roughness     = 0.9f;
+        d3.metalness     = 0.0f;
+        d3.opacity       = 0.80f;
+
+        EntityId dec3 = world.createEntity();
+        world.addComponent(dec3, t3);
+        world.addComponent(dec3, std::move(d3));
+    }
+
+    std::printf("[Daedalus] Deferred decal entities created (3 floor decals).\n");
 
     // Camera sector tracking
     world::SectorId cameraSector = 0u;
@@ -900,6 +1002,15 @@ int main(int /*argc*/, char* /*argv*/[])
             }
         }
 
+        // Orbit the animated sprite above the box top (y=1.5).
+        // Radius 0.3 at 1.5 rad/s ≈ one revolution every 4 s.
+        {
+            auto& t = world.getComponent<TransformComponent>(animEntity);
+            t.position.x = std::cos(time * 1.5f) * 0.3f;
+            t.position.y = 2.0f;
+            t.position.z = std::sin(time * 1.5f) * 0.3f;
+        }
+
         // Submit ECS entities: static meshes and billboard sprites.
         // spriteAnimationSystem advances frame indices and writes UV crop data
         // into each BillboardSpriteComponent before billboardRenderSystem reads them.
@@ -908,6 +1019,9 @@ int main(int /*argc*/, char* /*argv*/[])
         render::voxelRenderSystem(world, scene);
         render::billboardRenderSystem(world, scene, view,
                                       unitQuadVBO.get(), unitQuadIBO.get());
+
+        // Populate SceneView::decalDraws from ECS entities.
+        render::decalRenderSystem(world, scene);
 
         // Sort transparent draws back-to-front before submission.
         // Explicit call per the spec's "Explicit over Implicit" principle.

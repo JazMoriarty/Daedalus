@@ -8,6 +8,7 @@
 //   texture(0)  = albedo map     (RGBA8, sRGB or linear)
 //   texture(1)  = normal map     (RGBA8, tangent-space)
 //   texture(2)  = shadow depth   (Depth32Float, read as float for bias compare)
+//   texture(3)  = emissive map   (RGBA8 sRGB or RGBA16F; nil fallback → black)
 //   sampler(0)  = linear-repeat  (material textures)
 //   sampler(1)  = linear-clamp   (shadow depth lookup)
 //   buffer(0)   = FrameConstants  (vertex + fragment)
@@ -16,7 +17,9 @@
 //   buffer(3)   = SpotLightGPU    (fragment only)
 //
 // Lighting model:
-//   Final HDR colour = ambient + Cook-Torrance spot light contribution.
+//   Final HDR colour = ambient + Cook-Torrance spot light contribution + emissive.
+//   Emissive is added unconditionally (not scaled by NdotL), making sprites that
+//   set emissiveTexture visible regardless of scene light direction.
 //   Shadow: single-sample bias test against the shadow atlas (same as lighting.metal).
 //   No IBL — not yet available in Phase 1D.  The ambient term uses scene.ambientColor.
 //
@@ -85,6 +88,7 @@ fragment float4 transparent_frag(
     texture2d<float>               albedoTex   [[texture(0)]],
     texture2d<float>               normalTex   [[texture(1)]],
     texture2d<float>               shadowTex   [[texture(2)]],
+    texture2d<float>               emissiveTex [[texture(3)]],
     sampler                        repeatSamp  [[sampler(0)]],
     sampler                        clampSamp   [[sampler(1)]],
     constant FrameConstants&       frame       [[buffer(0)]],
@@ -146,7 +150,13 @@ fragment float4 transparent_frag(
                     * lightColor * attenuation * coneAtten * shadow;
     }
 
+    // ─── Emissive (additive; self-illumination for sprites with NdotL ≈ 0) ──────
+    // Sampled with the same UV crop as albedo so animated sprite frames align.
+    // When emissiveTexture is not set, the fallback 1×1 black texture is bound
+    // and the contribution is zero.
+    const float3 emissive = emissiveTex.sample(repeatSamp, uv).rgb;
+
     // ─── Combine and output ───────────────────────────────────────────────────
-    const float3 hdrColor = ambient + spotContrib;
+    const float3 hdrColor = ambient + spotContrib + emissive;
     return float4(hdrColor, alpha);
 }

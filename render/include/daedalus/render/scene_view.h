@@ -78,7 +78,26 @@ struct SpotLight
     f32       intensity      = 10.0f;
 };
 
-// ─── SceneView ────────────────────────────────────────────────────────────────
+// ─── DecalDraw ────────────────────────────────────────────────────────────────
+// A single deferred decal draw: an OBB defined by its model matrix plus the
+// textures and scalars needed to blend into G-buffer RT0 and RT1.
+
+struct DecalDraw
+{
+    /// model  : local unit-cube → world space  (vertex stage: positions the OBB)
+    /// invModel: world → local unit-cube        (fragment stage: bounds test + UV)
+    glm::mat4 modelMatrix    = glm::mat4(1.0f);
+    glm::mat4 invModelMatrix = glm::mat4(1.0f);
+
+    rhi::ITexture* albedoTexture = nullptr;  ///< RGBA; alpha = blend weight.  Never null.
+    rhi::ITexture* normalTexture = nullptr;  ///< Optional tangent-space normal map.
+
+    f32 roughness = 0.5f;
+    f32 metalness = 0.0f;
+    f32 opacity   = 1.0f;  ///< Global fade multiplier applied on top of texture alpha.
+};
+
+// ─── SceneView ───────────────────────────────────────────────────────────────────────
 // Complete frame description: camera + lights + draw list.
 
 struct SceneView
@@ -122,6 +141,13 @@ struct SceneView
 
     std::vector<MeshDraw> transparentDraws;
 
+    // ─── Decal draw list ───────────────────────────────────────────────────────────────
+    // Populated by decalRenderSystem() each frame.  FrameRenderer renders these
+    // in Pass 2.5 (between G-buffer and SSAO) by alpha-blending into G-buffer
+    // RT0 (albedo) and RT1 (normal/roughness/metalness).
+
+    std::vector<DecalDraw> decalDraws;
+
     // ─── Timing ───────────────────────────────────────────────────────────────────────────
 
     f32 time      = 0.0f;
@@ -129,7 +155,7 @@ struct SceneView
     u32 frameIndex = 0;
 };
 
-// ─── sortTransparentDraws ───────────────────────────────────────────────────────────────────────
+// ─── sortTransparentDraws
 // Sort SceneView::transparentDraws back-to-front (farthest first) by squared
 // distance from scene.cameraPos.  Must be called after all transparent draws
 // are appended and before FrameRenderer::renderFrame.

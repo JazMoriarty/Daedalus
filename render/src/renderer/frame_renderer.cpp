@@ -208,6 +208,43 @@ void FrameRenderer::createPSOs(IRenderDevice& device, const std::string& lib)
         m_transparentPSO = device.createRenderPipeline(d);
     }
 
+    // ── Decal pass 2.5 (alpha-blend into G-buffer RT0 and RT1) ───────────────
+    {
+        auto vsDecal = loadVS("decal_vert");
+        auto fsDecal = loadFS("decal_frag");
+        RenderPipelineDescriptor d;
+        d.vertexShader         = vsDecal.get();
+        d.fragmentShader       = fsDecal.get();
+        d.colorAttachmentCount = 2;
+        d.colorFormats[0]      = TextureFormat::RGBA8Unorm;  // RT0: albedo + AO
+        d.colorFormats[1]      = TextureFormat::RGBA8Unorm;  // RT1: oct normal + roughness + metalness
+        // RT0: blend albedo.rgb by opacity; preserve AO in destination alpha.
+        d.blendStates[0].blendEnabled = true;
+        d.blendStates[0].srcRGB       = BlendFactor::SrcAlpha;
+        d.blendStates[0].dstRGB       = BlendFactor::OneMinusSrcAlpha;
+        d.blendStates[0].rgbOp        = BlendOperation::Add;
+        d.blendStates[0].srcAlpha     = BlendFactor::Zero;   // do not overwrite AO
+        d.blendStates[0].dstAlpha     = BlendFactor::One;    // preserve existing AO
+        d.blendStates[0].alphaOp      = BlendOperation::Add;
+        // RT1: blend (octNorm, roughness) by opacity; preserve metalness in destination alpha.
+        d.blendStates[1].blendEnabled = true;
+        d.blendStates[1].srcRGB       = BlendFactor::SrcAlpha;
+        d.blendStates[1].dstRGB       = BlendFactor::OneMinusSrcAlpha;
+        d.blendStates[1].rgbOp        = BlendOperation::Add;
+        d.blendStates[1].srcAlpha     = BlendFactor::Zero;   // do not overwrite metalness
+        d.blendStates[1].dstAlpha     = BlendFactor::One;    // preserve existing metalness
+        d.blendStates[1].alphaOp      = BlendOperation::Add;
+        d.depthFormat          = TextureFormat::Depth32Float;
+        d.depthTest            = true;
+        d.depthWrite           = false;         // read-only: do NOT overwrite depth
+        d.depthCompare         = CompareFunction::LessEqual;
+        d.cullMode             = CullMode::Back;
+        d.vertexAttributes     = geometryAttributes();
+        d.vertexBufferLayouts  = geometryLayouts();
+        d.debugName            = "Decal";
+        m_decalPSO = device.createRenderPipeline(d);
+    }
+
     // ── TAA ───────────────────────────────────────────────────────────────────
     {
         RenderPipelineDescriptor d;
@@ -371,6 +408,49 @@ void FrameRenderer::createPersistentResources(IRenderDevice& device, u32 w, u32 
         d.usage     = TextureUsage::DepthStencil | TextureUsage::ShaderRead;
         d.debugName = "ShadowDepth";
         m_shadowDepthTex = device.createTexture(d);
+    }
+
+    // Unit cube mesh — shared VBO + IBO used by every deferred decal draw.
+    // The decal vertex shader only consumes position (attr 0); normal/UV/tangent
+    // are zeroed because the StaticMeshVertex stride (48 B) must be preserved
+    // to match the vertex buffer layout registered in the PSO.
+    {
+        const StaticMeshVertex verts[8] =
+        {
+            //  pos                    normal    uv         tangent
+            {{ -0.5f, -0.5f, -0.5f }, {}, {},  {} },  // 0 bottom-left-back
+            {{  0.5f, -0.5f, -0.5f }, {}, {},  {} },  // 1 bottom-right-back
+            {{  0.5f,  0.5f, -0.5f }, {}, {},  {} },  // 2 top-right-back
+            {{ -0.5f,  0.5f, -0.5f }, {}, {},  {} },  // 3 top-left-back
+            {{ -0.5f, -0.5f,  0.5f }, {}, {},  {} },  // 4 bottom-left-front
+            {{  0.5f, -0.5f,  0.5f }, {}, {},  {} },  // 5 bottom-right-front
+            {{  0.5f,  0.5f,  0.5f }, {}, {},  {} },  // 6 top-right-front
+            {{ -0.5f,  0.5f,  0.5f }, {}, {},  {} },  // 7 top-left-front
+        };
+        BufferDescriptor bd;
+        bd.size      = sizeof(verts);
+        bd.usage     = BufferUsage::Vertex;
+        bd.initData  = verts;
+        bd.debugName = "UnitCubeVBO";
+        m_unitCubeVBO = device.createBuffer(bd);
+
+        // 6 faces × 2 triangles × 3 vertices = 36 indices.
+        // Winding is CCW when viewed from outside the cube (front-faces outward).
+        const u32 indices[36] =
+        {
+            4, 5, 6,   4, 6, 7,   // Front  (+Z)
+            1, 0, 3,   1, 3, 2,   // Back   (-Z)
+            5, 1, 2,   5, 2, 6,   // Right  (+X)
+            0, 4, 7,   0, 7, 3,   // Left   (-X)
+            7, 6, 2,   7, 2, 3,   // Top    (+Y)
+            0, 1, 5,   0, 5, 4,   // Bottom (-Y)
+        };
+        BufferDescriptor id;
+        id.size      = sizeof(indices);
+        id.usage     = BufferUsage::Index;
+        id.initData  = indices;
+        id.debugName = "UnitCubeIBO";
+        m_unitCubeIBO = device.createBuffer(id);
     }
 
     // TAA history textures
@@ -657,6 +737,11 @@ void FrameRenderer::renderFrame(IRenderDevice& device,
     IPipeline* pBloomH       = m_bloomBlurHPSO.get();
     IPipeline* pBloomV       = m_bloomBlurVPSO.get();
     IPipeline* pTonemap      = m_tonemapPSO.get();
+    IPipeline* pDecal        = m_decalPSO.get();
+
+    // Unit cube GPU mesh (shared by all decal draws)
+    IBuffer*   cubeVBO       = m_unitCubeVBO.get();
+    IBuffer*   cubeIBO       = m_unitCubeIBO.get();
 
     // Snapshot the opaque draw list for lambda capture.
     const std::vector<MeshDraw>& draws = scene.meshDraws;
@@ -674,6 +759,9 @@ void FrameRenderer::renderFrame(IRenderDevice& device,
                 return glm::dot(pa - cam, pa - cam) > glm::dot(pb - cam, pb - cam);
             });
     }
+
+    // Decal draw list (reference valid through m_graph.execute below)
+    const std::vector<DecalDraw>& decalDraws = scene.decalDraws;
 
     const Viewport    vp{ 0.0f, 0.0f, static_cast<f32>(swapW), static_cast<f32>(swapH) };
     const ScissorRect sc{ 0, 0, swapW, swapH };
@@ -761,6 +849,61 @@ void FrameRenderer::renderFrame(IRenderDevice& device,
                     draw.material.emissive  ? draw.material.emissive  : fallbackEmissive, 2);
                 enc->setIndexBuffer(draw.indexBuffer, 0, true);
                 enc->drawIndexed(draw.indexCount);
+            }
+        };
+        m_graph.addRenderPass(std::move(p));
+    }
+
+    // ──────────────────────────────────────────────────────────────────────────────────
+    // Pass 2.5 — Deferred Decals (G-buffer alpha blend)
+    // Alpha-blends decal albedo and normals into G-buffer RT0 (albedo) and RT1
+    // (normal/roughness/metalness).  Depth is tested but NOT written; the depth
+    // buffer is also sampled in the fragment shader to reconstruct the surface
+    // world-space position for OBB projection.
+    // ──────────────────────────────────────────────────────────────────────────────────
+    {
+        RGRenderPassDesc p;
+        p.name             = "Decals";
+        p.colorOutputs[0]  = gAlbedoId;
+        p.colorOutputs[1]  = gNormalId;
+        p.colorOutputCount = 2;
+        p.depthOutput      = gDepthId;
+        p.loadColors       = true;   // blend into existing G-buffer content
+        p.loadDepth        = true;   // test against G-buffer depth (no clear)
+        p.execute = [=, &decalDraws](IRenderPassEncoder* enc)
+        {
+            if (decalDraws.empty()) { return; }
+
+            enc->setViewport(vp);
+            enc->setScissor(sc);
+            enc->setRenderPipeline(pDecal);
+            enc->setFragmentSampler(repeatSamp, 0);  // sampler(0): linear-repeat
+
+            for (const DecalDraw& draw : decalDraws)
+            {
+                DecalConstantsGPU dc;
+                dc.model     = draw.modelMatrix;
+                dc.invModel  = draw.invModelMatrix;
+                dc.roughness = draw.roughness;
+                dc.metalness = draw.metalness;
+                dc.opacity   = draw.opacity;
+                dc.pad       = 0.0f;
+
+                // ── Vertex stage ─────────────────────────────────────────────
+                enc->setVertexBuffer(frameBuf,    0,          0);       // FrameConstants  buffer(0)
+                enc->setVertexBytes (&dc, sizeof(dc),         1);       // DecalConstants  buffer(1)
+                enc->setVertexBuffer(cubeVBO,     0, k_vboSlot);       // unit cube VBO
+
+                // ── Fragment stage ────────────────────────────────────────────
+                enc->setFragmentBuffer (frameBuf,                   0, 0);  // FrameConstants  buffer(0)
+                enc->setFragmentBytes  (&dc, sizeof(dc),               1);  // DecalConstants  buffer(1)
+                enc->setFragmentTexture(gDepthTex,                     0);  // G-buffer depth  texture(0)
+                enc->setFragmentTexture(draw.albedoTexture,            1);  // decal albedo    texture(1)
+                enc->setFragmentTexture(
+                    draw.normalTexture ? draw.normalTexture : fallbackNormal, 2); // decal normal texture(2)
+
+                enc->setIndexBuffer(cubeIBO, 0, true);  // u32 indices (true = 32-bit)
+                enc->drawIndexed(36);
             }
         };
         m_graph.addRenderPass(std::move(p));
@@ -900,6 +1043,8 @@ void FrameRenderer::renderFrame(IRenderDevice& device,
                 enc->setFragmentTexture(
                     draw.material.normalMap ? draw.material.normalMap : fallbackNormal,   1);
                 enc->setFragmentTexture(shadowDepthTex, 2);  // shadow depth atlas
+                enc->setFragmentTexture(
+                    draw.material.emissive  ? draw.material.emissive  : fallbackEmissive, 3);
                 enc->setIndexBuffer(draw.indexBuffer, 0, true);
                 enc->drawIndexed(draw.indexCount);
             }
@@ -907,7 +1052,7 @@ void FrameRenderer::renderFrame(IRenderDevice& device,
         m_graph.addRenderPass(std::move(p));
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
+    // ──────────────────────────────────────────────────────────────────────────────
     // Pass 7 — TAA
     // ─────────────────────────────────────────────────────────────────────────
     {

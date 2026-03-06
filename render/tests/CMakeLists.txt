@@ -3,6 +3,7 @@ add_executable(RenderTests
     test_transparent_pass.cpp
     test_sprite_animation_system.cpp
     test_vox_mesher.cpp
+    test_decal_render_system.cpp
 )
 
 target_link_libraries(RenderTests

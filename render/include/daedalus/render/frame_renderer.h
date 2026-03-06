@@ -2,18 +2,19 @@
 // Orchestrates the full deferred rendering pipeline for one frame.
 //
 // Pass order:
-//   1. Shadow depth   (render, depth-only from sun POV — 2048×2048)
-//   2. G-buffer       (render, depth + colour in one pass)
-//   3. SSAO           (compute)
-//   3b.SSAOBlur       (compute, bilateral 5×5 depth-aware filter)
-//   4. Lighting       (compute, deferred PBR + PCF shadow)
-//   5. Skybox         (render, procedural sky on background pixels)
-//   6. Transparent    (render, forward PBR + alpha blend, sorted back-to-front)
-//   7. TAA            (render, temporal anti-aliasing)
-//   8. Bloom extract  (render)
-//   9. Bloom blur H   (render)
-//  10. Bloom blur V   (render)
-//  11. Tone mapping   (render → swapchain)
+//   1.  Shadow depth   (render, depth-only from sun POV — 2048×2048)
+//   2.  G-buffer       (render, depth + colour in one pass)
+//   2.5 Decal          (render, alpha-blend into G-buffer RT0+RT1)
+//   3.  SSAO           (compute)
+//   3b. SSAOBlur       (compute, bilateral 5×5 depth-aware filter)
+//   4.  Lighting       (compute, deferred PBR + PCF shadow)
+//   5.  Skybox         (render, procedural sky on background pixels)
+//   6.  Transparent    (render, forward PBR + alpha blend, sorted back-to-front)
+//   7.  TAA            (render, temporal anti-aliasing)
+//   8.  Bloom extract  (render)
+//   9.  Bloom blur H   (render)
+//  10.  Bloom blur V   (render)
+//  11.  Tone mapping   (render → swapchain)
 
 #pragma once
 
@@ -71,6 +72,7 @@ private:
 
     std::unique_ptr<rhi::IPipeline> m_gbufferPSO;
     std::unique_ptr<rhi::IPipeline> m_shadowDepthPSO;
+    std::unique_ptr<rhi::IPipeline> m_decalPSO;     ///< Pass 2.5: alpha-blend into G-buffer RT0+RT1.
     std::unique_ptr<rhi::IPipeline> m_ssaoPSO;
     std::unique_ptr<rhi::IPipeline> m_ssaoBlurPSO;
     std::unique_ptr<rhi::IPipeline> m_lightingPSO;
@@ -81,6 +83,11 @@ private:
     std::unique_ptr<rhi::IPipeline> m_bloomBlurHPSO;
     std::unique_ptr<rhi::IPipeline> m_bloomBlurVPSO;
     std::unique_ptr<rhi::IPipeline> m_tonemapPSO;
+
+    // ─── Unit cube mesh (shared by all decal draws) ──────────────────────────
+
+    std::unique_ptr<rhi::IBuffer> m_unitCubeVBO;  ///< 8 StaticMeshVertex positions (384 B)
+    std::unique_ptr<rhi::IBuffer> m_unitCubeIBO;  ///< 36 u32 indices, CCW front-faces
 
     // ─── Per-frame GPU buffers ────────────────────────────────────────────────
 
