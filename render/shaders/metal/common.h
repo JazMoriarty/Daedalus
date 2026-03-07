@@ -170,7 +170,205 @@ inline float3 cook_torrance(float3 N, float3 V, float3 L,
     return (kD * albedo / PI + specular) * NdotL;
 }
 
-// ─── Luminance / colour utilities ───────────────────────────────────────────
+// ─── Particle GPU structs ──────────────────────────────────────────────────────────────────────────────────────────────────
+// Must match scene_data.h exactly.
+
+struct ParticleGPU                  // 64 bytes per particle
+{
+    // packed_float3 = 12 bytes (matches glm::vec3); plain float3 would be 16
+    // and break the C++ / MSL struct layout match.
+    packed_float3 pos;
+    float         life;
+    packed_float3 vel;
+    float         maxLife;
+    float4 color;     // HDR tint (rgb) + opacity (a)
+    float  size;
+    float  rot;
+    uint   frameIdx;
+    uint   flags;     // bit 0 = alive
+};
+
+struct ParticleEmitterConstants     // buffer(0) in all particle shaders, 160 bytes
+{   // packed_float3 = 12 bytes; matches glm::vec3 on the C++ side.
+    packed_float3 emitterPos;
+    float         emissionRate;
+
+    packed_float3 emitDir;
+    float         coneHalfAngle;
+
+    float  speedMin;
+    float  speedMax;
+    float  lifetimeMin;
+    float  lifetimeMax;
+
+    float4 colorStart;
+    float4 colorEnd;
+
+    float  sizeStart;
+    float  sizeEnd;
+    float  drag;
+    float  turbulenceScale;
+
+    packed_float3 gravity;
+    float         emissiveScale;
+
+    uint   maxParticles;
+    uint   spawnThisFrame;
+    uint   frameIndex;
+    uint   aliveListFlip;   // 0 = read A write B, 1 = read B write A
+
+    float2 atlasSize;       // (cols, rows)
+    float  atlasFrameRate;
+    float  velocityStretch;
+
+    float  softRange;
+    float  pad0;
+    float  pad1;
+    float  pad2;
+};
+
+struct DrawIndirectArgs              // 16 bytes — matches MTLDrawPrimitivesIndirectArguments
+{
+    uint vertexCount;
+    uint instanceCount;
+    uint firstVertex;
+    uint baseInstance;
+};
+
+// ─── Curl noise helpers ─────────────────────────────────────────────────────────────────────────────────────────────────
+
+/// Value noise hash for a 3-component integer seed.
+inline float hash31(uint3 s)
+{
+    s = s * uint3(1597334673u, 3812015801u, 2798796415u);
+    uint v = (s.x ^ s.y ^ s.z) * 1597334673u;
+    return float(v) * (1.0 / float(0xffffffffu));
+}
+
+/// Gradient noise for a float3 input.
+inline float grad_noise(float3 p)
+{
+    uint3 i  = uint3(floor(p));
+    float3 f = fract(p);
+    float3 u = f * f * (3.0 - 2.0 * f);
+    return mix(
+        mix(mix(hash31(i),             hash31(i + uint3(1,0,0)), u.x),
+            mix(hash31(i + uint3(0,1,0)), hash31(i + uint3(1,1,0)), u.x), u.y),
+        mix(mix(hash31(i + uint3(0,0,1)), hash31(i + uint3(1,0,1)), u.x),
+            mix(hash31(i + uint3(0,1,1)), hash31(i + uint3(1,1,1)), u.x), u.y),
+        u.z) * 2.0 - 1.0;
+}
+
+/// Analytically correct curl noise — divergence-free 3D velocity field.
+/// Produces swirling organic motion with no artificial sinks or sources.
+inline float3 curl_noise(float3 p)
+{
+    const float e = 0.0001;
+    float3 dx = float3(e, 0, 0);
+    float3 dy = float3(0, e, 0);
+    float3 dz = float3(0, 0, e);
+    // Potential vector field (Phi_x, Phi_y, Phi_z)
+    float x0 = grad_noise(p + dy) - grad_noise(p - dy);
+    float x1 = grad_noise(p + dz) - grad_noise(p - dz);
+    float y0 = grad_noise(p + dz) - grad_noise(p - dz);
+    float y1 = grad_noise(p + dx) - grad_noise(p - dx);
+    float z0 = grad_noise(p + dx) - grad_noise(p - dx);
+    float z1 = grad_noise(p + dy) - grad_noise(p - dy);
+    return float3(x0 - x1, y0 - y1, z0 - z1) / (2.0 * e);
+}
+
+// ─── SSR constants ─────────────────────────────────────────────────────────────────────────────────────────────
+// Must match daedalus/render/scene_data.h SSRConstantsGPU exactly.
+
+struct SSRConstants   // buffer(1) in ssr_main, 32 bytes
+{
+    float maxDistance;      // max ray march distance (metres)
+    float thickness;        // depth intersection tolerance (metres)
+    float roughnessCutoff;  // skip SSR above this roughness
+    float fadeStart;        // screen-edge UV distance to begin fading
+    uint  maxSteps;         // maximum ray march iterations
+    float pad0;
+    float pad1;
+    float pad2;
+};
+
+// ─── Volumetric fog structs and helpers ─────────────────────────────────────────────────────────────────────────────────────────────
+// Must match daedalus/render/scene_data.h VolumetricFogConstantsGPU exactly.
+
+struct VolumetricFogConstants   // buffer(1) in all fog compute shaders, 32 bytes
+{
+    float  density;     // extinction coefficient (1/m)
+    float  anisotropy;  // Henyey-Greenstein g factor (-1..1; 0 = isotropic)
+    float  scattering;  // single-scatter albedo (0..1)
+    float  fogFar;      // far depth limit for the froxel volume (metres)
+    float4 ambientFog;  // xyz = ambient in-scatter colour; w = fogNear (metres)
+};
+
+// Froxel volume dimensions: fixed-size grid covering the view frustum.
+// 160×90×64 ≈ 921k voxels; each RGBA16F slice is ~7.4 MB total per 3D texture.
+constant uint FROXEL_W = 160;
+constant uint FROXEL_H = 90;
+constant uint FROXEL_D = 64;
+
+/// Henyey-Greenstein phase function.
+/// @param cosTheta  Cosine of the angle between view direction and light-to-sample direction.
+/// @param g         Anisotropy: 0 = isotropic, >0 = forward scatter, <0 = backward scatter.
+inline float hg_phase(float cosTheta, float g)
+{
+    float g2    = g * g;
+    float denom = 1.0f + g2 - 2.0f * g * cosTheta;
+    return (1.0f - g2) / (4.0f * PI * pow(max(denom, 1e-6f), 1.5f));
+}
+
+/// Convert Metal NDC depth [0,1] to linear view-space depth (metres along the view axis).
+/// Uses the LH perspective-ZO inverse:
+///   ndcZ = proj[2][2] + proj[3][2] / viewZ  ⇒  viewZ = proj[3][2] / (ndcZ - proj[2][2])
+/// This is the exact inverse of glm::perspectiveLH_ZO.
+inline float ndc_to_linear_depth(float ndcZ, float4x4 proj)
+{
+    // proj[col][row] in MSL (column-major) — same layout as GLM.
+    // proj[2][2] = far/(far-near),  proj[3][2] = -far*near/(far-near)
+    return proj[3][2] / (ndcZ - proj[2][2]);
+}
+
+// ─── DoF constants ────────────────────────────────────────────────────────────────────────────────────────────────
+// Must match daedalus/render/scene_data.h DoFConstantsGPU exactly.
+
+struct DoFConstants   // buffer(1) in dof_coc, dof_blur, dof_composite, 32 bytes
+{
+    float focusDistance;   // world-space focus plane distance (metres)
+    float focusRange;      // in-focus band depth (metres)
+    float bokehRadius;     // maximum blur radius (pixels)
+    float nearTransition;  // near-field ramp distance (metres)
+    float farTransition;   // far-field ramp distance (metres)
+    float pad0;
+    float pad1;
+    float pad2;
+};
+
+// ─── Motion blur constants ──────────────────────────────────────────────────────────────────────────────────────
+// Must match daedalus/render/scene_data.h MotionBlurConstantsGPU exactly.
+
+struct MotionBlurConstants   // buffer(1) in motion_blur_main, 16 bytes
+{
+    float shutterAngle;  // fraction of frame time the shutter is open (0..1)
+    uint  numSamples;    // number of velocity-direction samples
+    float pad0;
+    float pad1;
+};
+
+// ─── Colour grading constants ─────────────────────────────────────────────────────────────────────────────
+// Must match daedalus/render/scene_data.h ColorGradingConstantsGPU exactly.
+
+struct ColorGradingConstants   // buffer(1) in color_grade_frag, 16 bytes
+{
+    float intensity;  // LUT blend weight (0 = passthrough, 1 = full LUT)
+    float pad0;
+    float pad1;
+    float pad2;
+};
+
+// ─── Luminance / colour utilities ───────────────────────────────────────────────────────────────────────────────
 
 inline float luminance(float3 c)
 {

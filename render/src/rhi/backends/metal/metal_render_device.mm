@@ -411,7 +411,17 @@ public:
     void dispatch(u32 threadCountX, u32 threadCountY, u32 threadCountZ) override
     {
         MTLSize threads = { threadCountX, threadCountY, threadCountZ };
-        MTLSize tg      = { m_tgWidth, m_tgHeight, 1 };
+        // Match threadgroup dimensionality to the dispatch:
+        //   1D dispatch (Y==1, Z==1) → {width, 1, 1}  (kernels use uint gid)
+        //   2D dispatch (Z==1)       → {width, height, 1} (kernels use uint2 gid)
+        //   3D dispatch              → {4, 4, 4}  (64 threads/group, optimal for Apple Silicon)
+        MTLSize tg;
+        if (threadCountY == 1 && threadCountZ == 1)
+            tg = { m_tgWidth, 1, 1 };
+        else if (threadCountZ == 1)
+            tg = { m_tgWidth, m_tgHeight, 1 };
+        else
+            tg = { 4, 4, 4 };
         [m_encoder dispatchThreads:threads threadsPerThreadgroup:tg];
     }
 
@@ -560,6 +570,14 @@ public:
                            instanceCount:instanceCount
                               baseVertex:vertexOffset
                             baseInstance:firstInstance];
+    }
+
+    void drawIndirect(IBuffer* argBuffer, u32 argBufferOffset) override
+    {
+        id<MTLBuffer> mtlBuf = static_cast<MetalBuffer*>(argBuffer)->mtlBuffer();
+        [m_encoder drawPrimitives:MTLPrimitiveTypeTriangle
+                   indirectBuffer:mtlBuf
+             indirectBufferOffset:static_cast<NSUInteger>(argBufferOffset)];
     }
 
     void end() override
@@ -930,7 +948,7 @@ public:
     createTexture(const TextureDescriptor& desc) override
     {
         MTLTextureDescriptor* mtlDesc = [[MTLTextureDescriptor alloc] init];
-        mtlDesc.textureType = MTLTextureType2D;
+        mtlDesc.textureType = (desc.depth > 1) ? MTLTextureType3D : MTLTextureType2D;
         mtlDesc.width       = desc.width;
         mtlDesc.height      = desc.height;
         mtlDesc.depth       = desc.depth;
@@ -954,10 +972,25 @@ public:
         if (desc.initData)
         {
             const u32 bytesPerRow = desc.width * formatBytesPerPixel(desc.format);
-            [tex replaceRegion:MTLRegionMake2D(0, 0, desc.width, desc.height)
-                   mipmapLevel:0
-                     withBytes:desc.initData
-                   bytesPerRow:bytesPerRow];
+            if (desc.depth > 1)
+            {
+                // 3D texture: MTLRegionMake3D covers all depth slices.
+                // bytesPerImage is the stride between consecutive depth slices.
+                const u32 bytesPerImage = bytesPerRow * desc.height;
+                [tex replaceRegion:MTLRegionMake3D(0, 0, 0, desc.width, desc.height, desc.depth)
+                       mipmapLevel:0
+                             slice:0
+                         withBytes:desc.initData
+                       bytesPerRow:bytesPerRow
+                     bytesPerImage:bytesPerImage];
+            }
+            else
+            {
+                [tex replaceRegion:MTLRegionMake2D(0, 0, desc.width, desc.height)
+                       mipmapLevel:0
+                         withBytes:desc.initData
+                       bytesPerRow:bytesPerRow];
+            }
         }
 
         if (!desc.debugName.empty())

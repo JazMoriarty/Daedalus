@@ -4,6 +4,10 @@ add_executable(RenderTests
     test_sprite_animation_system.cpp
     test_vox_mesher.cpp
     test_decal_render_system.cpp
+    test_particle_render_system.cpp
+    test_volumetric_fog.cpp
+    test_ssr.cpp
+    test_post_fx.cpp
 )
 
 target_link_libraries(RenderTests

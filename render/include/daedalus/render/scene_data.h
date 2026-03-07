@@ -132,7 +132,7 @@ struct alignas(16) DecalConstantsGPU
 };
 static_assert(sizeof(DecalConstantsGPU) == 144, "DecalConstantsGPU size mismatch");
 
-// ─── LightBufferGPU ───────────────────────────────────────────────────────────────────
+// ─── LightBufferGPU ────────────────────────────────────────────────────────────────────────────────────────
 // Header placed at the front of the light storage buffer.
 
 struct alignas(16) LightBufferHeader
@@ -140,5 +140,203 @@ struct alignas(16) LightBufferHeader
     u32 pointLightCount;
     u32 pad[3];
 };
+
+// ─── ParticleGPU ─────────────────────────────────────────────────────────────────────────────────────────────
+// Per-particle state written by emit, read+written by simulate, read by vertex.
+// 64 bytes, 16-byte aligned so arrays index cleanly.
+//
+// Layout:
+//   [0]  pos      float3  world-space position
+//   [3]  life     float   remaining lifetime in seconds
+//   [4]  vel      float3  world-space velocity
+//   [7]  maxLife  float   initial lifetime (constant, used for t = 1 - life/maxLife)
+//   [8]  color    float4  RGBA; RGB = HDR tint, A = opacity base
+//   [12] size     float   world-space billboard half-size
+//   [13] rot      float   billboard rotation (radians, around camera-facing axis)
+//   [14] frameIdx uint    current atlas frame index (advanced by simulate)
+//   [15] flags    uint    bit 0 = alive; reserved
+
+struct alignas(16) ParticleGPU
+{
+    glm::vec3 pos;
+    f32       life;
+    glm::vec3 vel;
+    f32       maxLife;
+    glm::vec4 color;    ///< HDR tint (RGB) + opacity (A)
+    f32       size;
+    f32       rot;
+    u32       frameIdx;
+    u32       flags;    ///< bit 0: alive
+};
+static_assert(sizeof(ParticleGPU) == 64, "ParticleGPU must be 64 bytes");
+
+// ─── ParticleEmitterConstantsGPU ───────────────────────────────────────────────────────────────────────
+// Uploaded once per emitter per frame (compute + vertex + fragment).
+// 160 bytes.
+
+struct alignas(16) ParticleEmitterConstantsGPU
+{
+    glm::vec3 emitterPos;       ///< World-space spawn origin
+    f32       emissionRate;     ///< Particles per second
+
+    glm::vec3 emitDir;          ///< World-space central emission direction (normalised)
+    f32       coneHalfAngle;    ///< Half-angle of the velocity cone (radians)
+
+    f32       speedMin;         ///< Minimum initial speed (m/s)
+    f32       speedMax;         ///< Maximum initial speed (m/s)
+    f32       lifetimeMin;      ///< Minimum particle lifetime (s)
+    f32       lifetimeMax;      ///< Maximum particle lifetime (s)
+
+    glm::vec4 colorStart;       ///< HDR tint at t=0  (RGB + opacity)
+    glm::vec4 colorEnd;         ///< HDR tint at t=1  (RGB + opacity)
+
+    f32       sizeStart;        ///< Billboard half-size at t=0
+    f32       sizeEnd;          ///< Billboard half-size at t=1
+    f32       drag;             ///< Linear velocity damping coefficient (0 = no drag)
+    f32       turbulenceScale;  ///< Curl-noise perturbation magnitude (0 = off)
+
+    glm::vec3 gravity;          ///< Gravity vector (typically (0,-9.8,0) or zero)
+    f32       emissiveScale;    ///< HDR brightness multiplier applied to color.rgb output
+
+    u32       maxParticles;     ///< Capacity of the particle pool
+    u32       spawnThisFrame;   ///< Number of new particles to emit this frame (CPU pre-computed)
+    u32       frameIndex;       ///< Global frame counter (for RNG seeding)
+    u32       aliveListFlip;    ///< 0 = read A write B, 1 = read B write A
+
+    glm::vec2 atlasSize;        ///< (cols, rows) in the sprite sheet
+    f32       atlasFrameRate;   ///< Frames per second for atlas animation (0 = no anim)
+    f32       velocityStretch;  ///< Scale quad along velocity: stretch = 1 + |vel|*factor
+
+    f32       softRange;        ///< Depth fade distance for soft particles (world units)
+    f32       pad0;
+    f32       pad1;
+    f32       pad2;
+};
+static_assert(sizeof(ParticleEmitterConstantsGPU) == 160,
+              "ParticleEmitterConstantsGPU must be 160 bytes");
+
+// ─── DrawIndirectArgsGPU ──────────────────────────────────────────────────────────────────────────────────────────
+// Layout matches MTLDrawPrimitivesIndirectArguments (Metal) and
+// VkDrawIndirectCommand (Vulkan) exactly.
+// vertexCount is always 6 (2 triangles per quad); instanceCount = alive particle count.
+
+struct alignas(16) DrawIndirectArgsGPU
+{
+    u32 vertexCount;    ///< Always 6 — set once at pool init, never changed
+    u32 instanceCount;  ///< Written by compact kernel; reads alive particle count
+    u32 firstVertex;    ///< Always 0
+    u32 baseInstance;   ///< Always 0
+};
+static_assert(sizeof(DrawIndirectArgsGPU) == 16, "DrawIndirectArgsGPU must be 16 bytes");
+
+// ─── VolumetricFogConstantsGPU ──────────────────────────────────────────────────────
+// Uploaded once per frame when fog is enabled (scatter + integrate + composite passes).
+// Matches VolumetricFogConstants in common.h exactly.
+//
+// Layout (32 bytes):
+//   [0]  density     f32   extinction coefficient (scatter + absorption) per metre
+//   [1]  anisotropy  f32   Henyey-Greenstein g factor (-1..1; 0 = isotropic)
+//   [2]  scattering  f32   single-scatter albedo (0..1)
+//   [3]  fogFar      f32   far depth limit for the froxel volume (metres)
+//   [4-7] ambientFog vec4  xyz = ambient in-scatter colour; w = fogNear (metres)
+
+struct alignas(16) VolumetricFogConstantsGPU
+{
+    f32       density;    ///< Extinction coefficient (1/m).
+    f32       anisotropy; ///< Henyey-Greenstein g factor (-1..1).
+    f32       scattering; ///< Single-scatter albedo (0..1).
+    f32       fogFar;     ///< Far depth limit for the froxel volume (metres).
+    glm::vec4 ambientFog; ///< xyz = ambient in-scatter colour; w = fogNear (metres).
+};
+static_assert(sizeof(VolumetricFogConstantsGPU) == 32,
+              "VolumetricFogConstantsGPU must be 32 bytes");
+
+// ─── SSRConstantsGPU ─────────────────────────────────────────────────────
+// Uploaded once per frame when SSR is enabled (ssr_main compute pass).
+// Matches SSRConstants in common.h exactly.
+//
+// Layout (32 bytes):
+//   [0]  maxDistance     f32   max ray march distance in world units (metres)
+//   [1]  thickness       f32   depth intersection tolerance (metres)
+//   [2]  roughnessCutoff f32   roughness above which SSR is skipped (0..1)
+//   [3]  fadeStart       f32   screen-edge UV distance to begin fading (0..0.5)
+//   [4]  maxSteps        u32   maximum ray march iterations
+//   [5]  pad0            f32
+//   [6]  pad1            f32
+//   [7]  pad2            f32
+
+struct alignas(16) SSRConstantsGPU
+{
+    f32 maxDistance;      ///< Max ray march distance (metres).
+    f32 thickness;        ///< Depth intersection tolerance (metres).
+    f32 roughnessCutoff;  ///< Skip SSR above this roughness.
+    f32 fadeStart;        ///< Screen-edge UV distance to begin fading.
+    u32 maxSteps;         ///< Maximum ray march iterations.
+    f32 pad0 = 0.0f;
+    f32 pad1 = 0.0f;
+    f32 pad2 = 0.0f;
+};
+static_assert(sizeof(SSRConstantsGPU) == 32,
+              "SSRConstantsGPU must be 32 bytes");
+
+// ─── DoFConstantsGPU ─────────────────────────────────────────────────────────
+// Uploaded once per frame when DoF is enabled (dof_coc, dof_blur, dof_composite passes).
+// Matches DoFConstants in common.h exactly.
+//
+// Layout (32 bytes):
+//   [0]  focusDistance   f32   world-space distance to the in-focus plane (metres)
+//   [1]  focusRange      f32   total depth of the in-focus band (metres)
+//   [2]  bokehRadius     f32   maximum blur radius in pixels
+//   [3]  nearTransition  f32   distance over which near-field blur ramps up (metres)
+//   [4]  farTransition   f32   distance over which far-field blur ramps up (metres)
+//   [5–7] pad            f32×3
+
+struct alignas(16) DoFConstantsGPU
+{
+    f32 focusDistance;   ///< World-space focus plane distance (metres).
+    f32 focusRange;      ///< In-focus band depth (metres).
+    f32 bokehRadius;     ///< Maximum blur radius (pixels).
+    f32 nearTransition;  ///< Near-field ramp distance (metres).
+    f32 farTransition;   ///< Far-field ramp distance (metres).
+    f32 pad0 = 0.0f;
+    f32 pad1 = 0.0f;
+    f32 pad2 = 0.0f;
+};
+static_assert(sizeof(DoFConstantsGPU) == 32, "DoFConstantsGPU must be 32 bytes");
+
+// ─── MotionBlurConstantsGPU ───────────────────────────────────────────────────
+// Uploaded once per frame when Motion Blur is enabled (motion_blur_main pass).
+// Matches MotionBlurConstants in common.h exactly.
+//
+// Layout (16 bytes):
+//   [0]  shutterAngle  f32   fraction of frame time the shutter is open (0..1)
+//   [1]  numSamples    u32   number of velocity-direction samples
+//   [2–3] pad          f32×2
+
+struct alignas(16) MotionBlurConstantsGPU
+{
+    f32 shutterAngle;  ///< Fraction of frame time the shutter is open (0..1).
+    u32 numSamples;    ///< Number of velocity-direction samples.
+    f32 pad0 = 0.0f;
+    f32 pad1 = 0.0f;
+};
+static_assert(sizeof(MotionBlurConstantsGPU) == 16, "MotionBlurConstantsGPU must be 16 bytes");
+
+// ─── ColorGradingConstantsGPU ─────────────────────────────────────────────────
+// Uploaded once per frame when Color Grading is enabled (color_grade_frag pass).
+// Matches ColorGradingConstants in common.h exactly.
+//
+// Layout (16 bytes):
+//   [0]  intensity  f32   blend weight between original and LUT-graded colour (0..1)
+//   [1–3] pad       f32×3
+
+struct alignas(16) ColorGradingConstantsGPU
+{
+    f32 intensity;     ///< LUT blend weight (0 = passthrough, 1 = full LUT).
+    f32 pad0 = 0.0f;
+    f32 pad1 = 0.0f;
+    f32 pad2 = 0.0f;
+};
+static_assert(sizeof(ColorGradingConstantsGPU) == 16, "ColorGradingConstantsGPU must be 16 bytes");
 
 } // namespace daedalus::render

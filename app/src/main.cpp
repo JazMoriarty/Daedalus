@@ -39,6 +39,9 @@
 #include "daedalus/render/systems/voxel_render_system.h"
 #include "daedalus/render/components/decal_component.h"
 #include "daedalus/render/systems/decal_render_system.h"
+#include "daedalus/render/components/particle_emitter_component.h"
+#include "daedalus/render/systems/particle_render_system.h"
+#include "daedalus/render/particle_pool.h"
 
 #include <SDL3/SDL.h>
 #include <glm/glm.hpp>
@@ -811,20 +814,35 @@ int main(int /*argc*/, char* /*argv*/[])
 
     std::printf("[Daedalus] Voxel object entity created (4\u00d74\u00d74 volume).\n");
 
-    // ─── Deferred decal entities (Pass 2.5 demo) ─────────────────────────────────────
-    // Procedural 128×128 "damage mark" texture: dark reddish-brown disc with
-    // a quadratic alpha fall-off so the edges blend smoothly into the floor.
-    // Three DecalComponent entities at floor level (y ≈0.08) demonstrate
-    // G-buffer alpha blending in sector 0 and sector 1.
+    // ─── Deferred decal entities — realistic impact/damage marks ─────────────────────────
+    // Two procedural 128×128 textures (RGBA8Unorm, linear colour space):
+    //
+    //  decalTexture       — charred albedo: near-black centre → reddish-brown ring.
+    //                       Alpha fades smoothly to 0 at the disc edge.
+    //
+    //  decalNormalTexture — tangent-space crater normal map.  Normals tilt outward
+    //                       on the crater walls (simulating a depression) and have a
+    //                       subtle inward lip at the rim (displaced soil).
+    //                       The deferred lighting pass reads this back through RT1
+    //                       and shades accordingly — the crater depth is purely
+    //                       a lighting illusion, no geometry is displaced.
+    //
+    // TBN used by decal.metal (identity-rotation decal):
+    //   T  = model[0].xyz = world +X   (U increases along +X)
+    //   B  = -model[2].xyz = world −Z  (V = 0.5−local.z → flip)
+    //   N  = model[1].xyz = world +Y   (floor normal / projection axis)
+    // Tangent-space flat normal (0,0,1) → world +Y.  Encoded (128,128,255).
 
     std::unique_ptr<rhi::ITexture> decalTexture;
+    std::unique_ptr<rhi::ITexture> decalNormalTexture;
     {
         constexpr int DEC_W = 128, DEC_H = 128;
-        std::vector<u8> pixels(DEC_W * DEC_H * 4, 0u);
+        std::vector<u8> albedoPixels(DEC_W * DEC_H * 4, 0u);
+        std::vector<u8> normalPixels(DEC_W * DEC_H * 4, 0u);
 
         const float dcx    = (DEC_W - 1) * 0.5f;
         const float dcy    = (DEC_H - 1) * 0.5f;
-        const float radius = DEC_W * 0.45f;
+        const float radius = DEC_W * 0.45f;  // disc fills ~90 % of the texture width
 
         for (int y = 0; y < DEC_H; ++y)
         {
@@ -835,85 +853,330 @@ int main(int /*argc*/, char* /*argv*/[])
                 const float dist = std::sqrt(ddx * ddx + ddy * ddy);
                 const int   idx  = (y * DEC_W + x) * 4;
 
-                if (dist < radius)
-                {
-                    // Quadratic fall-off: fully opaque centre, transparent edge.
-                    const float t     = 1.0f - (dist / radius);
-                    const u8    alpha = static_cast<u8>(t * t * 220.0f);  // 0–220
-                    // Dark reddish-brown (damage / burn mark).
-                    pixels[idx + 0] = static_cast<u8>(60  + static_cast<int>(t * 40));  // R 60–100
-                    pixels[idx + 1] = static_cast<u8>(20  + static_cast<int>(t * 20));  // G 20–40
-                    pixels[idx + 2] = static_cast<u8>(10  + static_cast<int>(t * 10));  // B 10–20
-                    pixels[idx + 3] = alpha;
+                const float r = dist / radius;  // 0 = centre, 1 = disc edge
+
+                // ── Alpha ─────────────────────────────────────────────────────
+                // Fully opaque inside the crater zone, quadratic fade at the edge.
+                float alpha = 0.0f;
+                if (r < 0.75f)
+                    alpha = 0.94f;
+                else if (r < 1.0f) {
+                    const float t = (r - 0.75f) / 0.25f;
+                    alpha = 0.94f * (1.0f - t * t);
                 }
+                const u8 alpha8 = static_cast<u8>(alpha * 255.0f + 0.5f);
+
+                // ── Albedo ────────────────────────────────────────────────────
+                // Scorched concentric zones (all values in linear space):
+                //   r < 0.12  : near-black charred centre
+                //   r < 0.35  : dark brown inner burnt ring
+                //   r < 0.65  : reddish-brown scorched zone
+                //   r < 1.00  : warm stone outer fade
+                float ar, ag, ab;
+                if (r < 0.12f)
+                {
+                    ar = 12.0f / 255.0f; ag = 9.0f / 255.0f; ab = 7.0f / 255.0f;
+                }
+                else if (r < 0.35f)
+                {
+                    const float t = (r - 0.12f) / 0.23f;
+                    ar = (12.0f + t * 38.0f) / 255.0f;
+                    ag = ( 9.0f + t * 20.0f) / 255.0f;
+                    ab = ( 7.0f + t * 11.0f) / 255.0f;
+                }
+                else if (r < 0.65f)
+                {
+                    const float t = (r - 0.35f) / 0.30f;
+                    ar = (50.0f + t * 40.0f) / 255.0f;
+                    ag = (29.0f + t * 22.0f) / 255.0f;
+                    ab = (18.0f + t * 12.0f) / 255.0f;
+                }
+                else
+                {
+                    const float t = (r - 0.65f) / 0.35f;
+                    ar = (90.0f + t * 30.0f) / 255.0f;
+                    ag = (51.0f + t * 18.0f) / 255.0f;
+                    ab = (30.0f + t *  8.0f) / 255.0f;
+                }
+
+                albedoPixels[idx + 0] = static_cast<u8>(ar * 255.0f + 0.5f);
+                albedoPixels[idx + 1] = static_cast<u8>(ag * 255.0f + 0.5f);
+                albedoPixels[idx + 2] = static_cast<u8>(ab * 255.0f + 0.5f);
+                albedoPixels[idx + 3] = alpha8;
+
+                // ── Normal map ────────────────────────────────────────────────
+                // Tangent-space normals.  Encoding: (n * 0.5 + 0.5) * 255.
+                //   Flat (0,0,1) → (128,128,255).
+                //
+                // Crater wall zone [r: 0.12 → 0.55]:
+                //   Bell-curve tilt (sin(π·wallT) * 0.55 rad ≈ 32° peak) outward
+                //   from centre → the lighting gradient produces the depth illusion.
+                // Rim zone [r: 0.55 → 0.75]:
+                //   Slight negative tilt (sin(π·rimT) * 0.18 rad ≈ 10°) for a
+                //   displaced-soil lip at the crater edge.
+                float nx = 0.0f, ny = 0.0f, nz = 1.0f;
+
+                if (r > 0.12f && dist > 0.001f)
+                {
+                    const float invDist = 1.0f / dist;
+                    const float dirX    = ddx * invDist;  // tangent-T direction
+                    const float dirY    = ddy * invDist;  // tangent-B direction
+
+                    float tilt = 0.0f;
+                    if (r < 0.55f)
+                    {
+                        const float wallT = (r - 0.12f) / 0.43f;
+                        tilt = std::sin(wallT * 3.14159265f) * 0.55f;
+                    }
+                    else if (r < 0.75f)
+                    {
+                        const float rimT = (r - 0.55f) / 0.20f;
+                        tilt = -std::sin(rimT * 3.14159265f) * 0.18f;
+                    }
+
+                    if (std::abs(tilt) > 0.0001f)
+                    {
+                        const float sinT = std::sin(tilt);
+                        const float cosT = std::cos(tilt);
+                        nx = sinT * dirX;
+                        ny = sinT * dirY;
+                        nz = cosT;
+                    }
+                }
+
+                // Clamp-and-encode to [0, 255].
+                auto enc = [](float v) -> u8
+                {
+                    return static_cast<u8>(std::fmax(0.0f,
+                               std::fmin(255.0f, (v * 0.5f + 0.5f) * 255.0f + 0.5f)));
+                };
+                normalPixels[idx + 0] = enc(nx);
+                normalPixels[idx + 1] = enc(ny);
+                normalPixels[idx + 2] = enc(nz);
+                normalPixels[idx + 3] = 255u;
             }
         }
 
-        rhi::TextureDescriptor td;
-        td.width     = static_cast<u32>(DEC_W);
-        td.height    = static_cast<u32>(DEC_H);
-        td.format    = rhi::TextureFormat::RGBA8Unorm;  // linear (not sRGB)
-        td.usage     = rhi::TextureUsage::ShaderRead;
-        td.initData  = pixels.data();
-        td.debugName = "decal_damage_mark";
-        decalTexture = device->createTexture(td);
-        DAEDALUS_ASSERT(decalTexture != nullptr, "Failed to create decal texture");
+        // Upload albedo texture.
+        {
+            rhi::TextureDescriptor td;
+            td.width     = static_cast<u32>(DEC_W);
+            td.height    = static_cast<u32>(DEC_H);
+            td.format    = rhi::TextureFormat::RGBA8Unorm;
+            td.usage     = rhi::TextureUsage::ShaderRead;
+            td.initData  = albedoPixels.data();
+            td.debugName = "decal_damage_albedo";
+            decalTexture = device->createTexture(td);
+            DAEDALUS_ASSERT(decalTexture != nullptr, "Failed to create decal albedo texture");
+        }
+
+        // Upload normal map texture.
+        {
+            rhi::TextureDescriptor td;
+            td.width     = static_cast<u32>(DEC_W);
+            td.height    = static_cast<u32>(DEC_H);
+            td.format    = rhi::TextureFormat::RGBA8Unorm;
+            td.usage     = rhi::TextureUsage::ShaderRead;
+            td.initData  = normalPixels.data();
+            td.debugName = "decal_damage_normal";
+            decalNormalTexture = device->createTexture(td);
+            DAEDALUS_ASSERT(decalNormalTexture != nullptr, "Failed to create decal normal texture");
+        }
     }
 
-    // Three floor decals at different positions in sectors 0 and 1.
+    // Three floor impact marks at different positions in sectors 0 and 1.
     // TransformComponent: position = OBB centre; scale = OBB full extents.
-    // Decal centre must be ON the floor (y=0) so the thin Y extent [-0.075, +0.075]
-    // straddles the floor plane and the fragment shader catches floor fragments.
+    // Decal centre must be ON the floor (y=0) so the thin Y extent straddles the
+    // floor plane and the fragment shader catches floor fragments.
     {
         // Decal 1 — centre of sector 0 (directly below the spotlight).
         TransformComponent t1;
         t1.position = glm::vec3( 0.0f, 0.0f,  0.0f);
-        t1.scale    = glm::vec3( 2.0f, 0.15f,  2.0f);
+        t1.scale    = glm::vec3( 2.0f, 0.30f,  2.0f);
 
         render::DecalComponent d1;
         d1.albedoTexture = decalTexture.get();
-        d1.roughness     = 0.95f;
+        d1.normalTexture = decalNormalTexture.get();  // crater normal map
+        d1.roughness     = 0.95f;  // charred surface is very matte
         d1.metalness     = 0.0f;
-        d1.opacity       = 0.85f;
+        d1.opacity       = 0.90f;
 
         EntityId dec1 = world.createEntity();
         world.addComponent(dec1, t1);
         world.addComponent(dec1, std::move(d1));
     }
     {
-        // Decal 2 — near the box, slightly offset to show overlap.
+        // Decal 2 — near the box, slightly offset.
         TransformComponent t2;
         t2.position = glm::vec3(-2.0f, 0.0f,  2.0f);
-        t2.scale    = glm::vec3( 1.5f, 0.15f,  1.5f);
+        t2.scale    = glm::vec3( 1.5f, 0.30f,  1.5f);
 
         render::DecalComponent d2;
         d2.albedoTexture = decalTexture.get();
-        d2.roughness     = 0.9f;
+        d2.normalTexture = decalNormalTexture.get();
+        d2.roughness     = 0.92f;
         d2.metalness     = 0.0f;
-        d2.opacity       = 0.70f;
+        d2.opacity       = 0.88f;
 
         EntityId dec2 = world.createEntity();
         world.addComponent(dec2, t2);
         world.addComponent(dec2, std::move(d2));
     }
     {
-        // Decal 3 — sector 1 floor (cross-sector decal projection).
+        // Decal 3 — sector 1 floor.
         TransformComponent t3;
         t3.position = glm::vec3( 9.0f, 0.0f,  0.0f);
-        t3.scale    = glm::vec3( 1.8f, 0.15f,  1.8f);
+        t3.scale    = glm::vec3( 1.8f, 0.30f,  1.8f);
 
         render::DecalComponent d3;
         d3.albedoTexture = decalTexture.get();
-        d3.roughness     = 0.9f;
+        d3.normalTexture = decalNormalTexture.get();
+        d3.roughness     = 0.93f;
         d3.metalness     = 0.0f;
-        d3.opacity       = 0.80f;
+        d3.opacity       = 0.90f;
 
         EntityId dec3 = world.createEntity();
         world.addComponent(dec3, t3);
         world.addComponent(dec3, std::move(d3));
     }
 
-    std::printf("[Daedalus] Deferred decal entities created (3 floor decals, y=0 centred).\n");
+    std::printf("[Daedalus] Deferred decal entities created (3 impact marks, with crater normal maps).\n");
+
+    // ─── Particle emitters: flame and sparks ────────────────────────────────────
+    // Two procedural atlas textures, two ParticlePools, two ECS entities.
+    //
+    // Flame  — warm organic fire at (0, 0.1, 0): strong curl turbulence, soft
+    //          glowing billboards that bloom under the spotlight.
+    // Sparks — fast omnidirectional sparks at (-2, 0.5, 2): velocity-stretched
+    //          white-hot streaks with full gravity and short lifetime.
+
+    // ── Flame atlas: 32×32 single-cell radial gradient ─────────────────────────
+    // White-hot centre fading to transparent edge; rendered in HDR so bloom fires.
+    std::unique_ptr<rhi::ITexture> flameAtlas;
+    {
+        constexpr int W = 32, H = 32;
+        std::vector<u8> px(W * H * 4, 0u);
+        const float cx = (W - 1) * 0.5f, cy = (H - 1) * 0.5f;
+        const float r  = cx * 0.9f;
+        for (int y = 0; y < H; ++y)
+        {
+            for (int x = 0; x < W; ++x)
+            {
+                const float d = std::sqrt((x-cx)*(x-cx) + (y-cy)*(y-cy)) / r;
+                if (d >= 1.0f) { continue; }
+                // Falloff: smoother quad curve
+                const float t = 1.0f - d * d;
+                const int i   = (y * W + x) * 4;
+                // Core: near-white; outer: warm yellow
+                px[i+0] = static_cast<u8>(std::min(255.f, (0.8f + 0.2f * t) * 255.f + 0.5f)); // R
+                px[i+1] = static_cast<u8>(std::min(255.f, (0.5f + 0.3f * t) * 255.f + 0.5f)); // G
+                px[i+2] = static_cast<u8>(std::min(255.f,        0.1f * t   * 255.f + 0.5f)); // B
+                px[i+3] = static_cast<u8>(std::min(255.f,              t    * 255.f + 0.5f)); // A
+            }
+        }
+        rhi::TextureDescriptor td;
+        td.width = W; td.height = H;
+        td.format    = rhi::TextureFormat::RGBA8Unorm;
+        td.usage     = rhi::TextureUsage::ShaderRead;
+        td.initData  = px.data();
+        td.debugName = "particle_flame_atlas";
+        flameAtlas = device->createTexture(td);
+        DAEDALUS_ASSERT(flameAtlas, "Failed to create flame atlas");
+    }
+
+    // ── Sparks atlas: 8×8 sharp bright dot ────────────────────────────────────
+    std::unique_ptr<rhi::ITexture> sparksAtlas;
+    {
+        constexpr int W = 8, H = 8;
+        std::vector<u8> px(W * H * 4, 0u);
+        const float cx = (W - 1) * 0.5f, cy = (H - 1) * 0.5f;
+        const float r  = cx * 0.8f;
+        for (int y = 0; y < H; ++y)
+        {
+            for (int x = 0; x < W; ++x)
+            {
+                const float d = std::sqrt((x-cx)*(x-cx) + (y-cy)*(y-cy)) / r;
+                if (d >= 1.0f) { continue; }
+                const float t = 1.0f - d;
+                const int i   = (y * W + x) * 4;
+                px[i+0] = 255u;  // pure white — emissiveScale carries the HDR brightness
+                px[i+1] = 255u;
+                px[i+2] = 255u;
+                px[i+3] = static_cast<u8>(std::min(255.f, t * 255.f + 0.5f));
+            }
+        }
+        rhi::TextureDescriptor td;
+        td.width = W; td.height = H;
+        td.format    = rhi::TextureFormat::RGBA8Unorm;
+        td.usage     = rhi::TextureUsage::ShaderRead;
+        td.initData  = px.data();
+        td.debugName = "particle_sparks_atlas";
+        sparksAtlas = device->createTexture(td);
+        DAEDALUS_ASSERT(sparksAtlas, "Failed to create sparks atlas");
+    }
+
+    // ── GPU particle pools ────────────────────────────────────────────────────
+    auto flamePool  = render::createParticlePool(*device, 512u);
+    auto sparksPool = render::createParticlePool(*device, 256u);
+
+    // ── Flame emitter entity ──────────────────────────────────────────────────
+    {
+        TransformComponent t;
+        t.position = glm::vec3(-3.5f, 0.0f, -3.0f);  // sector 0 — far corner, clear of the box
+
+        render::ParticleEmitterComponent e;
+        e.pool            = flamePool.get();
+        e.atlasTexture    = flameAtlas.get();
+        e.emissionRate    = 200.0f;
+        e.emitDir         = glm::vec3(0.0f, 1.0f, 0.0f);
+        e.coneHalfAngle   = glm::radians(25.0f);
+        e.speedMin        = 0.4f;   e.speedMax    = 1.5f;
+        e.lifetimeMin     = 1.0f;   e.lifetimeMax = 2.5f;
+        // HDR tint: birth = hot white-yellow; death = dark transparent orange
+        e.colorStart      = glm::vec4(3.0f, 1.5f, 0.2f, 1.0f);
+        e.colorEnd        = glm::vec4(0.4f, 0.1f, 0.0f, 0.0f);
+        e.sizeStart       = 0.08f;  e.sizeEnd     = 0.22f;  // grows as it rises
+        e.emissiveScale   = 4.0f;   // strong bloom contribution
+        e.gravity         = glm::vec3(0.0f, -0.8f, 0.0f);  // fire barely falls
+        e.drag            = 2.0f;
+        e.turbulenceScale = 1.5f;   // organic curl
+        e.softRange       = 0.25f;
+
+        EntityId eid = world.createEntity();
+        world.addComponent(eid, t);
+        world.addComponent(eid, std::move(e));
+    }
+
+    // ── Sparks emitter entity ─────────────────────────────────────────────────
+    {
+        TransformComponent t;
+        t.position = glm::vec3(9.0f, 0.0f, 0.0f);  // sector 1 — centre of side room
+
+        render::ParticleEmitterComponent e;
+        e.pool             = sparksPool.get();
+        e.atlasTexture     = sparksAtlas.get();
+        e.emissionRate     = 60.0f;
+        e.emitDir          = glm::vec3(0.0f, 1.0f, 0.0f);
+        e.coneHalfAngle    = glm::radians(80.0f);  // near-omnidirectional burst
+        e.speedMin         = 1.5f;   e.speedMax    = 4.5f;
+        e.lifetimeMin      = 0.25f;  e.lifetimeMax = 0.7f;
+        // White-hot at birth; cooling orange → transparent at death
+        e.colorStart       = glm::vec4(4.0f, 3.5f, 2.0f, 1.0f);
+        e.colorEnd         = glm::vec4(1.0f, 0.3f, 0.0f, 0.0f);
+        e.sizeStart        = 0.03f;  e.sizeEnd     = 0.01f;
+        e.emissiveScale    = 6.0f;   // very bright streaks
+        e.gravity          = glm::vec3(0.0f, -9.8f, 0.0f);  // full gravity
+        e.drag             = 0.4f;   // low drag — fast sharp arcs
+        e.turbulenceScale  = 0.15f;  // slight curl variation
+        e.velocityStretch  = 0.06f;  // elongated streaks along velocity
+        e.softRange        = 0.10f;
+
+        EntityId eid = world.createEntity();
+        world.addComponent(eid, t);
+        world.addComponent(eid, std::move(e));
+    }
+
+    std::printf("[Daedalus] Particle emitters created: flame (512) + sparks (256).\n");
 
     // Camera sector tracking
     world::SectorId cameraSector = 0u;
@@ -1023,6 +1286,9 @@ int main(int /*argc*/, char* /*argv*/[])
         // Populate SceneView::decalDraws from ECS entities.
         render::decalRenderSystem(world, scene);
 
+        // Populate SceneView::particleEmitters from ECS entities.
+        render::particleRenderSystem(world, scene, dt, frameIdx);
+
         // Sort transparent draws back-to-front before submission.
         // Explicit call per the spec's "Explicit over Implicit" principle.
         render::sortTransparentDraws(scene);
@@ -1084,7 +1350,72 @@ int main(int /*argc*/, char* /*argv*/[])
             4.0f                                  // reduced from 8.0
         });
 
-        // ── Render ────────────────────────────────────────────────────────────
+        // ── Volumetric fog ────────────────────────────────────────────────────
+        // Only enabled in sector 1 (adjacent room).
+        // fogNear=0.5 avoids fogging surfaces right at the camera.
+        scene.fog.enabled    = (cameraSector == 1u);
+        scene.fog.density    = 0.010f;
+        scene.fog.anisotropy = 0.3f;
+        scene.fog.scattering = 0.8f;
+        scene.fog.fogFar     = 80.0f;
+        scene.fog.fogNear    = 0.5f;
+        scene.fog.ambientFog = glm::vec3(0.04f, 0.05f, 0.06f);
+        if (frameIdx == 0u)
+            std::printf("[Fog] volumetric fog enabled (density=%.3f anisotropy=%.2f)\n",
+                        scene.fog.density, scene.fog.anisotropy);
+
+        // ── Screen-space reflections ──────────────────────────────────────
+        // Enabled on all surfaces with roughness < 0.5 (polished floor/walls).
+        // maxDistance 15 m: covers the full sector width without excessive cost.
+        scene.ssr.enabled         = true;
+        scene.ssr.maxDistance     = 15.0f;
+        scene.ssr.thickness       = 0.15f;
+        scene.ssr.roughnessCutoff = 0.5f;
+        scene.ssr.fadeStart       = 0.1f;
+        scene.ssr.maxSteps        = 64u;
+
+        if (frameIdx == 0u)
+            std::printf("[SSR] screen-space reflections enabled "
+                        "(maxDist=%.1f roughnessCutoff=%.2f maxSteps=%u)\n",
+                        scene.ssr.maxDistance, scene.ssr.roughnessCutoff,
+                        scene.ssr.maxSteps);
+
+        // ── Depth of Field ──────────────────────────────────────────────────────────────────
+        // Focus on the test block at 4 m; in-focus band of 2 m; max bokeh 6 px.
+        scene.dof.enabled       = true;
+        scene.dof.focusDistance = 4.0f;
+        scene.dof.focusRange    = 2.0f;
+        scene.dof.bokehRadius   = 6.0f;
+        if (frameIdx == 0u)
+            std::printf("[DoF] depth of field enabled "
+                        "(focus=%.1fm range=%.1fm bokeh=%.0fpx)\n",
+                        scene.dof.focusDistance, scene.dof.focusRange,
+                        scene.dof.bokehRadius);
+
+        // ── Motion Blur ──────────────────────────────────────────────────────────────────────
+        // Quarter-shutter blur: subtle cinematic smear on fast camera/object motion.
+        scene.motionBlur.enabled      = true;
+        scene.motionBlur.shutterAngle = 0.25f;
+        scene.motionBlur.numSamples   = 8u;
+        if (frameIdx == 0u)
+            std::printf("[MotionBlur] motion blur enabled "
+                        "(shutterAngle=%.2f samples=%u)\n",
+                        scene.motionBlur.shutterAngle,
+                        scene.motionBlur.numSamples);
+
+        // ── Colour Grading ───────────────────────────────────────────────────────────────────
+        // Identity LUT (no colour shift) at full intensity — ready to swap in a
+        // custom LUT via scene.colorGrading.lutTexture for art direction.
+        scene.colorGrading.enabled    = true;
+        scene.colorGrading.intensity  = 1.0f;
+        scene.colorGrading.lutTexture = nullptr;  // nullptr → engine identity LUT
+        if (frameIdx == 0u)
+            std::printf("[ColorGrading] colour grading enabled "
+                        "(intensity=%.2f lut=%s)\n",
+                        scene.colorGrading.intensity,
+                        scene.colorGrading.lutTexture ? "custom" : "identity");
+
+        // ── Render ────────────────────────────────────────────────────────────────────
         renderer.renderFrame(*device, *queue, *swapchain, scene, swapW, swapH);
 
         // ── Save previous frame matrices ──────────────────────────────────────

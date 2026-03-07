@@ -223,7 +223,55 @@ Transparent objects are sorted back-to-front and forward-rendered against the op
 
 #### Pass 12 — Particle Pass
 
-GPU compute updates particle simulation (ping-pong storage buffers). A bitonic GPU sort orders particles back-to-front. Particles render as textured quads, depth-tested against the opaque buffer with depth write disabled.
+The particle system is entirely GPU-resident. The CPU writes emitter parameters (position, emission rate, velocity cone, colour/size curves) into a per-emitter constant buffer each frame. All simulation, sorting, and rendering occur on the GPU with zero CPU readback stalls, supporting 100,000+ simultaneous particles at full frame rate.
+
+**GPU-resident storage buffers (persistent across frames):**
+
+- `ParticlePool` — flat array of `N` particle structs per emitter group: `pos (float3)`, `vel (float3)`, `life / maxLife (float)`, `color (float4)`, `size (float)`, `rotation (float)`, `frameIndex (uint)` for sprite sheet animation, `flags (uint)` for type/behaviour
+- `DeadList` — atomic stack of free particle indices, initialised to `[0..N-1]`
+- `AliveListA / AliveListB` — ping-pong lists of live particle indices
+- `AliveCount` — atomic uint written by the simulate pass, consumed by sort and indirect draw
+- `DrawIndirectArgs` — `MTLDrawPrimitivesIndirectArguments` (Metal) / `VkDrawIndirectCommand` (Vulkan), written by the compact pass; never read by the CPU, so no GPU–CPU stall regardless of alive count
+- `CollisionEventBuffer` — small GPU append buffer of `(particleId, worldPos, surfaceNormal)` tuples; read CPU-side with a 1-frame staging delay to spawn decals or audio events
+
+**Compute pass sequence (each frame):**
+
+1. **Emit** — one thread per spawn request; pops a free index from `DeadList` via `atomic_fetch_sub`, writes initial particle state with randomness derived analytically from `hash(emitterId, spawnId, frameIdx)` — no CPU RNG needed. Sub-frame emission jitter distributes spawn times across the frame interval (`pos += vel * spawnFraction * dt`), eliminating the banding and pulsing that appears at low emission rates when all particles share `t = 0`.
+
+2. **Simulate** — one thread per alive particle; semi-implicit Euler integration with gravity and drag. Velocity is perturbed each tick by **curl noise** — a divergence-free 3D vector field derived analytically from the curl of a Perlin noise potential. Curl noise produces swirling, organic motion (smoke billowing, embers drifting) with no artificial sinks or sources, and requires no texture lookups. If the `COLLISION_ENABLED` flag is set for the emitter, the particle's screen-projected position samples the G-buffer depth copy; if the particle has crossed the reconstructed surface, it is reflected about the surface normal with a per-emitter restitution coefficient, and a collision event is appended to `CollisionEventBuffer`. Expired particles push their index back to `DeadList`.
+
+3. **Sort** — GPU bitonic sort on `AliveListB`, keyed by `dot(particlePos - cameraPos, cameraForward)`. Bitonic sort is a comparison network where all pairs within a stage are independent — it maps directly to GPU warps with no divergence. `O(n log² n)` parallel stages; 64k particles require 128 fast dispatches with no serial bottleneck.
+
+4. **Compact** — single-thread dispatch writes `DrawIndirectArgs.instanceCount = AliveCount`, resets `AliveCount` to 0, and swaps the alive list ping-pong pointers.
+
+**Render sub-pass:**
+
+No vertex buffer. `drawPrimitivesIndirect` invokes one instance per alive particle. The vertex shader reads the sorted `AliveList[instanceId]` → particle index → `ParticlePool[idx]` to construct each primitive. Two particle visual modes:
+
+- **Quad particles** — camera-facing billboard. **Velocity stretching** scales the quad along the velocity vector (`scaleAlongVel = 1 + length(vel) * stretchFactor`) so fast-moving sparks become streaks automatically. Sprite sheet animation selects a UV sub-rect from a configurable atlas grid using `frameIndex`.
+- **Mesh particles** — for hard-surface debris (shell casings, rock fragments, shards). The vertex shader indexes into a shared static mesh VBO using per-instance particle position, rotation, and scale. Multiple mesh types share one VBO with per-type offset ranges.
+
+The fragment shader provides:
+
+- **Soft particles** — compares each particle fragment's linear depth against the G-buffer depth copy. Where a quad clips into opaque geometry, alpha is multiplied by `saturate((sceneDepth - particleDepth) / softRange)`, eliminating the hard rectangular intersection edges that are one of the most visually jarring artefacts of classic particle systems.
+- **Normal-mapped smoke** — smoke-type particles carry a tangent-space normal map. The fragment shader evaluates a forward PBR mini-pass sampling the clustered light grid, making smoke correctly coloured by nearby spotlights from the lit side and shadowed from the other — transforming flat sprites into convincingly volumetric puffs.
+- **HDR emissive** — fire, sparks, and muzzle flash particles write HDR luminance values (e.g. `float4(8.0, 5.0, 1.0, alpha)` for white-hot sparks) directly into the HDR colour buffer. The bloom pass (Pass 15) automatically produces glow halos around dense particle clusters at no extra cost.
+
+All particles are depth-tested read-only against the opaque G-buffer depth with depth write disabled. Particles therefore never draw in front of occluding geometry regardless of sector boundaries — a correctness property that sector-based sprite sorting in Build-era engines could not guarantee.
+
+**Particle point lights:**
+
+Emitters flagged `EMIT_LIGHTS` push short-lived `DynamicLight` entries into `SceneView::dynamicLights` for the emitter's world position each frame. Muzzle flashes and fireballs illuminate surrounding geometry via the deferred lighting pass (Pass 8) for their duration — typically 1–3 frames — with no special-case code.
+
+**Particle → decal integration:**
+
+A CPU-side pass reads `CollisionEventBuffer` with a 1-frame staging delay and spawns `DecalComponent` entities at each hit world position, using a configurable impact albedo/normal texture. Sparks that strike floors leave persistent scorch marks processed by Pass 5 (Deferred Decal Pass) in subsequent frames. The full decal lifecycle — GPU collision detection, CPU entity spawn, deferred G-buffer projection — requires no physics engine involvement.
+
+**Later-phase additions (planned):**
+
+- **Ribbon / trail particles** — a secondary compute pass generates connected quad strips from a per-particle ring buffer of past positions. The strip tapers and fades toward the tail. Used for tracer bullets, lightning bolts, and spell projectile trails.
+- **Distortion / refraction particles** — a special emitter type writes into a screen-space distortion buffer (RG16F normals) during the transparent sub-pass. A post-process composite step offsets UV lookups into the HDR colour buffer, producing heat shimmer above fire and expanding shockwave rings after explosions.
+- **GPU fluid advection** — a `64×32×64` froxel velocity field solved by an iterative Navier-Stokes solver (diffuse → advect → project) on the GPU replaces per-particle Euler integration with field advection. Smoke billows with buoyancy and obstacle avoidance. This froxel grid is shared with Pass 10 (Volumetric Fog), so both systems benefit from the same solve at minimal additional cost.
 
 #### Post-Processing Stack (Passes 13–21)
 

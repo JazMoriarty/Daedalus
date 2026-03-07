@@ -6,9 +6,12 @@
 #include "daedalus/core/types.h"
 #include "daedalus/render/rhi/i_buffer.h"
 #include "daedalus/render/rhi/i_texture.h"
+#include "daedalus/render/particle_pool.h"
+#include "daedalus/render/scene_data.h"
 
 #include <glm/glm.hpp>
 #include <algorithm>
+#include <cmath>
 #include <vector>
 
 namespace daedalus::render
@@ -97,7 +100,72 @@ struct DecalDraw
     f32 opacity   = 1.0f;  ///< Global fade multiplier applied on top of texture alpha.
 };
 
-// ─── SceneView ───────────────────────────────────────────────────────────────────────
+// ─── VolumetricFogParams ────────────────────────────────────────────────────────────────────
+// Per-frame volumetric fog parameters.  When enabled is false FrameRenderer skips
+// all three fog compute passes with no GPU cost.
+
+struct VolumetricFogParams
+{
+    bool      enabled    = false;                            ///< Skip fog passes when false.
+    float     density    = 0.02f;                            ///< Extinction coefficient (1/m).
+    float     anisotropy = 0.3f;                             ///< H-G phase g factor (-1..1).
+    float     scattering = 0.8f;                             ///< Single-scatter albedo (0..1).
+    float     fogFar     = 80.0f;                            ///< Fog far depth limit (metres).
+    float     fogNear    = 0.5f;                             ///< Fog near depth limit (metres).
+    glm::vec3 ambientFog = glm::vec3(0.04f, 0.05f, 0.06f);  ///< Ambient in-scatter colour.
+};
+
+// ─── ParticleEmitterDraw ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+// Per-emitter data submitted to FrameRenderer each frame.
+// pool and atlasTexture are non-owning; the application owns their lifetime.
+
+struct ParticleEmitterDraw
+{
+    ParticlePool*   pool         = nullptr;  ///< GPU buffers for this emitter.  Never null.
+    rhi::ITexture*  atlasTexture = nullptr;  ///< Sprite sheet atlas (RGBA8Unorm).  Never null.
+
+    /// Fully packed constants uploaded to all particle shaders this frame.
+    /// particleRenderSystem() fills this from the ECS component + TransformComponent.
+    ParticleEmitterConstantsGPU constants;
+};
+
+// ─── DoFParams ────────────────────────────────────────────────────────────────────────────────────────────────
+// Per-frame depth-of-field parameters.  When enabled is false FrameRenderer skips
+// all three DoF compute passes with no GPU cost.
+
+struct DoFParams
+{
+    bool  enabled        = false;   ///< Skip DoF passes when false.
+    float focusDistance  = 5.0f;   ///< World-space focus plane distance (metres).
+    float focusRange     = 2.0f;   ///< Depth of the in-focus band (metres).
+    float bokehRadius    = 8.0f;   ///< Maximum blur radius (pixels).
+    float nearTransition = 1.0f;   ///< Near-field ramp distance (metres).
+    float farTransition  = 3.0f;   ///< Far-field ramp distance (metres).
+};
+
+// ─── MotionBlurParams ─────────────────────────────────────────────────────────────────────────────────────────
+// Per-frame motion blur parameters.  When enabled is false FrameRenderer skips
+// the motion blur compute pass with no GPU cost.
+
+struct MotionBlurParams
+{
+    bool  enabled      = false;   ///< Skip motion blur pass when false.
+    float shutterAngle = 0.5f;    ///< Fraction of frame time the shutter is open (0..1).
+    u32   numSamples   = 8u;      ///< Number of velocity-direction samples.
+};
+
+// ─── ColorGradingParams ──────────────────────────────────────────────────────────────────────────────────────
+// Per-frame LUT-based colour grading parameters.  When enabled is false FrameRenderer
+// routes Tonemap directly to the swapchain with no GPU cost.
+
+struct ColorGradingParams
+{
+    bool           enabled    = false;    ///< Skip colour grading pass when false.
+    float          intensity  = 1.0f;    ///< Blend weight (0 = passthrough, 1 = full LUT).
+    rhi::ITexture* lutTexture = nullptr; ///< 32×32×32 RGBA8Unorm 3D LUT; nullptr → engine identity.
+};
+
+// ─── SceneView ──────────────────────────────────────────────────────────────────────────────────────────────
 // Complete frame description: camera + lights + draw list.
 
 struct SceneView
@@ -141,14 +209,66 @@ struct SceneView
 
     std::vector<MeshDraw> transparentDraws;
 
-    // ─── Decal draw list ───────────────────────────────────────────────────────────────
+    // ─── Decal draw list ───────────────────────────────────────────────────────────────────────────────────────────────
     // Populated by decalRenderSystem() each frame.  FrameRenderer renders these
     // in Pass 2.5 (between G-buffer and SSAO) by alpha-blending into G-buffer
     // RT0 (albedo) and RT1 (normal/roughness/metalness).
 
     std::vector<DecalDraw> decalDraws;
 
-    // ─── Timing ───────────────────────────────────────────────────────────────────────────
+    // ─── Particle emitter draw list ─────────────────────────────────────────────────────────────────────────────────────
+    // Populated by particleRenderSystem() each frame.  FrameRenderer runs the
+    // emit→simulate→sort→compact compute chain and the draw pass for each entry.
+
+    std::vector<ParticleEmitterDraw> particleEmitters;
+
+// ─── SSRParams ─────────────────────────────────────────────────────────────────────
+// Per-frame screen-space reflection parameters.  When enabled is false,
+// FrameRenderer skips the SSR pass entirely and Bloom/Tonemap read the
+// raw TAA output with zero GPU cost.
+
+struct SSRParams
+{
+    bool  enabled         = false;   ///< Skip SSR pass when false.
+    float maxDistance     = 20.0f;   ///< Max ray march distance (metres).
+    float thickness       = 0.15f;   ///< Depth intersection tolerance (metres).
+    float roughnessCutoff = 0.6f;    ///< Skip SSR above this roughness value.
+    float fadeStart       = 0.1f;    ///< Screen-edge UV distance at which to begin fading.
+    u32   maxSteps        = 64u;     ///< Maximum ray-march iterations.
+};
+
+// ─── VolumetricFogParams
+    // Populated by the application each frame.  FrameRenderer runs the scatter,
+    // integrate, and composite compute passes only when fog.enabled is true.
+
+    VolumetricFogParams fog;
+
+    // ─── Screen-space reflections
+    // Populated by the application each frame.  FrameRenderer runs the SSR
+    // compute pass only when ssr.enabled is true.  Bloom and tonemap always
+    // consume the post-SSR colour (or the TAA output directly when disabled).
+
+    SSRParams ssr;
+
+    // ─── Depth of field
+    // FrameRenderer runs the three DoF compute passes (CoC, blur, composite)
+    // only when dof.enabled is true.
+
+    DoFParams dof;
+
+    // ─── Motion blur
+    // FrameRenderer runs the motion blur compute pass only when
+    // motionBlur.enabled is true.
+
+    MotionBlurParams motionBlur;
+
+    // ─── Colour grading
+    // When enabled, FrameRenderer routes Tonemap to an intermediate texture
+    // and applies a 3D LUT grade before writing the swapchain output.
+
+    ColorGradingParams colorGrading;
+
+    // ─── Timing
 
     f32 time      = 0.0f;
     f32 deltaTime = 0.0f;

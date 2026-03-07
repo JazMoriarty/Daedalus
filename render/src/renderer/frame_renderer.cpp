@@ -239,7 +239,8 @@ void FrameRenderer::createPSOs(IRenderDevice& device, const std::string& lib)
         d.depthTest            = true;
         d.depthWrite           = false;         // read-only: do NOT overwrite depth
         d.depthCompare         = CompareFunction::LessEqual;
-        d.cullMode             = CullMode::Back;
+        d.cullMode             = CullMode::None;  // let depth test do all clipping;
+                                                  // top face winding varies with camera
         d.vertexAttributes     = geometryAttributes();
         d.vertexBufferLayouts  = geometryLayouts();
         d.debugName            = "Decal";
@@ -313,6 +314,148 @@ void FrameRenderer::createPSOs(IRenderDevice& device, const std::string& lib)
         d.computeShader = csDepthCopy.get();
         d.debugName     = "DepthCopy";
         m_depthCopyPSO = device.createComputePipeline(d);
+    }
+
+    // ── Volumetric fog scatter (compute) ─────────────────────────────────────
+    {
+        auto csFogScatter = loadCS("fog_scatter");
+        ComputePipelineDescriptor d;
+        d.computeShader = csFogScatter.get();
+        d.debugName     = "FogScatter";
+        m_fogScatterPSO = device.createComputePipeline(d);
+    }
+
+    // ── Volumetric fog integrate (compute) ───────────────────────────────────
+    {
+        auto csFogIntegrate = loadCS("fog_integrate");
+        ComputePipelineDescriptor d;
+        d.computeShader = csFogIntegrate.get();
+        d.debugName     = "FogIntegrate";
+        m_fogIntegratePSO = device.createComputePipeline(d);
+    }
+
+    // ── Volumetric fog composite (compute) ───────────────────────────────────
+    {
+        auto csFogComposite = loadCS("fog_composite");
+        ComputePipelineDescriptor d;
+        d.computeShader = csFogComposite.get();
+        d.debugName     = "FogComposite";
+        m_fogCompositePSO = device.createComputePipeline(d);
+    }
+
+    // ── Screen-space reflections (compute) ──────────────────────────────────────────────────────────
+    {
+        auto csSSR = loadCS("ssr_main");
+        ComputePipelineDescriptor d;
+        d.computeShader = csSSR.get();
+        d.debugName     = "SSR";
+        m_ssrPSO = device.createComputePipeline(d);
+    }
+
+    // ── Depth of field — CoC (compute) ──────────────────────────────────────────────────────────
+    {
+        auto csDofCoc = loadCS("dof_coc");
+        ComputePipelineDescriptor d;
+        d.computeShader = csDofCoc.get();
+        d.debugName     = "DoFCoC";
+        m_dofCocPSO = device.createComputePipeline(d);
+    }
+
+    // ── Depth of field — blur (compute) ──────────────────────────────────────────────────────────
+    {
+        auto csDofBlur = loadCS("dof_blur");
+        ComputePipelineDescriptor d;
+        d.computeShader = csDofBlur.get();
+        d.debugName     = "DoFBlur";
+        m_dofBlurPSO = device.createComputePipeline(d);
+    }
+
+    // ── Depth of field — composite (compute) ───────────────────────────────────────────────────────
+    {
+        auto csDofComposite = loadCS("dof_composite");
+        ComputePipelineDescriptor d;
+        d.computeShader = csDofComposite.get();
+        d.debugName     = "DoFComposite";
+        m_dofCompositePSO = device.createComputePipeline(d);
+    }
+
+    // ── Motion blur (compute) ────────────────────────────────────────────────────────────────────
+    {
+        auto csMotionBlur = loadCS("motion_blur_main");
+        ComputePipelineDescriptor d;
+        d.computeShader = csMotionBlur.get();
+        d.debugName     = "MotionBlur";
+        m_motionBlurPSO = device.createComputePipeline(d);
+    }
+
+    // ── Colour grading → swapchain (render) ─────────────────────────────────────────────────────
+    // Reuses tonemap_vert (fullscreen triangle VS) with a new fragment shader.
+    {
+        auto fsColorGrade = loadFS("color_grade_frag");
+        RenderPipelineDescriptor d;
+        d.vertexShader         = vsTonemap.get();      // fullscreen triangle
+        d.fragmentShader       = fsColorGrade.get();
+        d.colorAttachmentCount = 1;
+        d.colorFormats[0]      = TextureFormat::BGRA8Unorm;  // swapchain pixel format
+        d.cullMode             = CullMode::None;
+        d.debugName            = "ColorGrading";
+        m_colorGradePSO = device.createRenderPipeline(d);
+    }
+
+    // ── Particle emit (compute)
+    {
+        auto csEmit = loadCS("particle_emit");
+        ComputePipelineDescriptor d;
+        d.computeShader = csEmit.get();
+        d.debugName     = "ParticleEmit";
+        m_particleEmitPSO = device.createComputePipeline(d);
+    }
+
+    // ── Particle simulate (compute) ───────────────────────────────────────────
+    {
+        auto csSimulate = loadCS("particle_simulate");
+        ComputePipelineDescriptor d;
+        d.computeShader = csSimulate.get();
+        d.debugName     = "ParticleSimulate";
+        m_particleSimulatePSO = device.createComputePipeline(d);
+    }
+
+    // ── Particle compact (compute) ────────────────────────────────────────────
+    {
+        auto csCompact = loadCS("particle_compact");
+        ComputePipelineDescriptor d;
+        d.computeShader = csCompact.get();
+        d.debugName     = "ParticleCompact";
+        m_particleCompactPSO = device.createComputePipeline(d);
+    }
+
+    // ── Particle render (render, no vertex buffer — purely procedural) ────────
+    // Premultiplied alpha blend: src = One, dst = OneMinusSrcAlpha.
+    // Depth tested (LessEqual), depth NOT written.
+    {
+        auto vsParticle = loadVS("particle_vert");
+        auto fsParticle = loadFS("particle_frag");
+        RenderPipelineDescriptor d;
+        d.vertexShader         = vsParticle.get();
+        d.fragmentShader       = fsParticle.get();
+        d.colorAttachmentCount = 1;
+        d.colorFormats[0]      = TextureFormat::RGBA16Float;
+        // Premultiplied alpha: out.rgb is pre-multiplied by alpha in the fragment shader.
+        d.blendStates[0].blendEnabled  = true;
+        d.blendStates[0].srcRGB        = BlendFactor::One;
+        d.blendStates[0].dstRGB        = BlendFactor::OneMinusSrcAlpha;
+        d.blendStates[0].rgbOp         = BlendOperation::Add;
+        d.blendStates[0].srcAlpha      = BlendFactor::One;
+        d.blendStates[0].dstAlpha      = BlendFactor::OneMinusSrcAlpha;
+        d.blendStates[0].alphaOp       = BlendOperation::Add;
+        d.depthFormat          = TextureFormat::Depth32Float;
+        d.depthTest            = true;
+        d.depthWrite           = false;         // particles do not occlude opaque geometry
+        d.depthCompare         = CompareFunction::LessEqual;
+        d.cullMode             = CullMode::None; // camera-facing quads are always visible
+        // No vertex attributes — vertex_id + instance_id drive procedural generation.
+        d.debugName            = "ParticleRender";
+        m_particleRenderPSO = device.createRenderPipeline(d);
     }
 }
 
@@ -476,6 +619,65 @@ void FrameRenderer::createPersistentResources(IRenderDevice& device, u32 w, u32 
         m_unitCubeIBO = device.createBuffer(id);
     }
 
+    // Froxel 3D textures — 160×90×64 RGBA16Float, ShaderRead + ShaderWrite.
+    // Persistent across frames: scatter is overwritten each frame by FogScatter;
+    // integrate is overwritten each frame by FogIntegrate.
+    static constexpr u32 kFroxelW = 160;
+    static constexpr u32 kFroxelH = 90;
+    static constexpr u32 kFroxelD = 64;
+    {
+        TextureDescriptor d;
+        d.width     = kFroxelW;
+        d.height    = kFroxelH;
+        d.depth     = kFroxelD;
+        d.format    = TextureFormat::RGBA16Float;
+        d.usage     = TextureUsage::ShaderRead | TextureUsage::ShaderWrite;
+        d.debugName = "FroxelScatter";
+        m_froxelScatterTex = device.createTexture(d);
+    }
+    {
+        TextureDescriptor d;
+        d.width     = kFroxelW;
+        d.height    = kFroxelH;
+        d.depth     = kFroxelD;
+        d.format    = TextureFormat::RGBA16Float;
+        d.usage     = TextureUsage::ShaderRead | TextureUsage::ShaderWrite;
+        d.debugName = "FroxelIntegrate";
+        m_froxelIntegrateTex = device.createTexture(d);
+    }
+
+    // Identity LUT — 32×32×32 RGBA8Unorm 3D texture.
+    // Procedurally filled so that r=R, g=G, b=B (passthrough).  Used as the
+    // colour grading LUT fallback when scene.colorGrading.lutTexture is nullptr.
+    {
+        static constexpr u32 kLutSize = 32;
+        static constexpr u32 kPixels  = kLutSize * kLutSize * kLutSize;
+
+        // Pixel layout in memory: z (blue) is the outermost axis, then y (green),
+        // then x (red) — i.e. pixel at (r, g, b) = index b*32*32 + g*32 + r.
+        std::vector<u8> lutData(kPixels * 4);
+        for (u32 b = 0; b < kLutSize; ++b)
+        for (u32 g = 0; g < kLutSize; ++g)
+        for (u32 r = 0; r < kLutSize; ++r)
+        {
+            const u32 idx     = (b * kLutSize * kLutSize + g * kLutSize + r) * 4;
+            lutData[idx + 0]  = static_cast<u8>(r * 255u / (kLutSize - 1u));  // R
+            lutData[idx + 1]  = static_cast<u8>(g * 255u / (kLutSize - 1u));  // G
+            lutData[idx + 2]  = static_cast<u8>(b * 255u / (kLutSize - 1u));  // B
+            lutData[idx + 3]  = 255u;                                          // A
+        }
+
+        TextureDescriptor d;
+        d.width     = kLutSize;
+        d.height    = kLutSize;
+        d.depth     = kLutSize;
+        d.format    = TextureFormat::RGBA8Unorm;
+        d.usage     = TextureUsage::ShaderRead;
+        d.initData  = lutData.data();
+        d.debugName = "IdentityLUT";
+        m_identityLutTex = device.createTexture(d);
+    }
+
     // TAA history textures
     recreateTAAHistory(device, w, h);
 }
@@ -628,7 +830,45 @@ void FrameRenderer::renderFrame(IRenderDevice& device,
         m_lightBuf->unmap();
     }
 
-    // ── TAA history warm-up: GPU-clear on first frame ────────────────────────────────────
+    // ── Build VolumetricFogConstantsGPU ─────────────────────────────────────────────────
+    // Built unconditionally (lambdas capture by value); fog passes only execute if enabled.
+    VolumetricFogConstantsGPU fogConst{};
+    fogConst.density    = scene.fog.density;
+    fogConst.anisotropy = scene.fog.anisotropy;
+    fogConst.scattering = scene.fog.scattering;
+    fogConst.fogFar     = scene.fog.fogFar;
+    fogConst.ambientFog = glm::vec4(scene.fog.ambientFog, scene.fog.fogNear);
+
+    // ── Build SSRConstantsGPU ───────────────────────────────────────────────────────────────────────────────
+    // Built unconditionally; SSR pass only executes when ssr.enabled is true.
+    SSRConstantsGPU ssrConst{};
+    ssrConst.maxDistance     = scene.ssr.maxDistance;
+    ssrConst.thickness       = scene.ssr.thickness;
+    ssrConst.roughnessCutoff = scene.ssr.roughnessCutoff;
+    ssrConst.fadeStart       = scene.ssr.fadeStart;
+    ssrConst.maxSteps        = scene.ssr.maxSteps;
+
+    // ── Build DoFConstantsGPU ─────────────────────────────────────────────────────────────────────────────
+    // Built unconditionally; DoF passes only execute when dof.enabled is true.
+    DoFConstantsGPU dofConst{};
+    dofConst.focusDistance  = scene.dof.focusDistance;
+    dofConst.focusRange     = scene.dof.focusRange;
+    dofConst.bokehRadius    = scene.dof.bokehRadius;
+    dofConst.nearTransition = scene.dof.nearTransition;
+    dofConst.farTransition  = scene.dof.farTransition;
+
+    // ── Build MotionBlurConstantsGPU ──────────────────────────────────────────────────────────────────────
+    // Built unconditionally; pass only executes when motionBlur.enabled is true.
+    MotionBlurConstantsGPU mbConst{};
+    mbConst.shutterAngle = scene.motionBlur.shutterAngle;
+    mbConst.numSamples   = scene.motionBlur.numSamples;
+
+    // ── Build ColorGradingConstantsGPU ──────────────────────────────────────────────────────────────────
+    // Built unconditionally; pass only executes when colorGrading.enabled is true.
+    ColorGradingConstantsGPU cgConst{};
+    cgConst.intensity = scene.colorGrading.intensity;
+
+    // ── TAA history warm-up: GPU-clear on first frame
     // MTLStorageModePrivate textures start with undefined content; a previous run may have
     // left green data in those GPU memory pages.  Issue an empty render pass (clear-on-load)
     // for each history texture so they start black.  Both passes are committed on a separate
@@ -725,6 +965,45 @@ void FrameRenderer::renderFrame(IRenderDevice& device,
         TextureUsage::RenderTarget | TextureUsage::ShaderRead,
         "BloomB"
     });
+    // SSR composited output: same dims/format as swapchain, compute read+write.
+    const RGTextureId ssrOutId = m_graph.createTexture({
+        0, 0, TextureFormat::RGBA16Float,
+        TextureUsage::ShaderRead | TextureUsage::ShaderWrite,
+        "SSROut"
+    });
+    // DoF intermediate textures (all compute read+write, only allocated when dof.enabled)
+    const RGTextureId cocTexId = m_graph.createTexture({
+        0, 0, TextureFormat::R32Float,
+        TextureUsage::ShaderRead | TextureUsage::ShaderWrite,
+        "DoFCoC"
+    });
+    const RGTextureId dofNearTexId = m_graph.createTexture({
+        0, 0, TextureFormat::RGBA16Float,
+        TextureUsage::ShaderRead | TextureUsage::ShaderWrite,
+        "DoFNear"
+    });
+    const RGTextureId dofFarTexId = m_graph.createTexture({
+        0, 0, TextureFormat::RGBA16Float,
+        TextureUsage::ShaderRead | TextureUsage::ShaderWrite,
+        "DoFFar"
+    });
+    const RGTextureId dofOutTexId = m_graph.createTexture({
+        0, 0, TextureFormat::RGBA16Float,
+        TextureUsage::ShaderRead | TextureUsage::ShaderWrite,
+        "DoFOut"
+    });
+    // Motion blur output
+    const RGTextureId mbOutTexId = m_graph.createTexture({
+        0, 0, TextureFormat::RGBA16Float,
+        TextureUsage::ShaderRead | TextureUsage::ShaderWrite,
+        "MBOut"
+    });
+    // Tonemap intermediate (only used when colorGrading.enabled; otherwise Tonemap → swapchain)
+    const RGTextureId tonemapOutTexId = m_graph.createTexture({
+        0, 0, TextureFormat::BGRA8Unorm,
+        TextureUsage::RenderTarget | TextureUsage::ShaderRead,
+        "TonemapOut"
+    });
 
     // Import persistent textures
     const RGTextureId taaOutId  = m_graph.importTexture("TAAHistoryCurr",
@@ -733,6 +1012,10 @@ void FrameRenderer::renderFrame(IRenderDevice& device,
                                                               m_taaHistory[prevHist].get());
     const RGTextureId shadowDepthId = m_graph.importTexture("ShadowDepth",
                                                               m_shadowDepthTex.get());
+    const RGTextureId froxelScatterId   = m_graph.importTexture("FroxelScatter",
+                                                                  m_froxelScatterTex.get());
+    const RGTextureId froxelIntegrateId = m_graph.importTexture("FroxelIntegrate",
+                                                                  m_froxelIntegrateTex.get());
     // Import swapchain drawable
     ITexture* drawable = swapchain.nextDrawable();
     const RGTextureId swapId = m_graph.importTexture("Swapchain", drawable);
@@ -741,8 +1024,10 @@ void FrameRenderer::renderFrame(IRenderDevice& device,
     m_graph.compile(device, swapW, swapH);
 
     // Resolve texture pointers (all valid after compile)
-    ITexture* gDepthTex     = m_graph.get(gDepthId);
-    ITexture* gDepthCopyTex = m_graph.get(gDepthCopyId);
+    ITexture* gDepthTex          = m_graph.get(gDepthId);
+    ITexture* gDepthCopyTex      = m_graph.get(gDepthCopyId);
+    ITexture* froxelScatterTex   = m_froxelScatterTex.get();
+    ITexture* froxelIntegrateTex = m_froxelIntegrateTex.get();
     ITexture* gAlbedoTex    = m_graph.get(gAlbedoId);
     ITexture* gNormalTex  = m_graph.get(gNormalId);
     ITexture* gEmissiveTex = m_graph.get(gEmissiveId);
@@ -752,6 +1037,13 @@ void FrameRenderer::renderFrame(IRenderDevice& device,
     ITexture* hdrTex      = m_graph.get(hdrId);
     ITexture* bloomATex   = m_graph.get(bloomAId);
     ITexture* bloomBTex   = m_graph.get(bloomBId);
+    ITexture* ssrOutTex      = m_graph.get(ssrOutId);
+    ITexture* cocTex         = m_graph.get(cocTexId);
+    ITexture* dofNearTex     = m_graph.get(dofNearTexId);
+    ITexture* dofFarTex      = m_graph.get(dofFarTexId);
+    ITexture* dofOutTex      = m_graph.get(dofOutTexId);
+    ITexture* mbOutTex       = m_graph.get(mbOutTexId);
+    ITexture* tonemapOutTex  = m_graph.get(tonemapOutTexId);
     ITexture* taaOutTex      = m_taaHistory[currHist].get();
     ITexture* taaHistTex     = m_taaHistory[prevHist].get();
     ITexture* shadowDepthTex = m_shadowDepthTex.get();
@@ -782,6 +1074,32 @@ void FrameRenderer::renderFrame(IRenderDevice& device,
     IPipeline* pDecal        = m_decalPSO.get();
     IPipeline* pDepthCopy    = m_depthCopyPSO.get();
     IBuffer*   decalDebugBuf = m_decalDebugBuf.get();
+
+    // Particle pipelines (Pass 6.5)
+    IPipeline* pPartEmit     = m_particleEmitPSO.get();
+    IPipeline* pPartSimulate = m_particleSimulatePSO.get();
+    IPipeline* pPartCompact  = m_particleCompactPSO.get();
+    IPipeline* pPartRender   = m_particleRenderPSO.get();
+
+    // Volumetric fog pipelines (Passes 3c, 3d, 6.6)
+    IPipeline* pFogScatter   = m_fogScatterPSO.get();
+    IPipeline* pFogIntegrate = m_fogIntegratePSO.get();
+    IPipeline* pFogComposite = m_fogCompositePSO.get();
+
+    // Screen-space reflections (Pass 7.5)
+    IPipeline* pSSR          = m_ssrPSO.get();
+
+    // Depth of field (Passes 15, 15.1, 15.2)
+    IPipeline* pDofCoc       = m_dofCocPSO.get();
+    IPipeline* pDofBlur      = m_dofBlurPSO.get();
+    IPipeline* pDofComposite = m_dofCompositePSO.get();
+
+    // Motion blur (Pass 16)
+    IPipeline* pMotionBlur   = m_motionBlurPSO.get();
+
+    // Colour grading (Pass 19)
+    IPipeline* pColorGrade   = m_colorGradePSO.get();
+    ITexture*  identityLutTex = m_identityLutTex.get();
 
     // Unit cube GPU mesh (shared by all decal draws)
     IBuffer*   cubeVBO       = m_unitCubeVBO.get();
@@ -1010,6 +1328,45 @@ void FrameRenderer::renderFrame(IRenderDevice& device,
     }
 
     // ─────────────────────────────────────────────────────────────────────────
+    // Pass 3c — Fog scatter (compute)  [only if fog.enabled]
+    // ─────────────────────────────────────────────────────────────────────────
+    if (scene.fog.enabled)
+    {
+        RGComputePassDesc p;
+        p.name    = "FogScatter";
+        p.execute = [=](IComputePassEncoder* enc)
+        {
+            enc->setComputePipeline(pFogScatter);
+            enc->setTexture(froxelScatterTex, 0);         // froxelScatter (write)
+            enc->setBuffer (frameBuf,  0,     0);         // FrameConstants   buffer(0)
+            enc->setBytes  (&fogConst, sizeof(fogConst), 1); // VolumetricFogConstants  buffer(1)
+            enc->setBuffer (lightBuf,  0,     2);         // lightCount       buffer(2)
+            enc->setBuffer (lightBuf, 16,     3);         // PointLightGPU[]  buffer(3)
+            enc->setBuffer (spotBuf,   0,     4);         // SpotLightGPU     buffer(4)
+            enc->dispatch  (160, 90, 64);                 // 3D: one thread per froxel
+        };
+        m_graph.addComputePass(std::move(p));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Pass 3d — Fog integrate (compute)  [only if fog.enabled]
+    // ─────────────────────────────────────────────────────────────────────────
+    if (scene.fog.enabled)
+    {
+        RGComputePassDesc p;
+        p.name    = "FogIntegrate";
+        p.execute = [=](IComputePassEncoder* enc)
+        {
+            enc->setComputePipeline(pFogIntegrate);
+            enc->setTexture(froxelScatterTex,   0);           // froxelScatter   (read)
+            enc->setTexture(froxelIntegrateTex, 1);           // froxelIntegrate (write)
+            enc->setBytes  (&fogConst, sizeof(fogConst), 0);  // VolumetricFogConstants  buffer(0)
+            enc->dispatch  (160, 90, 1);                      // 2D: one thread per column
+        };
+        m_graph.addComputePass(std::move(p));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
     // Pass 4 — Deferred lighting (compute)
     // ─────────────────────────────────────────────────────────────────────────
     {
@@ -1116,6 +1473,148 @@ void FrameRenderer::renderFrame(IRenderDevice& device,
         m_graph.addRenderPass(std::move(p));
     }
 
+    // ──────────────────────────────────────────────────────────────────────────────────────────────────────
+    // Pass 6.5 — Particles (compute: emit + simulate + compact; render: drawIndirect)
+    // For each emitter: run 3 serial compute passes on the GPU then one GPU-driven
+    // render pass.  Blends additively (premultiplied alpha) into the HDR buffer.
+    // The depth buffer from Pass 6 is used for soft-particle depth fade.
+    // ──────────────────────────────────────────────────────────────────────────────────────────────────────
+    for (const ParticleEmitterDraw& emDraw : scene.particleEmitters)
+    {
+        if (!emDraw.pool || !emDraw.atlasTexture) { continue; }
+
+        ParticlePool* pool = emDraw.pool;
+
+        // Pack constants: bake aliveListFlip from the CPU-side pool state so all
+        // shaders this frame agree on which list is read vs. write.
+        ParticleEmitterConstantsGPU emConst = emDraw.constants;
+        emConst.aliveListFlip = pool->aliveListFlip;
+        emConst.maxParticles  = pool->maxParticles;
+
+        // Raw pointers for lambda capture (lifetimes owned by pool + emDraw).
+        IBuffer*  stateBuf   = pool->stateBuffer.get();
+        IBuffer*  deadBuf    = pool->deadList.get();
+        IBuffer*  aliveABuf  = pool->aliveListA.get();
+        IBuffer*  aliveBBuf  = pool->aliveListB.get();
+        IBuffer*  indirectBuf = pool->indirectArgs.get();
+        ITexture* atlasTex   = emDraw.atlasTexture;
+
+        const u32 maxP  = pool->maxParticles;
+        const u32 spawn = emConst.spawnThisFrame;
+
+        // ── Emit ───────────────────────────────────────────────────────────────
+        // Skip if nothing to spawn this frame (common when emission rate is low).
+        if (spawn > 0)
+        {
+            RGComputePassDesc ep;
+            ep.name    = "ParticleEmit";
+            ep.execute = [=](IComputePassEncoder* enc)
+            {
+                enc->setComputePipeline(pPartEmit);
+                enc->setBytes  (&emConst,   sizeof(emConst), 0);  // EmitterConstants  buffer(0)
+                enc->setBuffer (stateBuf,   0,               1);  // stateBuffer       buffer(1)
+                enc->setBuffer (deadBuf,    0,               2);  // deadList          buffer(2)
+                enc->setBuffer (aliveABuf,  0,               3);  // aliveListA        buffer(3)
+                enc->setBuffer (aliveBBuf,  0,               4);  // aliveListB        buffer(4)
+                enc->dispatch  (spawn, 1, 1);
+            };
+            m_graph.addComputePass(std::move(ep));
+        }
+
+        // ── Simulate ───────────────────────────────────────────────────────────
+        {
+            RGComputePassDesc sp;
+            sp.name    = "ParticleSimulate";
+            sp.execute = [=](IComputePassEncoder* enc)
+            {
+                enc->setComputePipeline(pPartSimulate);
+                enc->setBytes  (&emConst,  sizeof(emConst), 0);
+                enc->setBuffer (stateBuf,  0,               1);
+                enc->setBuffer (deadBuf,   0,               2);
+                enc->setBuffer (aliveABuf, 0,               3);
+                enc->setBuffer (aliveBBuf, 0,               4);
+                enc->dispatch  (maxP, 1, 1);
+            };
+            m_graph.addComputePass(std::move(sp));
+        }
+
+        // ── Compact ────────────────────────────────────────────────────────────
+        {
+            RGComputePassDesc cp;
+            cp.name    = "ParticleCompact";
+            cp.execute = [=](IComputePassEncoder* enc)
+            {
+                enc->setComputePipeline(pPartCompact);
+                enc->setBytes  (&emConst,    sizeof(emConst), 0);
+                enc->setBuffer (stateBuf,    0,               1);
+                enc->setBuffer (deadBuf,     0,               2);
+                enc->setBuffer (aliveABuf,   0,               3);
+                enc->setBuffer (aliveBBuf,   0,               4);
+                enc->setBuffer (indirectBuf, 0,               5);  // DrawIndirectArgs buffer(5)
+                enc->dispatch  (1, 1, 1);
+            };
+            m_graph.addComputePass(std::move(cp));
+        }
+
+        // ── Draw ───────────────────────────────────────────────────────────────
+        {
+            RGRenderPassDesc dp;
+            dp.name             = "ParticleDraw";
+            dp.colorOutputs[0]  = hdrId;
+            dp.colorOutputCount = 1;
+            dp.depthOutput      = gDepthId;
+            dp.loadColors       = true;  // blend into existing HDR
+            dp.loadDepth        = true;  // test against opaque G-buffer depth
+            dp.execute = [=](IRenderPassEncoder* enc)
+            {
+                enc->setViewport(vp);
+                enc->setScissor(sc);
+                enc->setRenderPipeline(pPartRender);
+
+                // Vertex stage
+                enc->setVertexBuffer(frameBuf,   0, 0);           // FrameConstants     buffer(0)
+                enc->setVertexBytes (&emConst, sizeof(emConst), 1); // EmitterConstants buffer(1)
+                enc->setVertexBuffer(stateBuf,   0, 2);           // stateBuffer        buffer(2)
+                enc->setVertexBuffer(aliveABuf,  0, 3);           // aliveListA         buffer(3)
+                enc->setVertexBuffer(aliveBBuf,  0, 4);           // aliveListB         buffer(4)
+
+                // Fragment stage
+                enc->setFragmentBuffer (frameBuf,       0, 0);    // FrameConstants     buffer(0)
+                enc->setFragmentBytes  (&emConst, sizeof(emConst), 1); // EmitterConst buffer(1)
+                enc->setFragmentTexture(atlasTex,          0);    // atlas              texture(0)
+                enc->setFragmentTexture(gDepthCopyTex,     1);    // soft particle depth texture(1)
+                enc->setFragmentSampler(linSamp,           0);    // sampler(0)
+
+                enc->drawIndirect(indirectBuf, 0);
+            };
+            m_graph.addRenderPass(std::move(dp));
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Pass 6.6 — Fog composite (compute)  [only if fog.enabled]
+    // In-place: reads hdrTex and writes back fogged result to the same texture.
+    // Placed after particles so all opaque + transparent + particle HDR content
+    // is fogged before TAA accumulates the final frame.
+    // ─────────────────────────────────────────────────────────────────────────
+    if (scene.fog.enabled)
+    {
+        RGComputePassDesc p;
+        p.name    = "FogComposite";
+        p.execute = [=](IComputePassEncoder* enc)
+        {
+            enc->setComputePipeline(pFogComposite);
+            enc->setTexture (hdrTex,             0);           // hdrTex          (read_write)
+            enc->setTexture (froxelIntegrateTex, 1);           // froxelIntegrate (read/sample)
+            enc->setTexture (gDepthCopyTex,      2);           // gDepthCopy      (read)
+            enc->setBuffer  (frameBuf,  0,        0);          // FrameConstants  buffer(0)
+            enc->setBytes   (&fogConst, sizeof(fogConst), 1);  // VolumetricFogConstants  buffer(1)
+            enc->setSampler (linSamp,             0);          // sampler(0): linear clamp
+            enc->dispatch   (swapW, swapH, 1);
+        };
+        m_graph.addComputePass(std::move(p));
+    }
+
     // ──────────────────────────────────────────────────────────────────────────────
     // Pass 7 — TAA
     // ─────────────────────────────────────────────────────────────────────────
@@ -1139,9 +1638,43 @@ void FrameRenderer::renderFrame(IRenderDevice& device,
         m_graph.addRenderPass(std::move(p));
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
+    // ───────────────────────────────────────────────────────────────────────────
+    // Pass 7.5 — Screen-Space Reflections (compute)  [only if ssr.enabled]
+    // Reads gNormal, gDepthCopy, taaOut; writes composited result to ssrOut.
+    // postTaaColorTex points to ssrOut when enabled, taaOut when disabled.
+    // BloomExtract and Tonemap always read postTaaColorTex (zero GPU cost when off).
+    // ───────────────────────────────────────────────────────────────────────────
+    if (scene.ssr.enabled)
+    {
+        RGComputePassDesc p;
+        p.name    = "SSR";
+        p.execute = [=](IComputePassEncoder* enc)
+        {
+            enc->setComputePipeline(pSSR);
+            enc->setTexture(gNormalTex,    0);               // gNormal     (read)
+            enc->setTexture(gDepthCopyTex, 1);               // gDepthCopy  (read)
+            enc->setTexture(taaOutTex,     2);               // sceneColor  (sample)
+            enc->setTexture(ssrOutTex,     3);               // ssrOut      (write)
+            enc->setBuffer (frameBuf,      0, 0);            // FrameConstants  buffer(0)
+            enc->setBytes  (&ssrConst, sizeof(ssrConst), 1); // SSRConstants    buffer(1)
+            enc->setSampler(linSamp,       0);               // sampler(0): linear clamp
+            enc->dispatch  (swapW, swapH, 1);
+        };
+        m_graph.addComputePass(std::move(p));
+    }
+
+    // Routing pointers — zero-cost bypass chain:
+    //   postTaaColorTex  = SSR out (or TAA out when SSR disabled)             [existing]
+    //   postDofTex       = DoF composite out (or postTaaColorTex when off)    [new]
+    //   preTonemapTex    = MB out (or postDofTex when MB disabled)            [new]
+    // Tonemap reads preTonemapTex; Color Grade (if enabled) reads tonemapOut.
+    ITexture* postTaaColorTex = scene.ssr.enabled        ? ssrOutTex  : taaOutTex;
+    ITexture* postDofTex      = scene.dof.enabled        ? dofOutTex  : postTaaColorTex;
+    ITexture* preTonemapTex   = scene.motionBlur.enabled ? mbOutTex   : postDofTex;
+
+    // ───────────────────────────────────────────────────────────────────────────
     // Pass 8 — Bloom extract
-    // ─────────────────────────────────────────────────────────────────────────
+    // ───────────────────────────────────────────────────────────────────────────
     {
         RGRenderPassDesc p;
         p.name             = "BloomExtract";
@@ -1152,7 +1685,7 @@ void FrameRenderer::renderFrame(IRenderDevice& device,
             enc->setViewport(vp);
             enc->setScissor(sc);
             enc->setRenderPipeline(pBloomEx);
-            enc->setFragmentTexture(taaOutTex, 0);   // TAA output as source
+            enc->setFragmentTexture(postTaaColorTex, 0);   // post-TAA (SSR or TAA) source
             enc->setFragmentSampler(linSamp,   0);
             enc->setFragmentBuffer(frameBuf,   0, 0);
             enc->draw(3);
@@ -1202,23 +1735,142 @@ void FrameRenderer::renderFrame(IRenderDevice& device,
         m_graph.addRenderPass(std::move(p));
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    // Pass 11 — Tone mapping → swapchain
-    // ─────────────────────────────────────────────────────────────────────────
+    // ───────────────────────────────────────────────────────────────────────────
+    // Pass 15 — DoF: Circle of Confusion (compute)  [only if dof.enabled]
+    // ───────────────────────────────────────────────────────────────────────────
+    if (scene.dof.enabled)
+    {
+        RGComputePassDesc p;
+        p.name    = "DoFCoC";
+        p.execute = [=](IComputePassEncoder* enc)
+        {
+            enc->setComputePipeline(pDofCoc);
+            enc->setTexture(gDepthCopyTex, 0);              // gDepthCopy  (read)
+            enc->setTexture(cocTex,        1);              // cocOut      (write)
+            enc->setBuffer (frameBuf,      0, 0);           // FrameConstants  buffer(0)
+            enc->setBytes  (&dofConst, sizeof(dofConst), 1); // DoFConstants   buffer(1)
+            enc->dispatch  (swapW, swapH, 1);
+        };
+        m_graph.addComputePass(std::move(p));
+    }
+
+    // ───────────────────────────────────────────────────────────────────────────
+    // Pass 15.1 — DoF: Poisson-disk blur (compute)  [only if dof.enabled]
+    // ───────────────────────────────────────────────────────────────────────────
+    if (scene.dof.enabled)
+    {
+        RGComputePassDesc p;
+        p.name    = "DoFBlur";
+        p.execute = [=](IComputePassEncoder* enc)
+        {
+            enc->setComputePipeline(pDofBlur);
+            enc->setTexture(postTaaColorTex, 0);              // sceneColor  (sample)
+            enc->setTexture(cocTex,          1);              // cocTex      (read)
+            enc->setTexture(dofFarTex,       2);              // dofFarTex   (write)
+            enc->setTexture(dofNearTex,      3);              // dofNearTex  (write)
+            enc->setBuffer (frameBuf,        0, 0);           // FrameConstants  buffer(0)
+            enc->setBytes  (&dofConst, sizeof(dofConst), 1);  // DoFConstants    buffer(1)
+            enc->setSampler(linSamp,         0);              // sampler(0): linear clamp
+            enc->dispatch  (swapW, swapH, 1);
+        };
+        m_graph.addComputePass(std::move(p));
+    }
+
+    // ───────────────────────────────────────────────────────────────────────────
+    // Pass 15.2 — DoF: composite near/far/scene (compute)  [only if dof.enabled]
+    // ───────────────────────────────────────────────────────────────────────────
+    if (scene.dof.enabled)
+    {
+        RGComputePassDesc p;
+        p.name    = "DoFComposite";
+        p.execute = [=](IComputePassEncoder* enc)
+        {
+            enc->setComputePipeline(pDofComposite);
+            enc->setTexture(postTaaColorTex, 0);              // sceneColor  (sample)
+            enc->setTexture(dofNearTex,      1);              // dofNearTex  (read)
+            enc->setTexture(dofFarTex,       2);              // dofFarTex   (read)
+            enc->setTexture(cocTex,          3);              // cocTex      (read)
+            enc->setTexture(dofOutTex,       4);              // dofOut      (write)
+            enc->setBuffer (frameBuf,        0, 0);           // FrameConstants  buffer(0)
+            enc->setBytes  (&dofConst, sizeof(dofConst), 1);  // DoFConstants    buffer(1)
+            enc->setSampler(linSamp,         0);              // sampler(0): linear clamp
+            enc->dispatch  (swapW, swapH, 1);
+        };
+        m_graph.addComputePass(std::move(p));
+    }
+
+    // ───────────────────────────────────────────────────────────────────────────
+    // Pass 16 — Motion Blur (compute)  [only if motionBlur.enabled]
+    // Reads preTonemapTex (postDofTex or postTaaColorTex) as source.
+    // ───────────────────────────────────────────────────────────────────────────
+    if (scene.motionBlur.enabled)
+    {
+        RGComputePassDesc p;
+        p.name    = "MotionBlur";
+        p.execute = [=](IComputePassEncoder* enc)
+        {
+            enc->setComputePipeline(pMotionBlur);
+            enc->setTexture(postDofTex,  0);              // sceneColor  (sample, post-DoF)
+            enc->setTexture(gMotionTex,  1);              // gMotionTex  (read)
+            enc->setTexture(mbOutTex,    2);              // mbOut       (write)
+            enc->setBuffer (frameBuf,    0, 0);           // FrameConstants       buffer(0)
+            enc->setBytes  (&mbConst, sizeof(mbConst), 1); // MotionBlurConstants  buffer(1)
+            enc->setSampler(linSamp,     0);              // sampler(0): linear clamp
+            enc->dispatch  (swapW, swapH, 1);
+        };
+        m_graph.addComputePass(std::move(p));
+    }
+
+    // Tonemap target: intermediate texture when Color Grading follows; otherwise swapchain.
+    const bool        cgEnabled      = scene.colorGrading.enabled;
+    const RGTextureId tonemapTargetId = cgEnabled ? tonemapOutTexId : swapId;
+
+    // ───────────────────────────────────────────────────────────────────────────
+    // Pass 17 — Tone mapping (render → tonemapOut or swapchain)
+    // ───────────────────────────────────────────────────────────────────────────
     {
         RGRenderPassDesc p;
         p.name             = "ToneMapping";
-        p.colorOutputs[0]  = swapId;
+        p.colorOutputs[0]  = tonemapTargetId;   // tonemapOut or swapchain
         p.colorOutputCount = 1;
         p.execute = [=](IRenderPassEncoder* enc)
         {
             enc->setViewport(vp);
             enc->setScissor(sc);
             enc->setRenderPipeline(pTonemap);
-            enc->setFragmentTexture(taaOutTex,  0);  // TAA-resolved HDR
-            enc->setFragmentTexture(bloomATex,  1);  // bloom result
-            enc->setFragmentSampler(linSamp,    0);
-            enc->setFragmentBuffer(frameBuf,    0, 0);
+            enc->setFragmentTexture(preTonemapTex, 0);  // post-DoF / post-MB / post-SSR HDR
+            enc->setFragmentTexture(bloomATex,     1);  // bloom result
+            enc->setFragmentSampler(linSamp,       0);
+            enc->setFragmentBuffer(frameBuf,       0, 0);
+            enc->draw(3);
+        };
+        m_graph.addRenderPass(std::move(p));
+    }
+
+    // ───────────────────────────────────────────────────────────────────────────
+    // Pass 19 — Colour Grading (render → swapchain)  [only if colorGrading.enabled]
+    // Reads tonemapOut + 3D LUT, writes final pixels to swapchain.
+    // ───────────────────────────────────────────────────────────────────────────
+    if (cgEnabled)
+    {
+        // Use the application-supplied LUT if provided; otherwise fall back to identity.
+        ITexture* lutTex = scene.colorGrading.lutTexture
+                         ? scene.colorGrading.lutTexture
+                         : identityLutTex;
+
+        RGRenderPassDesc p;
+        p.name             = "ColorGrading";
+        p.colorOutputs[0]  = swapId;
+        p.colorOutputCount = 1;
+        p.execute = [=](IRenderPassEncoder* enc)
+        {
+            enc->setViewport(vp);
+            enc->setScissor(sc);
+            enc->setRenderPipeline(pColorGrade);
+            enc->setFragmentTexture(tonemapOutTex, 0);           // tonemapped input
+            enc->setFragmentTexture(lutTex,        1);           // 3D LUT
+            enc->setFragmentSampler(linSamp,       0);           // sampler(0)
+            enc->setFragmentBytes  (&cgConst, sizeof(cgConst), 1); // ColorGradingConstants
             enc->draw(3);
         };
         m_graph.addRenderPass(std::move(p));
@@ -1231,6 +1883,15 @@ void FrameRenderer::renderFrame(IRenderDevice& device,
     cmdBuf->popDebugGroup();
     cmdBuf->present(swapchain);
     cmdBuf->commit();
+
+    // ── Toggle particle alive-list flip for next frame ────────────────────────
+    // Each emitter's simulate kernel read from one list and wrote to the other.
+    // Flip tells next frame's shaders which list is now the "current" alive list.
+    for (const ParticleEmitterDraw& emDraw : scene.particleEmitters)
+    {
+        if (emDraw.pool)
+            emDraw.pool->aliveListFlip ^= 1u;
+    }
 
     ++m_frameIndex;
 }

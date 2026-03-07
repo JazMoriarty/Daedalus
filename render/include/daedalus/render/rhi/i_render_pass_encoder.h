@@ -59,6 +59,11 @@ public:
                               i32 vertexOffset  = 0,
                               u32 firstInstance = 0) = 0;
 
+    /// GPU-driven draw: argument buffer must contain a DrawIndirectArgs struct
+    /// at `argBufferOffset` bytes.  The GPU reads vertex/instance counts from
+    /// the buffer — no CPU readback required.  Buffer must have BufferUsage::Storage.
+    virtual void drawIndirect(IBuffer* argBuffer, u32 argBufferOffset = 0) = 0;
+
     // ─── End ──────────────────────────────────────────────────────────────────
 
     /// Finish recording render commands for this pass.
