@@ -91,6 +91,15 @@ struct ParticleEmitterComponent
     /// Depth fade range: alpha *= saturate((sceneDepth - particleDepth) / softRange).
     /// 0.0 = hard intersection, 0.3+ = soft fade.
     f32 softRange = 0.3f;
+
+    // ── Internal state ────────────────────────────────────────────────────────
+
+    /// Sub-frame fractional emission credit carried across frames.
+    /// Ensures frame-rate-independent emission at any refresh rate: at 120 Hz a
+    /// 60 Hz emitter still emits exactly 60 particles/s by accumulating 0.5
+    /// credits per frame and spawning on every other frame.
+    /// Managed by particleRenderSystem — do not set manually.
+    f32 emissionAccumulator = 0.0f;
 };
 
 } // namespace daedalus::render

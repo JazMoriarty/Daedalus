@@ -48,10 +48,14 @@ inline void particleRenderSystem(daedalus::World& world,
         {
             if (!emitter.pool || !emitter.atlasTexture) { return; }
 
-            // Compute how many new particles to spawn this frame.
-            // Clamp to the dead-list capacity so emit kernel never overflows.
+            // Accumulate fractional emission credit so spawn count is
+            // frame-rate-independent.  Without this, floor(rate * dt) rounds
+            // to 0 whenever rate < 1/dt (e.g. rate=60 at 120 Hz: 60*0.0083=0.5).
+            emitter.emissionAccumulator += emitter.emissionRate * dt;
+            const f32 floorAcc = std::floor(emitter.emissionAccumulator);
+            emitter.emissionAccumulator -= floorAcc;   // keep fractional remainder
             const u32 spawn = static_cast<u32>(
-                std::min(std::floor(emitter.emissionRate * dt),
+                std::min(floorAcc,
                          static_cast<f32>(emitter.pool->maxParticles)));
 
             ParticleEmitterDraw draw;

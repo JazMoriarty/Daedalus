@@ -1224,7 +1224,7 @@ int main(int /*argc*/, char* /*argv*/[])
         e.drag             = 0.4f;   // low drag — fast sharp arcs
         e.turbulenceScale  = 0.15f;  // slight curl variation
         e.velocityStretch  = 0.06f;  // elongated streaks along velocity
-        e.softRange        = 0.10f;
+        e.softRange        = 0.02f;  // tight fade: sparks visible right down to floor level
 
         EntityId eid = world.createEntity();
         world.addComponent(eid, t);

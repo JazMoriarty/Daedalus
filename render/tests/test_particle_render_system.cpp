@@ -176,6 +176,66 @@ TEST(ParticleRenderSystem, EmitterPosMatchesTransformPosition)
     EXPECT_NEAR(c.emitterPos.z,  7.2f, k_eps);
 }
 
+// ─── Accumulator: fractional credit carries across frames ────────────────────
+// Verifies that at 120 Hz a 60 Hz emitter still emits the correct rate by
+// accumulating 0.5 credits per frame and spawning on every other frame.
+
+TEST(ParticleRenderSystem, AccumulatorCarriesFractionBetweenFrames)
+{
+    World world;
+
+    auto pool = makeFakePool(256u);
+
+    TransformComponent t;
+    ParticleEmitterComponent e;
+    e.pool         = pool.get();
+    e.atlasTexture = kFakeAtlas;
+    e.emissionRate = 60.0f;          // 60 particles/s
+    // emissionAccumulator starts at 0.0 (default)
+
+    EntityId eid = world.createEntity();
+    world.addComponent(eid, t);
+    world.addComponent(eid, std::move(e));
+
+    constexpr float dt = 1.0f / 120.0f;  // 120 Hz: 60 * dt = 0.5 < 1.0
+
+    // Frame 1: accumulates 0.5, nothing to spawn yet.
+    {
+        SceneView scene;
+        particleRenderSystem(world, scene, dt, 0u);
+        ASSERT_EQ(scene.particleEmitters.size(), 1u);
+        EXPECT_EQ(scene.particleEmitters[0].constants.spawnThisFrame, 0u)
+            << "Frame 1: credit=0.5, no spawn expected";
+    }
+
+    // Frame 2: accumulates another 0.5 (total 1.0) → spawn 1, remainder 0.
+    {
+        SceneView scene;
+        particleRenderSystem(world, scene, dt, 1u);
+        ASSERT_EQ(scene.particleEmitters.size(), 1u);
+        EXPECT_EQ(scene.particleEmitters[0].constants.spawnThisFrame, 1u)
+            << "Frame 2: credit=1.0, one spawn expected";
+    }
+
+    // Frame 3: back to 0.5 credit, no spawn.
+    {
+        SceneView scene;
+        particleRenderSystem(world, scene, dt, 2u);
+        ASSERT_EQ(scene.particleEmitters.size(), 1u);
+        EXPECT_EQ(scene.particleEmitters[0].constants.spawnThisFrame, 0u)
+            << "Frame 3: credit=0.5, no spawn expected";
+    }
+
+    // Frame 4: back to 1.0 credit → spawn 1 again.
+    {
+        SceneView scene;
+        particleRenderSystem(world, scene, dt, 3u);
+        ASSERT_EQ(scene.particleEmitters.size(), 1u);
+        EXPECT_EQ(scene.particleEmitters[0].constants.spawnThisFrame, 1u)
+            << "Frame 4: credit=1.0, one spawn expected";
+    }
+}
+
 // ─── Constants: emissionRate and spawnThisFrame ───────────────────────────────
 
 TEST(ParticleRenderSystem, SpawnThisFrameIsFloorOfEmissionRateTimesDt)
