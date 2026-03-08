@@ -15,7 +15,7 @@ namespace daedalus::render
 
 // ─── FrameGPU ─────────────────────────────────────────────────────────────────
 // Uploaded once per frame to buffer index 0 (vertex and fragment stages).
-// Total size: 6×mat4 + 6×vec4 + 1×vec4(time/dt/frame/pad) + 1×vec4(jitter) = 512 bytes.
+// Total size: 7×mat4 + 6×vec4 + 1×vec4(time/dt/frame/pad) + 1×vec4(jitter) = 576 bytes.
 
 struct alignas(16) FrameGPU
 {
@@ -26,6 +26,7 @@ struct alignas(16) FrameGPU
     glm::mat4 invViewProj;    // 64 bytes
     glm::mat4 prevViewProj;   // 64 bytes  — for TAA reprojection
     glm::mat4 sunViewProj;    // 64 bytes  — directional shadow projection
+    glm::mat4 mirrorViewProj; // 64 bytes  — reflected camera VP (projective mirror UV)
 
     // Camera world-space
     glm::vec4 cameraPos;      // w unused
@@ -47,7 +48,7 @@ struct alignas(16) FrameGPU
     glm::vec2 jitter;
     glm::vec2 pad1;
 };
-static_assert(sizeof(FrameGPU) == 512, "FrameGPU size mismatch — MSL constant buffer will be wrong");
+static_assert(sizeof(FrameGPU) == 576, "FrameGPU size mismatch — MSL constant buffer will be wrong");
 
 // ─── ModelGPU ─────────────────────────────────────────────────────────────────
 // Per-draw-call data uploaded to buffer index 1 (vertex stage).
@@ -89,20 +90,20 @@ static_assert(sizeof(SpotLightGPU) == 64, "SpotLightGPU size mismatch");
 // Matches MaterialConstants in common.h exactly.
 //
 // Layout (48 bytes):
-//   [0]  roughness  f32
-//   [1]  metalness  f32
-//   [2]  pad0       f32
-//   [3]  pad1       f32
+//   [0]  roughness        f32
+//   [1]  metalness        f32
+//   [2]  isMirrorSurface  f32  (1.0 = mirror surface — use projective RT UV for emissive; 0.0 = standard)
+//   [3]  pad1             f32
 //   [4–7] tint      vec4  (rgba multiplier; rgb=albedo tint, a=opacity; default=1,1,1,1)
 //   [8–9] uvOffset  vec2  (UV origin of the active sprite sheet frame cell; default=0,0)
 //   [10–11] uvScale vec2  (UV size of one frame cell; default=1,1)
 
 struct alignas(16) MaterialConstantsGPU
 {
-    f32       roughness = 0.5f;
-    f32       metalness = 0.0f;
-    f32       pad0      = 0.0f;
-    f32       pad1      = 0.0f;
+    f32       roughness        = 0.5f;
+    f32       metalness        = 0.0f;
+    f32       isMirrorSurface  = 0.0f;  ///< 1.0 = sample emissive via projective mirror UV.
+    f32       pad1             = 0.0f;
     glm::vec4 tint      = glm::vec4(1.0f);  ///< Albedo tint (rgb) + opacity override (a).
     glm::vec2 uvOffset  = glm::vec2(0.0f);  ///< UV origin of the active frame cell.
     glm::vec2 uvScale   = glm::vec2(1.0f);  ///< UV size of one frame cell.
@@ -338,5 +339,31 @@ struct alignas(16) ColorGradingConstantsGPU
     f32 pad2 = 0.0f;
 };
 static_assert(sizeof(ColorGradingConstantsGPU) == 16, "ColorGradingConstantsGPU must be 16 bytes");
+
+// ─── OptionalFxConstantsGPU ─────────────────────────────────────────────────
+// Uploaded once per frame when Optional FX is enabled (optional_fx_frag pass).
+// Matches OptionalFxConstants in common.h exactly.
+//
+// Layout (32 bytes):
+//   [0]  caAmount          f32   chromatic aberration radius (0 = off, 0.01 = strong)
+//   [1]  vignetteIntensity f32   vignette darkening strength (0..1)
+//   [2]  vignetteRadius    f32   vignette inner edge in UV² (lower = larger vignette)
+//   [3]  grainAmount       f32   film grain amplitude (0 = off, 0.05 = subtle)
+//   [4]  grainSeed         f32   frame-varying seed (prevents temporal grain aliasing)
+//   [5–7] pad              f32×3
+
+struct alignas(16) OptionalFxConstantsGPU
+{
+    f32 caAmount;           ///< Chromatic aberration radius (0 = off).
+    f32 vignetteIntensity;  ///< Vignette darkening strength (0..1).
+    f32 vignetteRadius;     ///< Vignette inner edge in UV² space (0..1; lower = larger).
+    f32 grainAmount;        ///< Film grain amplitude (0 = off, 0.05 = subtle).
+    f32 grainSeed;          ///< Frame-varying seed to prevent temporal grain aliasing.
+    f32 pad0 = 0.0f;
+    f32 pad1 = 0.0f;
+    f32 pad2 = 0.0f;
+};
+static_assert(sizeof(OptionalFxConstantsGPU) == 32,
+              "OptionalFxConstantsGPU must be 32 bytes");
 
 } // namespace daedalus::render

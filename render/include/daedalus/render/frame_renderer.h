@@ -2,6 +2,7 @@
 // Orchestrates the full deferred rendering pipeline for one frame.
 //
 // Pass order:
+//   0.   Mirror pre-pass  (separate cmd buf, per mirror: G-buffer→Lighting→Skybox→Tonemap→RT)
 //   1.   Shadow depth   (render, depth-only from sun POV — 2048×2048)
 //   2.   G-buffer       (render, depth + colour in one pass)
 //   2.4  DepthCopy      (compute, Depth32Float → R32Float — breaks decal feedback loop)
@@ -24,8 +25,10 @@
 //  15.1  DoF Blur       (compute, Poisson-disk near/far layers; only if dof.enabled)
 //  15.2  DoF Composite  (compute, blend near/far/scene; only if dof.enabled)
 //  16.   Motion Blur    (compute, velocity-cone accumulation; only if motionBlur.enabled)
-//  17.   Tone mapping   (render → tonemapOut, or → swapchain when colorGrading disabled)
-//  19.   Colour Grading (render, 3D LUT grade → swapchain; only if colorGrading.enabled)
+//  17.   Tone mapping   (render → tonemapOut, or → swapchain when all post passes disabled)
+//  19.   Colour Grading (render, 3D LUT grade; only if colorGrading.enabled)
+//  20.   Optional FX    (render, vignette+grain+CA; only if optionalFx.enabled)
+//  21.   FXAA           (render, 9-tap edge smooth → swapchain; only if upscaling.mode==FXAA)
 
 #pragma once
 
@@ -127,11 +130,27 @@ private:
 
     std::unique_ptr<rhi::IPipeline> m_motionBlurPSO;    ///< Compute: velocity-cone accumulation.
 
-    // ── Colour grading pipeline (Pass 19) ──────────────────────────────────────────────────────
+    // ── Colour grading pipeline (Pass 19) ──────────────────────────────────────────────────────────────────
     // Skipped when SceneView::colorGrading.enabled is false; in that case
-    // Tonemap writes directly to the swapchain (zero extra cost).
+    // Tonemap writes to the next enabled pass (or swapchain if none follow).
 
-    std::unique_ptr<rhi::IPipeline> m_colorGradePSO;    ///< Render: 3D LUT grade → swapchain.
+    std::unique_ptr<rhi::IPipeline> m_colorGradePSO;    ///< Render: 3D LUT grade → intermediate/swapchain.
+
+    // ── Optional FX pipeline (Pass 20) ─────────────────────────────────────────────────────────────────
+    // Skipped when SceneView::optionalFx.enabled is false (zero GPU cost).
+
+    std::unique_ptr<rhi::IPipeline> m_optionalFxPSO;    ///< Render: vignette+grain+CA → intermediate/swapchain.
+
+    // ── FXAA pipeline (Pass 21) ────────────────────────────────────────────────────────────────────────────
+    // Skipped when SceneView::upscaling.mode is None (zero GPU cost).
+
+    std::unique_ptr<rhi::IPipeline> m_fxaaPSO;          ///< Render: 9-tap FXAA → swapchain.
+
+    // ── Mirror G-buffer PSO (Pass 0 — mirror pre-pass) ──────────────────────────────────────────
+    // Identical to m_gbufferPSO but with CullMode::None so that geometry rendered
+    // from a reflected (outside-the-room) camera is not culled.
+
+    std::unique_ptr<rhi::IPipeline> m_mirrorGbufferPSO;  ///< Render: G-buffer, CullMode::None.
 
     // ─── Froxel 3D textures (persistent, reused across frames) ────────────────────────────────
     // RGBA16Float, 160×90×64.  Allocated in createPersistentResources; imported
@@ -152,9 +171,10 @@ private:
     std::unique_ptr<rhi::IBuffer> m_unitCubeVBO;  ///< 8 StaticMeshVertex positions (384 B)
     std::unique_ptr<rhi::IBuffer> m_unitCubeIBO;  ///< 36 u32 indices, CCW front-faces
 
-    // ─── Per-frame GPU buffers ────────────────────────────────────────────────
+    // ─── Per-frame GPU buffers ───────────────────────────────────────────────
 
-    std::unique_ptr<rhi::IBuffer> m_frameConstBuf;  ///< FrameGPU  (512 B)
+    std::unique_ptr<rhi::IBuffer> m_frameConstBuf;        ///< FrameGPU for main frame (512 B)
+    std::unique_ptr<rhi::IBuffer> m_mirrorFrameConstBuf;  ///< FrameGPU for mirror pre-pass (512 B)
     std::unique_ptr<rhi::IBuffer> m_lightBuf;       ///< u32 header + PointLightGPU[]
 
     /// Spot light constant buffer (SpotLightGPU, 64 B) — uploaded every frame.
@@ -177,15 +197,17 @@ private:
     std::unique_ptr<rhi::ITexture> m_fallbackAlbedo;    ///< Opaque white  (RGBA8Unorm)
     std::unique_ptr<rhi::ITexture> m_fallbackNormal;    ///< Flat normal   (RGBA8Unorm, 128,128,255,255)
     std::unique_ptr<rhi::ITexture> m_fallbackEmissive;  ///< Black emissive (RGBA8Unorm)
+    std::unique_ptr<rhi::ITexture> m_fallbackSsao;      ///< Full-white AO  (R32Float = 1.0) for mirror prepass.
 
     // ─── Samplers ─────────────────────────────────────────────────────────────
 
     std::unique_ptr<rhi::ISampler> m_linearClampSampler;
     std::unique_ptr<rhi::ISampler> m_linearRepeatSampler; ///< Used by G-buffer texture sampling.
 
-    // ─── Render graph ─────────────────────────────────────────────────────────
+    // ─── Render graphs ───────────────────────────────────────────────────────────────────
 
-    RenderGraph m_graph;
+    RenderGraph m_graph;         ///< Main per-frame render graph.
+    RenderGraph m_mirrorGraph;   ///< Dedicated graph for the mirror pre-pass (reset per mirror).
 
     // ─── Frame state ──────────────────────────────────────────────────────────
 
@@ -198,6 +220,14 @@ private:
     void createPSOs(rhi::IRenderDevice& device, const std::string& libPath);
     void createPersistentResources(rhi::IRenderDevice& device, u32 w, u32 h);
     void recreateTAAHistory(rhi::IRenderDevice& device, u32 w, u32 h);
+
+    /// Render each MirrorDraw::reflectedDraws into its renderTarget using a
+    /// simplified G-buffer→Lighting→Skybox→Tonemap sub-pipeline.  Must be called
+    /// after light buffers are uploaded and before the main m_graph.reset().
+    void renderMirrorPrepass(rhi::IRenderDevice& device,
+                              rhi::ICommandQueue& queue,
+                              const SceneView&    scene,
+                              const FrameGPU&     mainFrame);
 
     static glm::vec2 haltonJitter(u32 frameIndex) noexcept;
 };

@@ -388,7 +388,7 @@ void FrameRenderer::createPSOs(IRenderDevice& device, const std::string& lib)
         m_motionBlurPSO = device.createComputePipeline(d);
     }
 
-    // ── Colour grading → swapchain (render) ─────────────────────────────────────────────────────
+    // ── Colour grading → intermediate or swapchain (render) ─────────────────────────────────────────────────
     // Reuses tonemap_vert (fullscreen triangle VS) with a new fragment shader.
     {
         auto fsColorGrade = loadFS("color_grade_frag");
@@ -396,10 +396,65 @@ void FrameRenderer::createPSOs(IRenderDevice& device, const std::string& lib)
         d.vertexShader         = vsTonemap.get();      // fullscreen triangle
         d.fragmentShader       = fsColorGrade.get();
         d.colorAttachmentCount = 1;
-        d.colorFormats[0]      = TextureFormat::BGRA8Unorm;  // swapchain pixel format
+        d.colorFormats[0]      = TextureFormat::BGRA8Unorm;  // intermediate or swapchain
         d.cullMode             = CullMode::None;
         d.debugName            = "ColorGrading";
         m_colorGradePSO = device.createRenderPipeline(d);
+    }
+
+    // ── Optional FX (vignette + grain + chromatic aberration) → intermediate or swapchain ───────
+    // Pass 20: reuses tonemap_vert VS with the optional_fx_frag FS.
+    {
+        auto fsOptFx = loadFS("optional_fx_frag");
+        RenderPipelineDescriptor d;
+        d.vertexShader         = vsTonemap.get();      // fullscreen triangle
+        d.fragmentShader       = fsOptFx.get();
+        d.colorAttachmentCount = 1;
+        d.colorFormats[0]      = TextureFormat::BGRA8Unorm;
+        d.cullMode             = CullMode::None;
+        d.debugName            = "OptionalFX";
+        m_optionalFxPSO = device.createRenderPipeline(d);
+    }
+
+    // ── FXAA → swapchain (render) ──────────────────────────────────────────────────────────────
+    // Pass 21: reuses tonemap_vert VS with the fxaa_frag FS.
+    {
+        auto fsFxaa = loadFS("fxaa_frag");
+        RenderPipelineDescriptor d;
+        d.vertexShader         = vsTonemap.get();      // fullscreen triangle
+        d.fragmentShader       = fsFxaa.get();
+        d.colorAttachmentCount = 1;
+        d.colorFormats[0]      = TextureFormat::BGRA8Unorm;
+        d.cullMode             = CullMode::None;
+        d.debugName            = "FXAA";
+        m_fxaaPSO = device.createRenderPipeline(d);
+    }
+
+    // ── Mirror G-buffer (CullMode::Back) ─────────────────────────────────────────
+    // The reflected camera sits outside the room at z < -5, looking in +z.
+    // Interior wall normals (N wall: 0,0,-1; W wall: +x; floor: +y; ceiling: -y)
+    // all face TOWARD the reflected camera → they are front faces → rendered.
+    // The south wall (normal = +z, the mirror plane itself) faces AWAY from the
+    // reflected camera → it is a back face → correctly culled here, so it no
+    // longer depth-occludes the room interior visible through the mirror.
+    {
+        RenderPipelineDescriptor d;
+        d.vertexShader         = vsGBuffer.get();
+        d.fragmentShader       = fsGBuffer.get();
+        d.colorAttachmentCount = 4;
+        d.colorFormats[0]      = TextureFormat::RGBA8Unorm;
+        d.colorFormats[1]      = TextureFormat::RGBA8Unorm;
+        d.colorFormats[2]      = TextureFormat::RGBA16Float;
+        d.colorFormats[3]      = TextureFormat::RG16Float;
+        d.depthFormat          = TextureFormat::Depth32Float;
+        d.depthTest            = true;
+        d.depthWrite           = true;
+        d.depthCompare         = CompareFunction::Less;
+        d.cullMode             = CullMode::Back;  // south wall back face is culled; room interior front faces render
+        d.vertexAttributes     = geometryAttributes();
+        d.vertexBufferLayouts  = geometryLayouts();
+        d.debugName            = "MirrorGBuffer";
+        m_mirrorGbufferPSO = device.createRenderPipeline(d);
     }
 
     // ── Particle emit (compute)
@@ -678,6 +733,30 @@ void FrameRenderer::createPersistentResources(IRenderDevice& device, u32 w, u32 
         m_identityLutTex = device.createTexture(d);
     }
 
+    // Mirror pre-pass frame constant buffer (one reflected FrameGPU per frame)
+    {
+        BufferDescriptor d;
+        d.size      = sizeof(FrameGPU);
+        d.usage     = BufferUsage::Uniform;
+        d.debugName = "MirrorFrameConstants";
+        m_mirrorFrameConstBuf = device.createBuffer(d);
+    }
+
+    // Fallback 1×1 SSAO texture — full white (AO=1.0, no occlusion).
+    // Bound at slot 3 in the mirror pre-pass lighting compute so the reflected
+    // scene is not darkened by a missing SSAO pass.
+    {
+        const float oneF = 1.0f;
+        TextureDescriptor d;
+        d.width     = 1;
+        d.height    = 1;
+        d.format    = TextureFormat::R32Float;
+        d.usage     = TextureUsage::ShaderRead;
+        d.initData  = &oneF;
+        d.debugName = "FallbackSsao";
+        m_fallbackSsao = device.createTexture(d);
+    }
+
     // TAA history textures
     recreateTAAHistory(device, w, h);
 }
@@ -794,6 +873,11 @@ void FrameRenderer::renderFrame(IRenderDevice& device,
         frame.sunViewProj = lightProj * lightView;
     }
 
+    // ── Mirror reflected view-projection (unjittered, matches the mirror RT) ─────────────
+    frame.mirrorViewProj = !scene.mirrors.empty()
+        ? (scene.mirrors[0].reflectedProj * scene.mirrors[0].reflectedView)
+        : glm::mat4(1.0f);
+
     // Upload spot light buffer
     {
         void* p = m_spotLightBuf->map();
@@ -868,6 +952,17 @@ void FrameRenderer::renderFrame(IRenderDevice& device,
     ColorGradingConstantsGPU cgConst{};
     cgConst.intensity = scene.colorGrading.intensity;
 
+    // ── Build OptionalFxConstantsGPU ─────────────────────────────────────────────────────────────────────
+    // Built unconditionally; pass only executes when optionalFx.enabled is true.
+    OptionalFxConstantsGPU optFxConst{};
+    optFxConst.caAmount          = scene.optionalFx.caAmount;
+    optFxConst.vignetteIntensity = scene.optionalFx.vignetteIntensity;
+    optFxConst.vignetteRadius    = scene.optionalFx.vignetteRadius;
+    optFxConst.grainAmount       = scene.optionalFx.grainAmount;
+    // grainSeed varies every frame to prevent temporal grain aliasing.
+    // Cycling over 1000 gives a visually non-repeating sequence at 60fps.
+    optFxConst.grainSeed         = static_cast<f32>(m_frameIndex % 1000u);
+
     // ── TAA history warm-up: GPU-clear on first frame
     // MTLStorageModePrivate textures start with undefined content; a previous run may have
     // left green data in those GPU memory pages.  Issue an empty render pass (clear-on-load)
@@ -902,6 +997,11 @@ void FrameRenderer::renderFrame(IRenderDevice& device,
         }
         *pCount = 0u;  // zero before current frame's GPU work
     }
+
+    // ── Mirror pre-pass: render each mirror's reflection into its render target ─────────────────────────
+    // Must run before m_graph.reset() so it submits its own command buffer first.
+    if (!scene.mirrors.empty())
+        renderMirrorPrepass(device, queue, scene, frame);
 
     // ── Reset and populate the render graph ──────────────────────────────────────────
     m_graph.reset();
@@ -998,11 +1098,23 @@ void FrameRenderer::renderFrame(IRenderDevice& device,
         TextureUsage::ShaderRead | TextureUsage::ShaderWrite,
         "MBOut"
     });
-    // Tonemap intermediate (only used when colorGrading.enabled; otherwise Tonemap → swapchain)
+    // Tonemap intermediate (used whenever any post pass follows Tonemap)
     const RGTextureId tonemapOutTexId = m_graph.createTexture({
         0, 0, TextureFormat::BGRA8Unorm,
         TextureUsage::RenderTarget | TextureUsage::ShaderRead,
         "TonemapOut"
+    });
+    // Colour-grading output intermediate (used when OptFx or FXAA follows CG)
+    const RGTextureId cgOutTexId = m_graph.createTexture({
+        0, 0, TextureFormat::BGRA8Unorm,
+        TextureUsage::RenderTarget | TextureUsage::ShaderRead,
+        "CGOut"
+    });
+    // Optional-FX output intermediate (used when FXAA follows OptFx)
+    const RGTextureId optFxOutTexId = m_graph.createTexture({
+        0, 0, TextureFormat::BGRA8Unorm,
+        TextureUsage::RenderTarget | TextureUsage::ShaderRead,
+        "OptFxOut"
     });
 
     // Import persistent textures
@@ -1044,6 +1156,8 @@ void FrameRenderer::renderFrame(IRenderDevice& device,
     ITexture* dofOutTex      = m_graph.get(dofOutTexId);
     ITexture* mbOutTex       = m_graph.get(mbOutTexId);
     ITexture* tonemapOutTex  = m_graph.get(tonemapOutTexId);
+    ITexture* cgOutTex       = m_graph.get(cgOutTexId);
+    ITexture* optFxOutTex    = m_graph.get(optFxOutTexId);
     ITexture* taaOutTex      = m_taaHistory[currHist].get();
     ITexture* taaHistTex     = m_taaHistory[prevHist].get();
     ITexture* shadowDepthTex = m_shadowDepthTex.get();
@@ -1098,8 +1212,12 @@ void FrameRenderer::renderFrame(IRenderDevice& device,
     IPipeline* pMotionBlur   = m_motionBlurPSO.get();
 
     // Colour grading (Pass 19)
-    IPipeline* pColorGrade   = m_colorGradePSO.get();
+    IPipeline* pColorGrade    = m_colorGradePSO.get();
     ITexture*  identityLutTex = m_identityLutTex.get();
+
+    // Optional FX (Pass 20) + FXAA (Pass 21)
+    IPipeline* pOptFx = m_optionalFxPSO.get();
+    IPipeline* pFxaa  = m_fxaaPSO.get();
 
     // Unit cube GPU mesh (shared by all decal draws)
     IBuffer*   cubeVBO       = m_unitCubeVBO.get();
@@ -1197,7 +1315,7 @@ void FrameRenderer::renderFrame(IRenderDevice& device,
                 // Note: tint is passed but ignored by the G-buffer shader (opaque geometry).
                 const MaterialConstantsGPU matConst{ draw.material.roughness,
                                                      draw.material.metalness,
-                                                     0.0f, 0.0f,
+                                                     draw.material.isMirrorSurface ? 1.0f : 0.0f, 0.0f,
                                                      draw.material.tint,
                                                      draw.material.uvOffset,
                                                      draw.material.uvScale };
@@ -1451,7 +1569,7 @@ void FrameRenderer::renderFrame(IRenderDevice& device,
                 // Fragment stage: material constants (roughness, metalness, tint, uv crop)
                 const MaterialConstantsGPU matConst{ draw.material.roughness,
                                                      draw.material.metalness,
-                                                     0.0f, 0.0f,
+                                                     draw.material.isMirrorSurface ? 1.0f : 0.0f, 0.0f,
                                                      draw.material.tint,
                                                      draw.material.uvOffset,
                                                      draw.material.uvScale };
@@ -1821,9 +1939,26 @@ void FrameRenderer::renderFrame(IRenderDevice& device,
         m_graph.addComputePass(std::move(p));
     }
 
-    // Tonemap target: intermediate texture when Color Grading follows; otherwise swapchain.
-    const bool        cgEnabled      = scene.colorGrading.enabled;
-    const RGTextureId tonemapTargetId = cgEnabled ? tonemapOutTexId : swapId;
+    // ── Extended post-chain routing ───────────────────────────────────────────────────────────────────
+    // Chain: Tonemap → [CG] → [OptFx] → [FXAA] → swapchain.
+    // Each pass writes to an intermediate when at least one pass follows it,
+    // or directly to the swapchain when it is the last enabled pass.
+    const bool cgEnabled    = scene.colorGrading.enabled;
+    const bool optFxEnabled = scene.optionalFx.enabled;
+    const bool fxaaEnabled  = (scene.upscaling.mode == UpscalingMode::FXAA);
+
+    const bool anythingAfterTonemap = cgEnabled || optFxEnabled || fxaaEnabled;
+    const bool anythingAfterCG      = optFxEnabled || fxaaEnabled;
+    const bool anythingAfterOptFx   = fxaaEnabled;
+
+    const RGTextureId tonemapTargetId = anythingAfterTonemap ? tonemapOutTexId : swapId;
+    const RGTextureId cgTargetId      = anythingAfterCG      ? cgOutTexId      : swapId;
+    const RGTextureId optFxTargetId   = anythingAfterOptFx   ? optFxOutTexId   : swapId;
+
+    // Per-pass read sources (each pass reads the previous pass's output)
+    // CG reads tonemapOut; OptFx reads CG out (or tonemapOut); FXAA reads OptFx out (or prior)
+    ITexture* optFxReadTex  = cgEnabled    ? cgOutTex    : tonemapOutTex;
+    ITexture* fxaaReadTex   = optFxEnabled ? optFxOutTex : optFxReadTex;
 
     // ───────────────────────────────────────────────────────────────────────────
     // Pass 17 — Tone mapping (render → tonemapOut or swapchain)
@@ -1848,8 +1983,8 @@ void FrameRenderer::renderFrame(IRenderDevice& device,
     }
 
     // ───────────────────────────────────────────────────────────────────────────
-    // Pass 19 — Colour Grading (render → swapchain)  [only if colorGrading.enabled]
-    // Reads tonemapOut + 3D LUT, writes final pixels to swapchain.
+    // Pass 19 — Colour Grading (render → cgOut or swapchain)  [only if colorGrading.enabled]
+    // Reads tonemapOut + 3D LUT.  Writes to intermediate when OptFx or FXAA follows.
     // ───────────────────────────────────────────────────────────────────────────
     if (cgEnabled)
     {
@@ -1860,17 +1995,64 @@ void FrameRenderer::renderFrame(IRenderDevice& device,
 
         RGRenderPassDesc p;
         p.name             = "ColorGrading";
-        p.colorOutputs[0]  = swapId;
+        p.colorOutputs[0]  = cgTargetId;    // cgOut (intermediate) or swapchain
         p.colorOutputCount = 1;
         p.execute = [=](IRenderPassEncoder* enc)
         {
             enc->setViewport(vp);
             enc->setScissor(sc);
             enc->setRenderPipeline(pColorGrade);
-            enc->setFragmentTexture(tonemapOutTex, 0);           // tonemapped input
-            enc->setFragmentTexture(lutTex,        1);           // 3D LUT
-            enc->setFragmentSampler(linSamp,       0);           // sampler(0)
-            enc->setFragmentBytes  (&cgConst, sizeof(cgConst), 1); // ColorGradingConstants
+            enc->setFragmentTexture(tonemapOutTex, 0);             // tonemapped input
+            enc->setFragmentTexture(lutTex,        1);             // 3D LUT
+            enc->setFragmentSampler(linSamp,       0);             // sampler(0)
+            enc->setFragmentBytes  (&cgConst, sizeof(cgConst), 1); // ColorGradingConstants buffer(1)
+            enc->draw(3);
+        };
+        m_graph.addRenderPass(std::move(p));
+    }
+
+    // ───────────────────────────────────────────────────────────────────────────
+    // Pass 20 — Optional FX (render → optFxOut or swapchain)  [only if optionalFx.enabled]
+    // Applies vignette, film grain, and chromatic aberration in one fullscreen pass.
+    // ───────────────────────────────────────────────────────────────────────────
+    if (optFxEnabled)
+    {
+        RGRenderPassDesc p;
+        p.name             = "OptionalFX";
+        p.colorOutputs[0]  = optFxTargetId;  // optFxOut (intermediate) or swapchain
+        p.colorOutputCount = 1;
+        p.execute = [=](IRenderPassEncoder* enc)
+        {
+            enc->setViewport(vp);
+            enc->setScissor(sc);
+            enc->setRenderPipeline(pOptFx);
+            enc->setFragmentTexture(optFxReadTex, 0);                    // LDR input  texture(0)
+            enc->setFragmentBuffer (frameBuf,     0,              0);    // FrameConstants  buffer(0)
+            enc->setFragmentBytes  (&optFxConst, sizeof(optFxConst), 1); // OptFxConstants  buffer(1)
+            enc->setFragmentSampler(linSamp,      0);                    // sampler(0)
+            enc->draw(3);
+        };
+        m_graph.addRenderPass(std::move(p));
+    }
+
+    // ───────────────────────────────────────────────────────────────────────────
+    // Pass 21 — FXAA (render → swapchain)  [only if upscaling.mode == FXAA]
+    // 9-tap luma-based edge-smoothing pass.  Always the last pass in the chain.
+    // ───────────────────────────────────────────────────────────────────────────
+    if (fxaaEnabled)
+    {
+        RGRenderPassDesc p;
+        p.name             = "FXAA";
+        p.colorOutputs[0]  = swapId;  // FXAA always writes directly to swapchain
+        p.colorOutputCount = 1;
+        p.execute = [=](IRenderPassEncoder* enc)
+        {
+            enc->setViewport(vp);
+            enc->setScissor(sc);
+            enc->setRenderPipeline(pFxaa);
+            enc->setFragmentTexture(fxaaReadTex, 0);  // LDR input     texture(0)
+            enc->setFragmentBuffer (frameBuf,    0, 0); // FrameConstants buffer(0)
+            enc->setFragmentSampler(linSamp,     0);  // sampler(0)
             enc->draw(3);
         };
         m_graph.addRenderPass(std::move(p));
@@ -1894,6 +2076,307 @@ void FrameRenderer::renderFrame(IRenderDevice& device,
     }
 
     ++m_frameIndex;
+}
+
+// ─── renderMirrorPrepass ─────────────────────────────────────────────────────
+// Renders each MirrorDraw's reflectedDraws list into mirror.renderTarget using a
+// lightweight G-buffer → Lighting → Skybox → Tonemap sub-pipeline.  SSAO is
+// bypassed: m_fallbackSsao (a 1×1 white R32Float) is bound at slot 3 instead.
+
+void FrameRenderer::renderMirrorPrepass(IRenderDevice& device,
+                                         ICommandQueue& queue,
+                                         const SceneView& scene,
+                                         const FrameGPU&  mainFrame)
+{
+    for (const MirrorDraw& mirror : scene.mirrors)
+    {
+        if (!mirror.renderTarget)          { continue; }
+        if (mirror.reflectedDraws.empty()) { continue; }
+
+        const u32 rtW = mirror.rtWidth;
+        const u32 rtH = mirror.rtHeight;
+
+        // ── Build reflected FrameGPU ───────────────────────────────────────────────────────────
+        FrameGPU mf       = mainFrame;  // inherit sun direction, shadow VP, time, etc.
+        mf.view           = mirror.reflectedView;
+        mf.proj           = mirror.reflectedProj;
+        mf.viewProj       = mirror.reflectedProj * mirror.reflectedView;
+        mf.invViewProj    = glm::inverse(mf.viewProj);
+        mf.prevViewProj   = mf.viewProj;   // no TAA / motion blur in mirror
+        mf.jitter         = glm::vec2(0.0f);
+        mf.screenSize     = glm::vec4(
+            static_cast<f32>(rtW), static_cast<f32>(rtH),
+            1.0f / static_cast<f32>(rtW), 1.0f / static_cast<f32>(rtH));
+
+        // Camera position / direction from the inverse of the reflected view matrix.
+        // Column 3 of invView is the world-space eye position;
+        // column 2 is the camera +Z (backward) axis, so -column2 is forward.
+        const glm::mat4 invView = glm::inverse(mirror.reflectedView);
+        mf.cameraPos = glm::vec4(glm::vec3(invView[3]),   0.0f);
+        mf.cameraDir = glm::vec4(-glm::vec3(invView[2]),  0.0f);
+
+        {
+            void* p = m_mirrorFrameConstBuf->map();
+            std::memcpy(p, &mf, sizeof(FrameGPU));
+            m_mirrorFrameConstBuf->unmap();
+        }
+
+        // ── Build mirror render graph ────────────────────────────────────────────────────────────
+        m_mirrorGraph.reset();
+
+        // Transients — explicit sizes so compile’s fallback resolution is never used.
+        const RGTextureId mDepthId = m_mirrorGraph.createTexture({
+            rtW, rtH, TextureFormat::Depth32Float,
+            TextureUsage::DepthStencil | TextureUsage::ShaderRead,
+            "MirrorDepth"
+        });
+        const RGTextureId mAlbedoId = m_mirrorGraph.createTexture({
+            rtW, rtH, TextureFormat::RGBA8Unorm,
+            TextureUsage::RenderTarget | TextureUsage::ShaderRead,
+            "MirrorAlbedo"
+        });
+        const RGTextureId mNormalId = m_mirrorGraph.createTexture({
+            rtW, rtH, TextureFormat::RGBA8Unorm,
+            TextureUsage::RenderTarget | TextureUsage::ShaderRead,
+            "MirrorNormal"
+        });
+        const RGTextureId mEmissiveId = m_mirrorGraph.createTexture({
+            rtW, rtH, TextureFormat::RGBA16Float,
+            TextureUsage::RenderTarget | TextureUsage::ShaderRead,
+            "MirrorEmissive"
+        });
+        const RGTextureId mMotionId = m_mirrorGraph.createTexture({
+            rtW, rtH, TextureFormat::RG16Float,
+            TextureUsage::RenderTarget | TextureUsage::ShaderRead,
+            "MirrorMotion"       // written by G-buffer, not sampled; needed to match 4-RT PSO
+        });
+        const RGTextureId mHdrId = m_mirrorGraph.createTexture({
+            rtW, rtH, TextureFormat::RGBA16Float,
+            TextureUsage::RenderTarget | TextureUsage::ShaderRead | TextureUsage::ShaderWrite,
+            "MirrorHDR"
+        });
+        const RGTextureId mFinalId = m_mirrorGraph.importTexture("MirrorRT",
+                                                                    mirror.renderTarget);
+        // Depth copy for soft-particle fade in the mirror particle pass
+        const RGTextureId mDepthCopyId = m_mirrorGraph.createTexture({
+            rtW, rtH, TextureFormat::R32Float,
+            TextureUsage::ShaderRead | TextureUsage::ShaderWrite,
+            "MirrorDepthCopy"
+        });
+
+        m_mirrorGraph.compile(device, rtW, rtH);
+
+        ITexture* mDepthTex    = m_mirrorGraph.get(mDepthId);
+        ITexture* mDepthCopyTex = m_mirrorGraph.get(mDepthCopyId);
+        ITexture* mAlbedoTex   = m_mirrorGraph.get(mAlbedoId);
+        ITexture* mNormalTex   = m_mirrorGraph.get(mNormalId);
+        ITexture* mEmissiveTex = m_mirrorGraph.get(mEmissiveId);
+        ITexture* mHdrTex      = m_mirrorGraph.get(mHdrId);
+
+        // Captured for lambda use
+        IBuffer*   mFrameBuf      = m_mirrorFrameConstBuf.get();
+        IBuffer*   mLightBuf      = m_lightBuf.get();
+        IBuffer*   mSpotBuf       = m_spotLightBuf.get();
+        IPipeline* pMirGBuf       = m_mirrorGbufferPSO.get();
+        IPipeline* pMirLight      = m_lightingPSO.get();
+        IPipeline* pMirSkybox     = m_skyboxPSO.get();
+        IPipeline* pMirTonemap    = m_tonemapPSO.get();
+        IPipeline* pMirDepthCopy  = m_depthCopyPSO.get();
+        IPipeline* pMirPartRender = m_particleRenderPSO.get();
+        ISampler*  mRepeatSamp    = m_linearRepeatSampler.get();
+        ISampler*  mLinSamp       = m_linearClampSampler.get();
+        ITexture*  mShadowTex     = m_shadowDepthTex.get();
+        ITexture*  mFallSsao      = m_fallbackSsao.get();
+        ITexture*  mFallAlbedo    = m_fallbackAlbedo.get();
+        ITexture*  mFallNormal    = m_fallbackNormal.get();
+        ITexture*  mFallEmit      = m_fallbackEmissive.get();
+
+        const Viewport    mirVP{ 0.f, 0.f, static_cast<f32>(rtW), static_cast<f32>(rtH) };
+        const ScissorRect mirSC{ 0, 0, rtW, rtH };
+
+        const std::vector<MeshDraw>& reflDraws = mirror.reflectedDraws;
+
+        // Pass A — G-buffer (CullMode::None via m_mirrorGbufferPSO)
+        {
+            RGRenderPassDesc p;
+            p.name             = "MirrorGBuffer";
+            p.colorOutputs[0]  = mAlbedoId;
+            p.colorOutputs[1]  = mNormalId;
+            p.colorOutputs[2]  = mEmissiveId;
+            p.colorOutputs[3]  = mMotionId;
+            p.colorOutputCount = 4;
+            p.depthOutput      = mDepthId;
+            p.clearDepth       = 1.0f;
+            p.execute = [=, &reflDraws](IRenderPassEncoder* enc)
+            {
+                enc->setViewport(mirVP);
+                enc->setScissor(mirSC);
+                enc->setRenderPipeline(pMirGBuf);
+                enc->setFragmentSampler(mRepeatSamp, 0);
+                for (const MeshDraw& draw : reflDraws)
+                {
+                    const ModelGPU modelGPU{
+                        draw.modelMatrix,
+                        glm::mat4(glm::inverse(glm::transpose(draw.modelMatrix))),
+                        draw.prevModel
+                    };
+                    enc->setVertexBuffer(mFrameBuf,         0,          0);
+                    enc->setVertexBytes (&modelGPU, sizeof(ModelGPU),   1);
+                    enc->setVertexBuffer(draw.vertexBuffer, 0, k_vboSlot);
+                    enc->setFragmentBuffer(mFrameBuf,       0, 0);
+                    const MaterialConstantsGPU matConst{
+                        draw.material.roughness, draw.material.metalness,
+                        0.0f, 0.0f,
+                        draw.material.tint, draw.material.uvOffset, draw.material.uvScale
+                    };
+                    enc->setFragmentBytes(&matConst, sizeof(MaterialConstantsGPU), 1);
+                    enc->setFragmentTexture(
+                        draw.material.albedo    ? draw.material.albedo    : mFallAlbedo, 0);
+                    enc->setFragmentTexture(
+                        draw.material.normalMap ? draw.material.normalMap : mFallNormal, 1);
+                    enc->setFragmentTexture(
+                        draw.material.emissive  ? draw.material.emissive  : mFallEmit,  2);
+                    enc->setIndexBuffer(draw.indexBuffer, 0, true);
+                    enc->drawIndexed(draw.indexCount);
+                }
+            };
+            m_mirrorGraph.addRenderPass(std::move(p));
+        }
+
+        // Pass B — Deferred lighting (no SSAO: white fallback at slot 3)
+        {
+            RGComputePassDesc p;
+            p.name    = "MirrorLighting";
+            p.execute = [=](IComputePassEncoder* enc)
+            {
+                enc->setComputePipeline(pMirLight);
+                enc->setTexture(mAlbedoTex,   0);    // gAlbedoAO
+                enc->setTexture(mNormalTex,   1);    // gNormalRoughMet
+                enc->setTexture(mDepthTex,    2);    // gDepth
+                enc->setTexture(mFallSsao,    3);    // ssaoTex (white = no occlusion)
+                enc->setTexture(mHdrTex,      4);    // hdrOut  (write)
+                enc->setTexture(mShadowTex,   5);    // shadow depth (PCF)
+                enc->setTexture(mEmissiveTex, 6);    // gEmissive
+                enc->setBuffer(mFrameBuf, 0, 0);
+                enc->setBuffer(mLightBuf, 0, 1);     // lightCount at offset 0
+                enc->setBuffer(mLightBuf,16, 2);     // PointLightGPU[] at offset 16
+                enc->setBuffer(mSpotBuf,  0, 3);     // SpotLightGPU
+                enc->dispatch(rtW, rtH, 1);
+            };
+            m_mirrorGraph.addComputePass(std::move(p));
+        }
+
+        // Pass C — Skybox (sky pixels only, depth test LessEqual)
+        {
+            RGRenderPassDesc p;
+            p.name             = "MirrorSkybox";
+            p.colorOutputs[0]  = mHdrId;
+            p.colorOutputCount = 1;
+            p.depthOutput      = mDepthId;
+            p.loadColors       = true;
+            p.loadDepth        = true;
+            p.execute = [=](IRenderPassEncoder* enc)
+            {
+                enc->setViewport(mirVP);
+                enc->setScissor(mirSC);
+                enc->setRenderPipeline(pMirSkybox);
+                enc->setFragmentBuffer(mFrameBuf, 0, 0);
+                enc->draw(3);
+            };
+            m_mirrorGraph.addRenderPass(std::move(p));
+        }
+
+        // Pass C.5 — Depth copy (Depth32Float → R32Float) for soft-particle fade
+        {
+            RGComputePassDesc p;
+            p.name    = "MirrorDepthCopy";
+            p.execute = [=](IComputePassEncoder* enc)
+            {
+                enc->setComputePipeline(pMirDepthCopy);
+                enc->setTexture(mDepthTex,     0);  // source Depth32Float
+                enc->setTexture(mDepthCopyTex, 1);  // dest   R32Float
+                enc->dispatch(rtW, rtH, 1);
+            };
+            m_mirrorGraph.addComputePass(std::move(p));
+        }
+
+        // Pass C.75 — Particles (render-only; uses previous frame's simulate/compact data).
+        // aliveListFlip is XOR'd to address the write-list that compact already counted
+        // in indirectArgs->instanceCount at the end of the previous frame.
+        for (const ParticleEmitterDraw& emDraw : scene.particleEmitters)
+        {
+            if (!emDraw.pool || !emDraw.atlasTexture) { continue; }
+
+            ParticlePool* pool = emDraw.pool;
+
+            ParticleEmitterConstantsGPU mirEmConst = emDraw.constants;
+            mirEmConst.aliveListFlip = pool->aliveListFlip ^ 1u;
+            mirEmConst.maxParticles  = pool->maxParticles;
+
+            IBuffer*  stateBuf    = pool->stateBuffer.get();
+            IBuffer*  aliveABuf   = pool->aliveListA.get();
+            IBuffer*  aliveBBuf   = pool->aliveListB.get();
+            IBuffer*  indirectBuf = pool->indirectArgs.get();
+            ITexture* atlasTex    = emDraw.atlasTexture;
+
+            RGRenderPassDesc dp;
+            dp.name             = "MirrorParticleDraw";
+            dp.colorOutputs[0]  = mHdrId;
+            dp.colorOutputCount = 1;
+            dp.depthOutput      = mDepthId;
+            dp.loadColors       = true;
+            dp.loadDepth        = true;
+            dp.execute = [=](IRenderPassEncoder* enc)
+            {
+                enc->setViewport(mirVP);
+                enc->setScissor(mirSC);
+                enc->setRenderPipeline(pMirPartRender);
+
+                enc->setVertexBuffer(mFrameBuf,  0, 0);
+                enc->setVertexBytes (&mirEmConst, sizeof(mirEmConst), 1);
+                enc->setVertexBuffer(stateBuf,   0, 2);
+                enc->setVertexBuffer(aliveABuf,  0, 3);
+                enc->setVertexBuffer(aliveBBuf,  0, 4);
+
+                enc->setFragmentBuffer (mFrameBuf,       0, 0);
+                enc->setFragmentBytes  (&mirEmConst, sizeof(mirEmConst), 1);
+                enc->setFragmentTexture(atlasTex,         0);
+                enc->setFragmentTexture(mDepthCopyTex,    1);
+                enc->setFragmentSampler(mLinSamp,         0);
+
+                enc->drawIndirect(indirectBuf, 0);
+            };
+            m_mirrorGraph.addRenderPass(std::move(dp));
+        }
+
+        // Pass D — Tonemap → mirror.renderTarget (BGRA8Unorm)
+        // Bloom is bypassed: mFallEmit (black 1×1) contributes nothing.
+        {
+            RGRenderPassDesc p;
+            p.name             = "MirrorTonemap";
+            p.colorOutputs[0]  = mFinalId;
+            p.colorOutputCount = 1;
+            p.execute = [=](IRenderPassEncoder* enc)
+            {
+                enc->setViewport(mirVP);
+                enc->setScissor(mirSC);
+                enc->setRenderPipeline(pMirTonemap);
+                enc->setFragmentTexture(mHdrTex,  0);   // HDR source
+                enc->setFragmentTexture(mFallEmit, 1);  // bloom: black (no bloom)
+                enc->setFragmentSampler(mLinSamp,  0);
+                enc->setFragmentBuffer (mFrameBuf, 0, 0);
+                enc->draw(3);
+            };
+            m_mirrorGraph.addRenderPass(std::move(p));
+        }
+
+        // Submit mirror pre-pass on its own command buffer before the main frame.
+        auto mirCmd = queue.createCommandBuffer("MirrorPrepass");
+        mirCmd->pushDebugGroup("MirrorPrepass");
+        m_mirrorGraph.execute(*mirCmd);
+        mirCmd->popDebugGroup();
+        mirCmd->commit();
+    }
 }
 
 } // namespace daedalus::render

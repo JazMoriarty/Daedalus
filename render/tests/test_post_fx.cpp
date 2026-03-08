@@ -257,6 +257,119 @@ TEST(MotionBlurConstantsGPU, RoundTripFromParams)
     EXPECT_NEAR(c.pad1, 0.0f, k_eps);
 }
 
+// ─── OptionalFxConstantsGPU layout ───────────────────────────────────────────
+
+TEST(OptionalFxConstantsGPU, SizeIs32Bytes)
+{
+    static_assert(sizeof(OptionalFxConstantsGPU) == 32,
+                  "OptionalFxConstantsGPU must be 32 bytes");
+    EXPECT_EQ(sizeof(OptionalFxConstantsGPU), 32u);
+}
+
+TEST(OptionalFxConstantsGPU, AlignmentIs16Bytes)
+{
+    static_assert(alignof(OptionalFxConstantsGPU) == 16,
+                  "OptionalFxConstantsGPU must be 16-byte aligned");
+    EXPECT_EQ(alignof(OptionalFxConstantsGPU), 16u);
+}
+
+TEST(OptionalFxConstantsGPU, FieldOffsets)
+{
+    // Must match OptionalFxConstants in common.h exactly.
+    // [0] caAmount, [4] vignetteIntensity, [8] vignetteRadius,
+    // [12] grainAmount, [16] grainSeed, [20-28] pad0/1/2
+    EXPECT_EQ(offsetof(OptionalFxConstantsGPU, caAmount),          0u);
+    EXPECT_EQ(offsetof(OptionalFxConstantsGPU, vignetteIntensity), 4u);
+    EXPECT_EQ(offsetof(OptionalFxConstantsGPU, vignetteRadius),    8u);
+    EXPECT_EQ(offsetof(OptionalFxConstantsGPU, grainAmount),       12u);
+    EXPECT_EQ(offsetof(OptionalFxConstantsGPU, grainSeed),         16u);
+    EXPECT_EQ(offsetof(OptionalFxConstantsGPU, pad0),              20u);
+    EXPECT_EQ(offsetof(OptionalFxConstantsGPU, pad1),              24u);
+    EXPECT_EQ(offsetof(OptionalFxConstantsGPU, pad2),              28u);
+}
+
+// ─── OptionalFxParams defaults ───────────────────────────────────────────────
+
+TEST(OptionalFxParams, DefaultEnabledIsFalse)
+{
+    OptionalFxParams p;
+    EXPECT_FALSE(p.enabled);
+}
+
+TEST(OptionalFxParams, DefaultCaAmountIsZero)
+{
+    OptionalFxParams p;
+    EXPECT_NEAR(p.caAmount, 0.0f, k_eps);
+}
+
+TEST(OptionalFxParams, DefaultVignetteIntensity)
+{
+    OptionalFxParams p;
+    EXPECT_NEAR(p.vignetteIntensity, 0.30f, k_eps);
+}
+
+TEST(OptionalFxParams, DefaultVignetteRadius)
+{
+    OptionalFxParams p;
+    EXPECT_NEAR(p.vignetteRadius, 0.40f, k_eps);
+}
+
+TEST(OptionalFxParams, DefaultGrainAmount)
+{
+    OptionalFxParams p;
+    EXPECT_NEAR(p.grainAmount, 0.04f, k_eps);
+}
+
+// ─── UpscalingParams defaults ─────────────────────────────────────────────────
+
+TEST(UpscalingParams, DefaultModeIsFXAA)
+{
+    // FXAA is on by default: callers must explicitly set mode=None to disable it.
+    UpscalingParams p;
+    EXPECT_EQ(p.mode, UpscalingMode::FXAA);
+}
+
+// ─── MirrorDraw defaults ──────────────────────────────────────────────────────
+
+TEST(MirrorDraw, DefaultRenderTargetIsNull)
+{
+    MirrorDraw m;
+    EXPECT_EQ(m.renderTarget, nullptr);
+}
+
+TEST(MirrorDraw, DefaultReflectedDrawsIsEmpty)
+{
+    MirrorDraw m;
+    EXPECT_TRUE(m.reflectedDraws.empty());
+}
+
+TEST(MirrorDraw, DefaultDimensions)
+{
+    MirrorDraw m;
+    EXPECT_EQ(m.rtWidth,  512u);
+    EXPECT_EQ(m.rtHeight, 512u);
+}
+
+// ─── SceneView Phase-1D member defaults ──────────────────────────────────────
+
+TEST(SceneViewPostFX, DefaultOptionalFxIsDisabled)
+{
+    SceneView scene;
+    EXPECT_FALSE(scene.optionalFx.enabled);
+}
+
+TEST(SceneViewPostFX, DefaultUpscalingIsFXAA)
+{
+    SceneView scene;
+    EXPECT_EQ(scene.upscaling.mode, UpscalingMode::FXAA);
+}
+
+TEST(SceneViewPostFX, DefaultMirrorsIsEmpty)
+{
+    SceneView scene;
+    EXPECT_TRUE(scene.mirrors.empty());
+}
+
 // ─── Round-trip: ColorGradingParams → ColorGradingConstantsGPU ───────────────
 
 TEST(ColorGradingConstantsGPU, RoundTripFromParams)

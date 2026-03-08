@@ -31,6 +31,7 @@ struct GBufVertIn
 struct GBufVertOut
 {
     float4 position      [[position]];
+    float3 worldPos;          // interpolated world-space position (used by mirror projective UV)
     float3 worldNormal;
     float3 worldTangent;
     float3 worldBitangent;
@@ -62,6 +63,7 @@ vertex GBufVertOut gbuffer_vert(
     // Compute bitangent; handedness is stored in tangent.w.
     float3 B = cross(N, T) * in.tangent.w;
 
+    out.worldPos       = worldPos.xyz;
     out.worldNormal    = N;
     out.worldTangent   = T;
     out.worldBitangent = B;
@@ -102,7 +104,11 @@ fragment GBufFragOut gbuffer_frag(
     // Opaque geometry is unaffected (solid textures + the 1×1 white default have alpha=1).
     if (albedoSample.a < 0.5) { discard_fragment(); }
 
-    float3 albedo = albedoSample.rgb;
+    // Apply per-draw tint.  Default tint = (1,1,1) so this is a no-op for normal
+    // geometry.  The mirror surface sets tint = (0,0,0) to make its G-buffer albedo
+    // black, which drives F0=0 in the lighting pass and eliminates the spurious
+    // PBR specular + ambient contribution that was making the mirror look milky.
+    float3 albedo = albedoSample.rgb * mat.tint.rgb;
 
     // RT0: albedo.rgb + baked AO stub (1.0 until SSAO is wired into the G-buffer)
     out.albedoAO = float4(albedo, 1.0);
@@ -120,7 +126,38 @@ fragment GBufFragOut gbuffer_frag(
     out.normalRoughMet = float4(octN * 0.5 + 0.5, mat.roughness, mat.metalness);
 
     // ─── Emissive ────────────────────────────────────────────────────────────────────────────────────
-    out.emissive = float4(emissiveTex.sample(samp, uv).rgb, 0.0);
+    // For the mirror surface (isMirrorSurface == 1.0) the emissive slot holds the mirror RT.
+    // Use the rasteriser-interpolated vertex world position (not a depth reconstruction) to
+    // project through frame.mirrorViewProj.  Depth reconstruction amplifies tiny z-errors
+    // enormously at grazing angles where the mirror VP is near-degenerate, causing UV drift
+    // and edge-colour artefacts.  The vertex world position is exact.
+    //
+    // When the projected UV falls outside [0,1] the fragment lies outside the reflected
+    // camera's frustum coverage — output black rather than clamping to the RT edge colour
+    // (which is bright sky/scene content and produces a white flash).
+    float3 emissiveRGB;
+    if (mat.isMirrorSurface != 0.0)
+    {
+        float4 mirrorClip = frame.mirrorViewProj * float4(in.worldPos, 1.0);
+        if (mirrorClip.w > 0.0)
+        {
+            float2 projUV = ndc_to_uv(mirrorClip.xy / mirrorClip.w);
+            // Small epsilon prevents binary flicker at the exact frustum boundary.
+            if (all(projUV >= -0.005f) && all(projUV <= 1.005f))
+                emissiveRGB = emissiveTex.sample(samp, saturate(projUV)).rgb;
+            else
+                emissiveRGB = float3(0.0);  // outside reflected frustum → black
+        }
+        else
+        {
+            emissiveRGB = float3(0.0);  // behind reflected camera → black
+        }
+    }
+    else
+    {
+        emissiveRGB = emissiveTex.sample(samp, uv).rgb;
+    }
+    out.emissive = float4(emissiveRGB, 0.0);
 
     // ─── Motion vectors (NDC delta → UV delta) ──────────────────────────────────────
     float2 currNDC   = in.currClip.xy / in.currClip.w;

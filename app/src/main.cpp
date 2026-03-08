@@ -190,6 +190,48 @@ static render::MeshData makeBoxMesh(
     return mesh;
 }
 
+// ─── Mirror quad mesh factory ────────────────────────────────────────────────
+// Single inward-facing vertical quad for the south-wall planar mirror demo:
+//   Position : z = -5, x ∈ [-3, 3], y ∈ [0, 3]  (south wall of sector 0)
+//   Normal   : (0, 0, +1) — faces inward toward the sector interior.
+//   Winding  : (0,2,1),(0,3,2) — matches the sector-wall tessellator convention.
+//   UV       : [0,1] maps the full mirror render target across the surface.
+
+static render::MeshData makeMirrorQuadMesh()
+{
+    using render::StaticMeshVertex;
+    render::MeshData mesh;
+    auto& V = mesh.vertices;
+    auto& I = mesh.indices;
+
+    auto v = [](float px, float py, float pz,
+                float u, float vv) noexcept -> StaticMeshVertex
+    {
+        StaticMeshVertex s{};
+        s.pos[0]=px;      s.pos[1]=py;      s.pos[2]=pz;
+        s.normal[0]=0.f;  s.normal[1]=0.f;  s.normal[2]=1.f;  // inward +Z
+        s.uv[0]=u;        s.uv[1]=vv;
+        s.tangent[0]=1.f; s.tangent[1]=0.f; s.tangent[2]=0.f; s.tangent[3]=1.f;
+        return s;
+    };
+
+    // v0=BL, v1=BR, v2=TR, v3=TL; winding (0,2,1),(0,3,2)
+    // Offset 0.01 units toward +Z (into the room) so the quad sits fractionally
+    // in front of the south wall geometry and avoids z-fighting.
+    //
+    // UV convention: Metal texture v=0 is the TOP of the image (NDC y=+1).
+    // The reflected RT stores the top of the mirror scene at v=0 and the bottom
+    // at v=1.  Bottom corners (world y=0) must sample v=1; top corners (y=3) v=0.
+    V.push_back(v(-3.f, 0.f, -4.99f,  0.f, 1.f));  // BL — bottom → v=1
+    V.push_back(v( 3.f, 0.f, -4.99f,  1.f, 1.f));  // BR — bottom → v=1
+    V.push_back(v( 3.f, 3.f, -4.99f,  1.f, 0.f));  // TR — top    → v=0
+    V.push_back(v(-3.f, 3.f, -4.99f,  0.f, 0.f));  // TL — top    → v=0
+    I.push_back(0u); I.push_back(2u); I.push_back(1u);
+    I.push_back(0u); I.push_back(3u); I.push_back(2u);
+
+    return mesh;
+}
+
 // ─── Entry point ──────────────────────────────────────────────────────────────
 
 int main(int /*argc*/, char* /*argv*/[])
@@ -487,7 +529,20 @@ int main(int /*argc*/, char* /*argv*/[])
     std::printf("[Daedalus] Box entity created (%zu verts, %zu indices).\n",
                 boxMesh.vertices.size(), boxMesh.indices.size());
 
-    // ─── Shared unit quad (billboard sprites) ────────────────────────────────────────────
+    // Standalone MeshDraw for the mirror pre-pass: mirrors need their own draw-list
+    // since the ECS entity is gathered per-frame by meshRenderSystem into the main pass.
+    render::MeshDraw mirrorBoxDraw;
+    mirrorBoxDraw.vertexBuffer       = boxVBO.get();
+    mirrorBoxDraw.indexBuffer        = boxIBO.get();
+    mirrorBoxDraw.indexCount         = static_cast<u32>(boxMesh.indices.size());
+    mirrorBoxDraw.modelMatrix        = glm::mat4(1.0f);
+    mirrorBoxDraw.prevModel          = glm::mat4(1.0f);
+    mirrorBoxDraw.material.albedo    = wallAlbedo.get();
+    mirrorBoxDraw.material.normalMap = wallNormal.get();
+    mirrorBoxDraw.material.roughness = 0.75f;
+    mirrorBoxDraw.material.metalness = 0.0f;
+
+    // ─── Shared unit quad (billboard sprites)
     // All billboard sprites share a single 1×1 quad.  The BillboardRenderSystem
     // applies a per-entity spherical billboard model matrix each frame.
 
@@ -1122,7 +1177,7 @@ int main(int /*argc*/, char* /*argv*/[])
     // ── Flame emitter entity ──────────────────────────────────────────────────
     {
         TransformComponent t;
-        t.position = glm::vec3(-3.5f, 0.0f, -3.0f);  // sector 0 — far corner, clear of the box
+        t.position = glm::vec3(3.0f, 0.5f, -2.0f);  // sector 0 — centre-right, always in camera frustum
 
         render::ParticleEmitterComponent e;
         e.pool            = flamePool.get();
@@ -1135,7 +1190,7 @@ int main(int /*argc*/, char* /*argv*/[])
         // HDR tint: birth = hot white-yellow; death = dark transparent orange
         e.colorStart      = glm::vec4(3.0f, 1.5f, 0.2f, 1.0f);
         e.colorEnd        = glm::vec4(0.4f, 0.1f, 0.0f, 0.0f);
-        e.sizeStart       = 0.08f;  e.sizeEnd     = 0.22f;  // grows as it rises
+        e.sizeStart       = 0.12f;  e.sizeEnd     = 0.28f;  // slightly larger for visibility at distance
         e.emissiveScale   = 4.0f;   // strong bloom contribution
         e.gravity         = glm::vec3(0.0f, -0.8f, 0.0f);  // fire barely falls
         e.drag            = 2.0f;
@@ -1150,7 +1205,7 @@ int main(int /*argc*/, char* /*argv*/[])
     // ── Sparks emitter entity ─────────────────────────────────────────────────
     {
         TransformComponent t;
-        t.position = glm::vec3(9.0f, 0.0f, 0.0f);  // sector 1 — centre of side room
+        t.position = glm::vec3(9.0f, 0.5f, 0.0f);  // sector 1 — centre of side room, elevated above floor
 
         render::ParticleEmitterComponent e;
         e.pool             = sparksPool.get();
@@ -1163,7 +1218,7 @@ int main(int /*argc*/, char* /*argv*/[])
         // White-hot at birth; cooling orange → transparent at death
         e.colorStart       = glm::vec4(4.0f, 3.5f, 2.0f, 1.0f);
         e.colorEnd         = glm::vec4(1.0f, 0.3f, 0.0f, 0.0f);
-        e.sizeStart        = 0.03f;  e.sizeEnd     = 0.01f;
+        e.sizeStart        = 0.05f;  e.sizeEnd     = 0.02f;  // slightly larger for visibility
         e.emissiveScale    = 6.0f;   // very bright streaks
         e.gravity          = glm::vec3(0.0f, -9.8f, 0.0f);  // full gravity
         e.drag             = 0.4f;   // low drag — fast sharp arcs
@@ -1178,6 +1233,53 @@ int main(int /*argc*/, char* /*argv*/[])
 
     std::printf("[Daedalus] Particle emitters created: flame (512) + sparks (256).\n");
 
+    // ─── Phase 1D: Mirror render target + quad mesh ─────────────────────────────────
+    // Planar mirror on the south wall (z=-5), x∈[-3,3], y∈[0,3].
+    // Mirror quad is 6×3 world units (2:1 aspect). The RT dimensions are declared as
+    // named constants so the reflected projection aspect is always derived from them —
+    // never hardcoded. RT resolution must match the quad's aspect ratio to avoid
+    // distortion when UV [0,1] is mapped across the surface.
+    //   kMirrorRTW / kMirrorRTH = 512/256 = 2.0  ←  matches 6/3 quad aspect.
+    // To use a different mirror shape, update both constants here and the quad geometry.
+    constexpr u32 kMirrorRTW = 512u;
+    constexpr u32 kMirrorRTH = 256u;   // 6:3 quad ⟹ 2:1 RT
+
+    std::unique_ptr<rhi::ITexture> mirrorRT;
+    {
+        rhi::TextureDescriptor td;
+        td.width     = kMirrorRTW;
+        td.height    = kMirrorRTH;
+        td.format    = rhi::TextureFormat::BGRA8Unorm;
+        td.usage     = rhi::TextureUsage::RenderTarget | rhi::TextureUsage::ShaderRead;
+        td.debugName = "mirror_rt";
+        mirrorRT = device->createTexture(td);
+        DAEDALUS_ASSERT(mirrorRT != nullptr, "Failed to create mirror render target");
+    }
+
+    const render::MeshData mirrorQuadMesh = makeMirrorQuadMesh();
+
+    std::unique_ptr<rhi::IBuffer> mirrorQuadVBO;
+    std::unique_ptr<rhi::IBuffer> mirrorQuadIBO;
+    {
+        rhi::BufferDescriptor d;
+        d.size      = mirrorQuadMesh.vertices.size() * sizeof(render::StaticMeshVertex);
+        d.usage     = rhi::BufferUsage::Vertex;
+        d.initData  = mirrorQuadMesh.vertices.data();
+        d.debugName = "MirrorQuadVBO";
+        mirrorQuadVBO = device->createBuffer(d);
+    }
+    {
+        rhi::BufferDescriptor d;
+        d.size      = mirrorQuadMesh.indices.size() * sizeof(u32);
+        d.usage     = rhi::BufferUsage::Index;
+        d.initData  = mirrorQuadMesh.indices.data();
+        d.debugName = "MirrorQuadIBO";
+        mirrorQuadIBO = device->createBuffer(d);
+    }
+
+    std::printf("[Mirror] %ux%u render target + quad mesh created (south wall z=-5).\n",
+                kMirrorRTW, kMirrorRTH);
+
     // Camera sector tracking
     world::SectorId cameraSector = 0u;
 
@@ -1190,6 +1292,14 @@ int main(int /*argc*/, char* /*argv*/[])
     glm::mat4 prevView(1.0f);
     glm::mat4 prevProj(1.0f);
     u32       frameIdx = 0;
+
+    // Cached mirror VP: the view+proj used to *render* the mirror RT last frame.
+    // When the pre-pass is skipped (acute angle), frame.mirrorViewProj must use
+    // this cached value so the projective UV in the G-buffer shader stays in sync
+    // with the stale RT content.  Using the current-frame VP instead causes the
+    // UV to map to the wrong region of the RT as the camera moves → flickering.
+    glm::mat4 lastMirrorReflView = glm::mat4(1.0f);
+    glm::mat4 lastMirrorReflProj = glm::mat4(1.0f);
     u32       swapW    = WINDOW_W;
     u32       swapH    = WINDOW_H;
 
@@ -1415,7 +1525,157 @@ int main(int /*argc*/, char* /*argv*/[])
                         scene.colorGrading.intensity,
                         scene.colorGrading.lutTexture ? "custom" : "identity");
 
-        // ── Render ────────────────────────────────────────────────────────────────────
+        // ── Optional post-FX: vignette + film grain ─────────────────────────────────
+        // Subtle settings: vignette darkens corners without crushing highlights;
+        // grain adds organic noise seeded per-frame by the renderer internally.
+        // caAmount=0 keeps chromatic aberration off for the demo.
+        scene.optionalFx.enabled           = true;
+        scene.optionalFx.vignetteIntensity = 0.35f;
+        scene.optionalFx.vignetteRadius    = 0.40f;
+        scene.optionalFx.grainAmount       = 0.04f;
+        scene.optionalFx.caAmount          = 0.0f;
+        if (frameIdx == 0u)
+            std::printf("[OptFx] vignette+grain enabled "
+                        "(vignetteIntensity=%.2f grainAmount=%.2f)\n",
+                        scene.optionalFx.vignetteIntensity,
+                        scene.optionalFx.grainAmount);
+
+        // ── FXAA ───────────────────────────────────────────────────────────────────────
+        // FXAA is the default (UpscalingMode::FXAA) — no explicit set required.
+        if (frameIdx == 0u)
+            std::printf("[FXAA] 9-tap screen-space anti-aliasing enabled\n");
+
+        // ── Planar mirror pre-pass ──────────────────────────────────────────────────
+        // Reflect the camera through the south-wall mirror plane at z=-5.
+        //   reflEye.z = 2*(-5) - eye.z = -10 - eye.z
+        //   reflDir.z = -dir.z  (flip z component)
+        // The reflected geometry is rendered into mirrorRT by renderMirrorPrepass();
+        // the mirror surface quad reads mirrorRT as emissive.
+        {
+            const glm::vec3 camDir  = glm::normalize(target - eye);
+            const glm::vec3 reflEye = glm::vec3(eye.x, eye.y, -10.0f - eye.z);
+            const glm::vec3 reflDir = glm::vec3(camDir.x, camDir.y, -camDir.z);
+
+            // Build the reflected view matrix first — we need it to project the
+            // mirror quad corners into view space for the off-axis frustum below.
+            const glm::mat4 reflView = glm::lookAtLH(
+                reflEye, reflEye + glm::normalize(reflDir) * 10.0f, up);
+
+            // Off-axis (asymmetric) frustum: project all 4 mirror quad corners
+            // through the reflected view matrix, then build a frustum that covers
+            // exactly those extents.  The RT therefore contains exactly the scene
+            // visible through the mirror quad, so UV (0,1)×(0,1) on the surface
+            // maps 1-to-1 to the rendered content at any camera angle/distance.
+            const glm::vec3 kQuadCorners[4] = {
+                {-3.f, 0.f, -4.99f},  // BL — must match makeMirrorQuadMesh()
+                { 3.f, 0.f, -4.99f},  // BR
+                { 3.f, 3.f, -4.99f},  // TR
+                {-3.f, 3.f, -4.99f},  // TL
+            };
+            float vl, vr, vb, vt, vz;
+            {
+                const glm::vec4 c0 = reflView * glm::vec4(kQuadCorners[0], 1.0f);
+                vz = c0.z;  vl = vr = c0.x / c0.z;  vb = vt = c0.y / c0.z;
+                for (int ci = 1; ci < 4; ++ci)
+                {
+                    const glm::vec4 cv = reflView * glm::vec4(kQuadCorners[ci], 1.0f);
+                    vz = std::min(vz, cv.z);
+                    vl = std::min(vl, cv.x / cv.z);  vr = std::max(vr, cv.x / cv.z);
+                    vb = std::min(vb, cv.y / cv.z);  vt = std::max(vt, cv.y / cv.z);
+                }
+            }
+            // Guard: only render the mirror when the reflected camera faces the right way.
+            // vz ≤ 0 means all quad corners are behind the reflected eye — the surface
+            // itself is back-face culled so neither the quad nor the pre-pass is needed.
+            // When 0 < vz ≤ 0.01 the angle is very acute: we still render the surface
+            // quad (it's visible), but the frustum near plane is too small to produce a
+            // reliable pre-pass, so reflectedDraws is left empty and
+            // renderMirrorPrepass() returns immediately, preserving the last valid RT.
+            if (vz > 0.0f)
+            {
+            render::MirrorDraw mirror;
+            mirror.renderTarget   = mirrorRT.get();
+            mirror.rtWidth        = kMirrorRTW;
+            mirror.rtHeight       = kMirrorRTH;
+
+            if (vz > 0.01f)
+            {
+                // Valid frustum: compute current reflected VP and update the cache.
+                // The cache is what the G-buffer shader uses as frame.mirrorViewProj;
+                // keeping it in sync with the RT we are about to render eliminates
+                // the per-frame UV mismatch that caused flickering at acute angles.
+                const float mirrorNear = vz * 0.99f;
+                const glm::mat4 mirrorProj = glm::frustumLH_ZO(
+                    vl * mirrorNear, vr * mirrorNear,
+                    vb * mirrorNear, vt * mirrorNear,
+                    mirrorNear, 100.0f);
+
+                mirror.reflectedView = reflView;
+                mirror.reflectedProj = mirrorProj;
+                lastMirrorReflView   = reflView;    // keep cache in sync with RT
+                lastMirrorReflProj   = mirrorProj;
+
+                // Reflected scene: render ALL sectors (not just main-camera visible)
+                // so the mirror sees full room geometry.
+                for (const auto& sd : sectorDraws)
+                {
+                    if (sd.vertexBuffer != nullptr)
+                    {
+                        mirror.reflectedDraws.push_back(sd);
+                    }
+                }
+                // Include current frame mesh draws from ECS/static submissions so
+                // objects (box, voxel object, etc.) also appear in reflection.
+                // Skip the mirror surface itself to avoid recursion feedback.
+                for (const render::MeshDraw& d : scene.meshDraws)
+                {
+                    if (d.vertexBuffer == mirrorQuadVBO.get() &&
+                        d.indexBuffer  == mirrorQuadIBO.get())
+                    {
+                        continue;
+                    }
+                    mirror.reflectedDraws.push_back(d);
+                }
+            }
+            else
+            {
+                // Acute angle: pre-pass is skipped (reflectedDraws stays empty) and
+                // the RT retains its last valid content.  Use the cached VP so the
+                // projective UV in the G-buffer shader matches that stale RT.
+                mirror.reflectedView = lastMirrorReflView;
+                mirror.reflectedProj = lastMirrorReflProj;
+            }
+
+            scene.mirrors.push_back(std::move(mirror));
+
+            // Mirror surface quad: the reflection is placed in the EMISSIVE slot so
+            // the lighting pass adds it directly to the HDR buffer at full intensity.
+            // Using albedo + roughness=0/metalness=1 would make the PBR GGX produce
+            // near-zero HDR values (delta specular never fires), which contaminates
+            // TAA history via the 3×3 AABB neighbourhood and causes exponential
+            // darkening spread across the whole screen.  Emissive bypasses the BRDF.
+            render::MeshDraw mirrorSurfaceDraw;
+            mirrorSurfaceDraw.vertexBuffer          = mirrorQuadVBO.get();
+            mirrorSurfaceDraw.indexBuffer           = mirrorQuadIBO.get();
+            mirrorSurfaceDraw.indexCount            = static_cast<u32>(mirrorQuadMesh.indices.size());
+            mirrorSurfaceDraw.modelMatrix           = glm::mat4(1.0f);
+            mirrorSurfaceDraw.prevModel             = glm::mat4(1.0f);
+            mirrorSurfaceDraw.material.albedo       = nullptr;          // white (used as F0)
+            mirrorSurfaceDraw.material.emissive     = mirrorRT.get();   // reflection shown via emissive
+            mirrorSurfaceDraw.material.roughness    = 1.0f;             // max roughness: flattest possible GGX lobe
+            mirrorSurfaceDraw.material.metalness    = 1.0f;             // zero diffuse (kD = 0)
+            mirrorSurfaceDraw.material.tint         = glm::vec4(0.0f, 0.0f, 0.0f, 1.0f); // black albedo in G-buffer → F0=0 → BRDF≈0
+            mirrorSurfaceDraw.material.isMirrorSurface = true;          // projective emissive UV in G-buffer shader
+            scene.meshDraws.push_back(std::move(mirrorSurfaceDraw));
+
+            if (frameIdx == 0u)
+                std::printf("[Mirror] planar mirror pre-pass enabled "
+                            "(south wall z=-5, RT %ux%u, off-axis frustum)\n",
+                            kMirrorRTW, kMirrorRTH);
+            } // end vz > 0.0f guard
+        }
+
+        // ── Render
         renderer.renderFrame(*device, *queue, *swapchain, scene, swapW, swapH);
 
         // ── Save previous frame matrices ──────────────────────────────────────

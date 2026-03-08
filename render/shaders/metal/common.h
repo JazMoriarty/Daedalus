@@ -20,6 +20,7 @@ struct FrameConstants      // buffer(0), vertex + fragment + compute
     float4x4 invViewProj;
     float4x4 prevViewProj;
     float4x4 sunViewProj;
+    float4x4 mirrorViewProj;  // reflected-camera VP for projective mirror UV (G-buffer pass)
 
     float4 cameraPos;     // w unused
     float4 cameraDir;     // w unused
@@ -73,7 +74,7 @@ struct MaterialConstants   // buffer(1) in G-buffer + transparent fragment, 48 b
 {
     float  roughness;
     float  metalness;
-    float  pad0;
+    float  isMirrorSurface;  // 1.0 = sample emissive via projective mirror VP; 0.0 = standard
     float  pad1;
     float4 tint;     ///< Albedo tint (rgb) + opacity override (a); default = (1,1,1,1).
     float2 uvOffset; ///< UV origin of the active sprite sheet frame cell; default = (0,0).
@@ -363,6 +364,21 @@ struct MotionBlurConstants   // buffer(1) in motion_blur_main, 16 bytes
 struct ColorGradingConstants   // buffer(1) in color_grade_frag, 16 bytes
 {
     float intensity;  // LUT blend weight (0 = passthrough, 1 = full LUT)
+    float pad0;
+    float pad1;
+    float pad2;
+};
+
+// ─── Optional FX constants ──────────────────────────────────────────────────
+// Must match daedalus/render/scene_data.h OptionalFxConstantsGPU exactly.
+
+struct OptionalFxConstants   // buffer(1) in optional_fx_frag, 32 bytes
+{
+    float caAmount;           // chromatic aberration radius (0 = off)
+    float vignetteIntensity;  // vignette darkening strength (0..1)
+    float vignetteRadius;     // vignette inner edge in UV² (0..1; lower = larger vignette)
+    float grainAmount;        // film grain amplitude (0 = off)
+    float grainSeed;          // frame-varying seed for temporal variation
     float pad0;
     float pad1;
     float pad2;

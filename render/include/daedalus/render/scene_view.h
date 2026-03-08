@@ -30,6 +30,12 @@ struct Material
     f32 roughness = 0.5f;               ///< Scalar override (0 = mirror, 1 = fully rough).
     f32 metalness = 0.0f;               ///< Scalar override (0 = dielectric, 1 = metal).
 
+    /// True when this draw is the planar mirror surface quad.  The G-buffer fragment
+    /// shader reconstructs per-pixel world position and reprojects it through
+    /// FrameGPU::mirrorViewProj to obtain the correct UV into the mirror render target.
+    /// Only valid for draws in SceneView::meshDraws (not transparentDraws).
+    bool isMirrorSurface = false;
+
     /// Per-draw albedo tint (rgb) and opacity multiplier (a).
     /// Ignored by the opaque G-buffer shader; consumed by the transparent forward shader.
     /// Default: opaque white (no tint, no opacity change).
@@ -165,7 +171,65 @@ struct ColorGradingParams
     rhi::ITexture* lutTexture = nullptr; ///< 32×32×32 RGBA8Unorm 3D LUT; nullptr → engine identity.
 };
 
-// ─── SceneView ──────────────────────────────────────────────────────────────────────────────────────────────
+// ─── OptionalFxParams ─────────────────────────────────────────────────────────────────────────────
+// Per-frame optional post-FX parameters.  When enabled is false FrameRenderer skips
+// the pass with zero GPU cost.
+
+struct OptionalFxParams
+{
+    bool  enabled           = false;   ///< Skip pass when false.
+    float caAmount          = 0.0f;   ///< Chromatic aberration radius (0 = off, 0.01 = strong).
+    float vignetteIntensity = 0.30f;  ///< Vignette darkening strength (0..1).
+    float vignetteRadius    = 0.40f;  ///< Vignette inner edge in UV² (lower = larger vignette).
+    float grainAmount       = 0.04f;  ///< Film grain amplitude (0 = off, 0.05 = subtle).
+};
+
+// ─── UpscalingMode ─────────────────────────────────────────────────────────────────────────────────────
+
+enum class UpscalingMode : u32
+{
+    None = 0,  ///< No AA upscaling pass — output is raw tonemap/CG output.
+    FXAA = 1,  ///< Fast approximate anti-aliasing (9-tap screen-space edge smooth).
+};
+
+// ─── UpscalingParams ─────────────────────────────────────────────────────────────────────────────────────
+// Per-frame upscaling / anti-aliasing mode.  When mode is None, FrameRenderer skips
+// the FXAA pass with zero GPU cost.
+
+struct UpscalingParams
+{
+    UpscalingMode mode = UpscalingMode::FXAA;  ///< Default: FXAA enabled.
+};
+
+// ─── MirrorDraw ────────────────────────────────────────────────────────────────────────────────────────────────
+// Describes a single planar mirror surface for the mirror pre-pass.
+//
+// The application is responsible for:
+//   1. Pre-allocating renderTarget (BGRA8Unorm, RenderTarget|ShaderRead, rtWidth×rtHeight).
+//   2. Each frame: populating reflectedView, reflectedProj, and reflectedDraws.
+//   3. Each frame: adding the mirror surface MeshDraw to SceneView::meshDraws
+//      with material.albedo pointing to renderTarget.
+//
+// FrameRenderer::renderMirrorPrepass() renders reflectedDraws from the reflected
+// camera into renderTarget before the main G-buffer pass, so the mirror surface
+// reads a freshly-rendered reflection when the main G-buffer runs.
+//
+// Note: for correct winding in the reflected view, FrameRenderer uses a dedicated
+// G-buffer PSO with CullMode::None.
+
+struct MirrorDraw
+{
+    glm::mat4 reflectedView = glm::mat4(1.0f);  ///< Pre-computed reflected view matrix.
+    glm::mat4 reflectedProj = glm::mat4(1.0f);  ///< Projection for the reflected view.
+    rhi::ITexture* renderTarget = nullptr;  ///< Pre-allocated BGRA8Unorm render target.
+    u32 rtWidth  = 512u;                    ///< Width of renderTarget.
+    u32 rtHeight = 512u;                    ///< Height of renderTarget.
+    std::vector<MeshDraw> reflectedDraws;  ///< Geometry rendered from the reflected POV.
+    // Mirror surface MeshDraw must be added to SceneView::meshDraws by the application,
+    // with material.albedo pointing to renderTarget.
+};
+
+// ─── SceneView ────────────────────────────────────────────────────────────────────────────────────────────────
 // Complete frame description: camera + lights + draw list.
 
 struct SceneView
@@ -267,6 +331,25 @@ struct SSRParams
     // and applies a 3D LUT grade before writing the swapchain output.
 
     ColorGradingParams colorGrading;
+
+    // ─── Optional post-FX (vignette, film grain, chromatic aberration)
+    // When enabled, FrameRenderer runs the optional_fx_frag pass after tonemap/CG.
+    // Skipped with zero GPU cost when enabled is false.
+
+    OptionalFxParams optionalFx;
+
+    // ─── Upscaling / anti-aliasing
+    // When mode == UpscalingMode::FXAA, FrameRenderer applies FXAA as the final pass.
+    // mode == UpscalingMode::None skips the FXAA pass (zero GPU cost).
+
+    UpscalingParams upscaling;
+
+    // ─── Mirror draws
+    // Populated by the application each frame.  FrameRenderer renders each mirror's
+    // reflectedDraws into its renderTarget before the main G-buffer pass.
+    // The mirror surface MeshDraw must also be added to meshDraws by the application.
+
+    std::vector<MirrorDraw> mirrors;
 
     // ─── Timing
 
