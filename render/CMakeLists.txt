@@ -13,13 +13,13 @@ target_compile_features(DaedalusRender PUBLIC cxx_std_23)
 target_sources(DaedalusRender PRIVATE
     src/render_graph/render_graph.cpp
     src/renderer/frame_renderer.cpp
-    src/asset_loader.cpp
+    src/loader/asset_loader.cpp
 )
 
 # ─── Platform backend ───────────────────────────────────────────────────────
 if(DAEDALUS_PLATFORM_MACOS)
     target_sources(DaedalusRender PRIVATE
-        src/create_render_device.cpp
+        src/rhi/create_render_device.cpp
         src/rhi/backends/metal/metal_render_device.mm
     )
 
