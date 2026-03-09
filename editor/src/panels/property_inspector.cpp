@@ -197,10 +197,11 @@ void PropertyInspector::draw(EditMapDocument&      doc,
                 if (ImGui::SmallButton("Browse##sm"))
                 {
                     const daedalus::UUID capId = current;
+                    const char* surfLbl = (surface == SectorSurface::Floor) ? "Floor" : "Ceiling";
                     assetBrowser.openPicker([&doc, sid, surface, capId](const UUID& uuid) {
                         (void)capId;
                         doc.pushCommand(std::make_unique<CmdSetSectorMaterial>(doc, sid, surface, uuid));
-                    });
+                    }, surfLbl);
                 }
                 ImGui::SameLine();
                 if (ImGui::SmallButton("X##sm") && current.isValid())
@@ -354,9 +355,13 @@ void PropertyInspector::draw(EditMapDocument&      doc,
                     ImGui::TextDisabled("(none)");
                 if (ImGui::SmallButton("Browse##wm"))
                 {
+                    const char* surfLbl =
+                        (surface == WallSurface::Front) ? "Wall Front" :
+                        (surface == WallSurface::Upper) ? "Wall Upper" :
+                        (surface == WallSurface::Lower) ? "Wall Lower" : "Wall Back";
                     assetBrowser.openPicker([&doc, sid, wi, surface](const UUID& uuid) {
                         doc.pushCommand(std::make_unique<CmdSetWallMaterial>(doc, sid, wi, surface, uuid));
-                    });
+                    }, surfLbl);
                 }
                 ImGui::SameLine();
                 if (ImGui::SmallButton("X##wm") && current.isValid())

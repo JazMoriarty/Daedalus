@@ -63,6 +63,7 @@ public:
 
     /// Enable/disable relative-mouse-mode (mouselook).  Called from main.mm on Tab/Escape.
     void setMouseCapture(SDL_Window* window, bool capture) noexcept;
+
     [[nodiscard]] bool isMouseCaptured() const noexcept { return m_mouseCaptured; }
 
     /// Set the active transform gizmo mode.
@@ -101,9 +102,13 @@ private:
     float     m_yaw   = 0.0f;     ///< Horizontal rotation, radians (0 = looking toward +Z).
     float     m_pitch = -0.349f;  ///< Vertical rotation, radians (negative = looking down).
 
-    bool      m_mouseCaptured = false;  ///< True when Tab has locked the cursor for mouselook.
-    bool      m_altDragging   = false;  ///< True while Alt+LMB orbit is active.
-    glm::vec3 m_altFocus{};            ///< Orbit pivot point for current Alt+drag gesture.
+    bool        m_mouseCaptured   = false;  ///< True when Tab has locked the cursor for mouselook.
+    bool        m_altDragging     = false;  ///< True while Alt+LMB orbit is active.
+    glm::vec3   m_altFocus{};              ///< Orbit pivot point for current Alt+drag gesture.
+
+    // Warp-to-centre mouselook: no SDL relative mouse mode needed.
+    SDL_Window* m_captureWindow   = nullptr;
+    bool        m_captureWarpDone = false;  ///< False for the first frame after capture to skip the initial delta.
 
     unsigned  m_frameIdx    = 0;
     glm::mat4 m_prevView{1.0f};

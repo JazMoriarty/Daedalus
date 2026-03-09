@@ -13,6 +13,7 @@
 #include "document/commands/cmd_rotate_entity.h"
 #include "document/commands/cmd_scale_entity.h"
 #include "document/commands/cmd_set_wall_material.h"
+#include "document/commands/cmd_set_sector_material.h"
 #include "document/commands/cmd_set_wall_uv.h"
 
 // stb_image (declaration only — implementation compiled once in asset_loader.cpp)
@@ -416,16 +417,22 @@ void Viewport3D::drawGizmoAndHandleDrag(EditMapDocument&  doc,
 void Viewport3D::setMouseCapture(SDL_Window* window, bool capture) noexcept
 {
     m_mouseCaptured = capture;
-    (void)SDL_SetWindowRelativeMouseMode(window, capture);
     if (capture)
     {
-        // Drain accumulated relative motion so the camera doesn't jump on entry.
-        float dx = 0.0f, dy = 0.0f;
-        SDL_GetRelativeMouseState(&dx, &dy);
+        m_captureWindow   = window;
+        m_captureWarpDone = false;  // skip first-frame delta
+        SDL_HideCursor();
+        // Warp to window centre so the first measured delta is always zero.
+        int ww = 0, wh = 0;
+        SDL_GetWindowSize(window, &ww, &wh);
+        SDL_WarpMouseInWindow(window, ww * 0.5f, wh * 0.5f);
     }
     else
     {
-        m_altDragging = false;
+        SDL_ShowCursor();
+        m_captureWindow   = nullptr;
+        m_captureWarpDone = false;
+        m_altDragging     = false;
     }
 }
 
@@ -547,18 +554,33 @@ void Viewport3D::draw(EditMapDocument&      doc,
         if (keys[SDL_SCANCODE_Q]) m_eye -= glm::vec3(0.0f, 1.0f, 0.0f) * spd;
         if (keys[SDL_SCANCODE_E]) m_eye += glm::vec3(0.0f, 1.0f, 0.0f) * spd;
 
-        // Mouselook via SDL relative-motion state (reset each call).
-        float mdx = 0.0f, mdy = 0.0f;
-        SDL_GetRelativeMouseState(&mdx, &mdy);
-        constexpr float kSens = 0.003f;
-        m_yaw   += mdx * kSens;
-        m_pitch -= mdy * kSens;
-        m_pitch  = std::clamp(m_pitch,
-                               -glm::pi<float>() * 0.45f,
-                                glm::pi<float>() * 0.45f);
+        // Mouselook: warp-to-centre approach — works on all SDL3/macOS setups
+        // without needing SDL_SetWindowRelativeMouseMode (which is unreliable
+        // on macOS because the ImGui backend tracks absolute x/y, not xrel/yrel).
+        if (m_captureWindow)
+        {
+            float mx = 0.0f, my = 0.0f;
+            SDL_GetMouseState(&mx, &my);
+            int ww = 0, wh = 0;
+            SDL_GetWindowSize(m_captureWindow, &ww, &wh);
+            const float cx = ww * 0.5f;
+            const float cy = wh * 0.5f;
 
-        // Recompute fwd after angle changes.
-        fwd = makeFwd(m_yaw, m_pitch);
+            if (m_captureWarpDone)
+            {
+                constexpr float kSens = 0.003f;
+                m_yaw   += (mx - cx) * kSens;
+                m_pitch -= (my - cy) * kSens;
+                m_pitch  = std::clamp(m_pitch,
+                                       -glm::pi<float>() * 0.45f,
+                                        glm::pi<float>() * 0.45f);
+            }
+            m_captureWarpDone = true;
+            SDL_WarpMouseInWindow(m_captureWindow, cx, cy);
+
+            // Recompute fwd after angle changes.
+            fwd = makeFwd(m_yaw, m_pitch);
+        }
     }
     else
     {
@@ -973,6 +995,31 @@ void Viewport3D::draw(EditMapDocument&      doc,
     ImGui::Image(reinterpret_cast<ImTextureID>(tex->nativeHandle()),
                  ImVec2(static_cast<float>(w), static_cast<float>(h)));
 
+    // ── Drag-and-drop material target ────────────────────────────────────────
+    if (ImGui::BeginDragDropTarget())
+    {
+        if (const ImGuiPayload* payload =
+                ImGui::AcceptDragDropPayload("MATERIAL_UUID"))
+        {
+            const UUID droppedUuid =
+                *static_cast<const UUID*>(payload->Data);
+            if (m_hoveredSectorId != world::INVALID_SECTOR_ID)
+            {
+                if (m_hoveredSurface == HoveredSurface::Wall)
+                    doc.pushCommand(std::make_unique<CmdSetWallMaterial>(
+                        doc, m_hoveredSectorId, m_hoveredWallIdx,
+                        WallSurface::Front, droppedUuid));
+                else if (m_hoveredSurface == HoveredSurface::Floor)
+                    doc.pushCommand(std::make_unique<CmdSetSectorMaterial>(
+                        doc, m_hoveredSectorId, SectorSurface::Floor, droppedUuid));
+                else if (m_hoveredSurface == HoveredSurface::Ceil)
+                    doc.pushCommand(std::make_unique<CmdSetSectorMaterial>(
+                        doc, m_hoveredSectorId, SectorSurface::Ceil, droppedUuid));
+            }
+        }
+        ImGui::EndDragDropTarget();
+    }
+
     // Overlay: show a hint when mouse is captured.
     if (m_mouseCaptured)
     {
@@ -987,7 +1034,8 @@ void Viewport3D::draw(EditMapDocument&      doc,
 
     // ── Wall / floor / ceiling hover ray + click selection ─────────────────────
     const ImGuiIO& io3d = ImGui::GetIO();
-    if (!m_mouseCaptured && ImGui::IsWindowHovered(ImGuiHoveredFlags_None))
+    if (!m_mouseCaptured && ImGui::IsWindowHovered(
+            ImGuiHoveredFlags_AllowWhenBlockedByActiveItem))
     {
         const ImVec2 mp = io3d.MousePos;
         const float fw = static_cast<float>(w);
@@ -1262,7 +1310,7 @@ void Viewport3D::draw(EditMapDocument&      doc,
             sel2.wallSectorId != world::INVALID_SECTOR_ID)
         {
             drawWallOutline(sel2.wallSectorId, sel2.wallIndex,
-                            IM_COL32(255, 200, 0, 45),
+                            0,                          // no fill — preserve texture visibility
                             IM_COL32(255, 200, 0, 220));
         }
         else if (sel2.type == SelectionType::Sector && !sel2.sectors.empty())

@@ -12,11 +12,12 @@ namespace daedalus::editor
 
 // ─── openPicker / closePicker ─────────────────────────────────────────────────
 
-void AssetBrowserPanel::openPicker(PickCallback cb)
+void AssetBrowserPanel::openPicker(PickCallback cb, std::string label)
 {
     m_pickerCallback = std::move(cb);
+    m_pickerLabel    = std::move(label);
     m_pickerOpen     = true;
-    ImGui::OpenPopup("##AssetPicker");
+    m_wantFocus      = true;
 }
 
 void AssetBrowserPanel::closePicker() noexcept
@@ -79,6 +80,18 @@ void AssetBrowserPanel::drawThumbnailGrid(MaterialCatalog&    catalog,
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip("%s", entry.absPath.c_str());
 
+        // Drag source — drag a thumbnail into the 3D viewport to assign the material.
+        if (ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceAllowNullID))
+        {
+            ImGui::SetDragDropPayload("MATERIAL_UUID", &entry.uuid, sizeof(UUID));
+            if (thumb)
+                ImGui::Image(reinterpret_cast<ImTextureID>(thumb->nativeHandle()),
+                             ImVec2(32.0f, 32.0f));
+            ImGui::SameLine();
+            ImGui::TextUnformatted(entry.displayName.c_str());
+            ImGui::EndDragDropSource();
+        }
+
         // Truncated name label below the thumbnail.
         ImGui::TextUnformatted(entry.displayName.c_str());
 
@@ -105,9 +118,31 @@ void AssetBrowserPanel::draw(MaterialCatalog&      catalog,
                                render::IAssetLoader& loader)
 {
     (void)loader;  // available for future reload-on-change
-
     // ── Dockable browser window ───────────────────────────────────────────────
     ImGui::Begin("Asset Browser");
+
+    // Bring this tab to the front the frame picker is first activated.
+    if (m_wantFocus)
+    {
+        ImGui::SetWindowFocus();
+        m_wantFocus = false;
+    }
+
+    // ── Picker banner
+    // ── Picker banner ─────────────────────────────────────────────────────────
+    if (m_pickerOpen)
+    {
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.85f, 0.2f, 1.0f));
+        const char* lbl = m_pickerLabel.empty() ? "material" : m_pickerLabel.c_str();
+        ImGui::Text("Picking: %s", lbl);
+        ImGui::PopStyleColor();
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Cancel"))
+            closePicker();
+        if (ImGui::IsKeyPressed(ImGuiKey_Escape))
+            closePicker();
+        ImGui::Separator();
+    }
 
     if (catalog.empty())
     {
@@ -142,45 +177,11 @@ void AssetBrowserPanel::draw(MaterialCatalog&      catalog,
 
         // ── Right pane: thumbnails ────────────────────────────────────────────
         ImGui::BeginChild("##thumbs", ImVec2(0.0f, 0.0f), ImGuiChildFlags_None);
-        drawThumbnailGrid(catalog, device, /*isPicker=*/false);
+        drawThumbnailGrid(catalog, device, /*isPicker=*/m_pickerOpen);
         ImGui::EndChild();
     }
 
     ImGui::End();
-
-    // ── Picker popup (floating, opened by openPicker()) ───────────────────────
-    ImGui::SetNextWindowSize(ImVec2(400.0f, 360.0f), ImGuiCond_Appearing);
-    if (ImGui::BeginPopup("##AssetPicker",
-                          ImGuiWindowFlags_NoNav))
-    {
-        ImGui::Text("Pick Material");
-        ImGui::Separator();
-
-        if (catalog.empty())
-        {
-            ImGui::TextDisabled("(catalog empty \xe2\x80\x94 set asset root first)");
-        }
-        else
-        {
-            ImGui::BeginChild("##pickscroll", ImVec2(0.0f, 0.0f),
-                              ImGuiChildFlags_None);
-            drawThumbnailGrid(catalog, device, /*isPicker=*/true);
-            ImGui::EndChild();
-        }
-
-        if (ImGui::IsKeyPressed(ImGuiKey_Escape))
-        {
-            closePicker();
-            ImGui::CloseCurrentPopup();
-        }
-
-        ImGui::EndPopup();
-    }
-    else if (m_pickerOpen)
-    {
-        // Popup was closed externally (e.g. click-away).
-        closePicker();
-    }
 }
 
 } // namespace daedalus::editor
