@@ -12,7 +12,8 @@
 //   buffer(0)  = FrameConstants
 //   buffer(1)  = point light count (u32)
 //   buffer(2)  = PointLightGPU[]
-//   buffer(3)  = SpotLightGPU  (first shadow-casting spot light; zero intensity = inactive)
+//   buffer(3)  = uint spotCount
+//   buffer(4)  = SpotLightGPU[]  (index 0 = shadow-caster, if any)
 
 #include "common.h"
 
@@ -27,7 +28,8 @@ kernel void lighting_main(
     constant FrameConstants&         frame            [[buffer(0)]],
     constant uint&                   lightCount       [[buffer(1)]],
     constant PointLightGPU*          lights           [[buffer(2)]],
-    constant SpotLightGPU&           spotLight        [[buffer(3)]],
+    constant uint&                   spotCount        [[buffer(3)]],
+    constant SpotLightGPU*           spotLights       [[buffer(4)]],
     uint2                            gid              [[thread_position_in_grid]])
 {
     const uint fw = hdrOut.get_width();
@@ -65,31 +67,36 @@ kernel void lighting_main(
     float3 sunCol = frame.sunColor.xyz * frame.sunColor.w;  // colour × intensity
     float3 radiance = cook_torrance(N, V, sunDir, albedo, roughness, metalness) * sunCol;
 
-    // ─── Spot light with PCF shadow (3×3 kernel) ────────────────────────────
-    // Active when spotLight.colorIntensity.w > 0 (intensity is the gate).
-    if (spotLight.colorIntensity.w > 0.0f)
+    // ─── Spot lights ───────────────────────────────────────────────────────────────────────
+    // All spots contribute radiance.  Only index 0 (the shadow-caster) runs the
+    // 3×3 PCF shadow test; the rest are unshadowed.
+    for (uint si = 0; si < spotCount; ++si)
     {
-        float3 toLight = spotLight.positionRange.xyz - worldPos;
+        const SpotLightGPU spot = spotLights[si];
+        if (spot.colorIntensity.w <= 0.0f) continue;
+
+        float3 toLight = spot.positionRange.xyz - worldPos;
         float  dist    = length(toLight);
-        float  range   = spotLight.positionRange.w;
+        float  range   = spot.positionRange.w;
+        if (dist >= range) continue;
 
-        if (dist < range)
+        float3 L       = toLight / dist;
+        float3 spotDir = normalize(spot.directionOuterCos.xyz);
+        float  cosTheta = dot(-L, spotDir);
+        float  innerCos = spot.innerCosAndPad.x;
+        float  outerCos = spot.directionOuterCos.w;
+        float  cone     = smoothstep(outerCos, innerCos, cosTheta);
+        float  atten    = 1.0f - clamp(dist / range, 0.0f, 1.0f);
+        atten *= atten;
+
+        // PCF shadow — only the first spotlight (index 0) uses the shadow map.
+        float lit = 1.0f;
+        if (si == 0)
         {
-            float3 L          = toLight / dist;
-            float3 spotDir    = normalize(spotLight.directionOuterCos.xyz);
-            float  cosTheta   = dot(-L, spotDir);
-            float  innerCos   = spotLight.innerCosAndPad.x;
-            float  outerCos   = spotLight.directionOuterCos.w;
-            float  cone       = smoothstep(outerCos, innerCos, cosTheta);
-            float  atten      = 1.0f - clamp(dist / range, 0.0f, 1.0f);
-            atten *= atten;
-
-            // PCF shadow — reuses frame.sunViewProj (written with spot matrix)
             float4 shadowClip = frame.sunViewProj * float4(worldPos, 1.0);
             float3 shadowNDC  = shadowClip.xyz / shadowClip.w;
             float2 shadowUV   = ndc_to_uv(shadowNDC.xy);
-            float  refDepth   = shadowNDC.z - 0.002f;  // bias (near=0.5 gives good precision, small bias keeps shadow tight)
-            float  lit        = 1.0f;
+            float  refDepth   = shadowNDC.z - 0.002f;
             if (shadowUV.x >= 0.0f && shadowUV.x <= 1.0f &&
                 shadowUV.y >= 0.0f && shadowUV.y <= 1.0f &&
                 shadowNDC.z >= 0.0f && shadowNDC.z <= 1.0f)
@@ -106,11 +113,11 @@ kernel void lighting_main(
                     }
                 lit /= 9.0f;
             }
-
-            radiance += cook_torrance(N, V, L, albedo, roughness, metalness)
-                        * spotLight.colorIntensity.xyz * spotLight.colorIntensity.w
-                        * cone * atten * lit;
         }
+
+        radiance += cook_torrance(N, V, L, albedo, roughness, metalness)
+                    * spot.colorIntensity.xyz * spot.colorIntensity.w
+                    * cone * atten * lit;
     }
 
     // ─── Point lights ─────────────────────────────────────────────────────────

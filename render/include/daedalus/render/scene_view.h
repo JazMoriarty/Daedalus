@@ -85,6 +85,10 @@ struct SpotLight
     f32       range          = 10.0f;
     glm::vec3 color          = glm::vec3(1.0f);
     f32       intensity      = 10.0f;
+    /// When true this light is eligible to claim the single shadow map.
+    /// The nearest eligible light to the camera wins each frame.
+    /// When false the light contributes radiance but never casts shadows.
+    bool      castsShadows   = true;
 };
 
 // ─── DecalDraw ────────────────────────────────────────────────────────────────
@@ -256,7 +260,8 @@ struct SceneView
     std::vector<PointLight> pointLights;
 
     // ─── Spot lights ───────────────────────────────────────────────────────────────
-    // Only the first spot light casts a shadow map.
+    // All spot lights contribute radiance.  The nearest one with castsShadows=true
+    // claims the single shadow map each frame (sorted to index 0 by FrameRenderer).
 
     std::vector<SpotLight> spotLights;
 

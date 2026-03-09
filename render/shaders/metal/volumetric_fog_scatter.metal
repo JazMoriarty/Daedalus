@@ -13,7 +13,8 @@
 //   buffer(1)  : VolumetricFogConstants
 //   buffer(2)  : uint lightCount
 //   buffer(3)  : PointLightGPU[]
-//   buffer(4)  : SpotLightGPU
+//   buffer(4)  : uint spotCount
+//   buffer(5)  : SpotLightGPU[]
 
 #include "common.h"
 
@@ -49,7 +50,8 @@ kernel void fog_scatter(
     constant VolumetricFogConstants&  fog            [[buffer(1)]],
     constant uint&                    lightCount     [[buffer(2)]],
     constant PointLightGPU*           lights         [[buffer(3)]],
-    constant SpotLightGPU&            spotLight      [[buffer(4)]],
+    constant uint&                    spotCount      [[buffer(4)]],
+    constant SpotLightGPU*            spotLights     [[buffer(5)]],
     uint3                             gid            [[thread_position_in_grid]])
 {
     if (gid.x >= FROXEL_W || gid.y >= FROXEL_H || gid.z >= FROXEL_D) return;
@@ -88,27 +90,29 @@ kernel void fog_scatter(
         inScatter += lCol * fog.scattering * phase * atten;
     }
 
-    // ── Spot light ────────────────────────────────────────────────────────────
-    if (spotLight.colorIntensity.w > 0.0f)
+    // ── Spot lights ───────────────────────────────────────────────────────────────────────
+    for (uint si = 0; si < spotCount; ++si)
     {
-        float3 toLight = spotLight.positionRange.xyz - worldPos;
+        const SpotLightGPU spot = spotLights[si];
+        if (spot.colorIntensity.w <= 0.0f) continue;
+
+        float3 toLight = spot.positionRange.xyz - worldPos;
         float  dist    = length(toLight);
-        if (dist < spotLight.positionRange.w)
-        {
-            float3 L        = toLight / dist;
-            float  cosTheta = dot(viewDir, L);
-            float  phase    = hg_phase(cosTheta, fog.anisotropy);
-            float  atten    = 1.0f - (dist / spotLight.positionRange.w);
-            atten *= atten;
+        if (dist >= spot.positionRange.w) continue;
 
-            float3 spotDir   = normalize(spotLight.directionOuterCos.xyz);
-            float  coneAtten = smoothstep(spotLight.directionOuterCos.w,
-                                          spotLight.innerCosAndPad.x,
-                                          dot(-L, spotDir));
+        float3 L        = toLight / dist;
+        float  cosTheta = dot(viewDir, L);
+        float  phase    = hg_phase(cosTheta, fog.anisotropy);
+        float  atten    = 1.0f - (dist / spot.positionRange.w);
+        atten *= atten;
 
-            float3 lCol = spotLight.colorIntensity.xyz * spotLight.colorIntensity.w;
-            inScatter += lCol * fog.scattering * phase * atten * coneAtten;
-        }
+        float3 spotDir   = normalize(spot.directionOuterCos.xyz);
+        float  coneAtten = smoothstep(spot.directionOuterCos.w,
+                                      spot.innerCosAndPad.x,
+                                      dot(-L, spotDir));
+
+        float3 lCol = spot.colorIntensity.xyz * spot.colorIntensity.w;
+        inScatter += lCol * fog.scattering * phase * atten * coneAtten;
     }
 
     // Write (in-scatter.rgb, extinction.a) to the froxel grid.

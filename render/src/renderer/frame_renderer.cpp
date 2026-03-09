@@ -598,12 +598,13 @@ void FrameRenderer::createPersistentResources(IRenderDevice& device, u32 w, u32 
         m_fallbackEmissive = device.createTexture(d);
     }
 
-    // Spot light constant buffer
+    // Spot light buffer: 16-byte header (u32 count + 3×pad) + up to 16 lights.
     {
+        constexpr u32 kMaxSpotLights = 16;
         BufferDescriptor d;
-        d.size      = sizeof(SpotLightGPU);
-        d.usage     = BufferUsage::Uniform;
-        d.debugName = "SpotLightConstants";
+        d.size      = 16 + sizeof(SpotLightGPU) * kMaxSpotLights;
+        d.usage     = BufferUsage::Storage | BufferUsage::Uniform;
+        d.debugName = "SpotLightBuffer";
         m_spotLightBuf = device.createBuffer(d);
     }
 
@@ -839,52 +840,83 @@ void FrameRenderer::renderFrame(IRenderDevice& device,
     frame.jitter     = jitterPx;
     frame.pad1       = glm::vec2(0.0f);
 
-    // ── Shadow-casting light view-projection ──────────────────────────────────────
-    // Spot light (first in list) takes priority; falls back to sun for outdoor.
-    SpotLightGPU spotGPU{};
-    if (!scene.spotLights.empty())
+    // ── Sort and upload spot light buffer ───────────────────────────────────────────────────────────────
+    // The nearest spotlight with castsShadows=true goes to index 0 and claims the
+    // shadow map.  All others follow in arbitrary order.  Up to 16 lights total.
+    constexpr u32 kMaxSpotLights = 16;
     {
-        const SpotLight& spot   = scene.spotLights[0];
-        const glm::vec3  pos    = spot.position;
-        const glm::vec3  dir    = glm::normalize(spot.direction);
-        const glm::vec3  up     = (std::abs(dir.y) > 0.99f)
-                                  ? glm::vec3(1.f, 0.f, 0.f)
-                                  : glm::vec3(0.f, 1.f, 0.f);
-        const glm::mat4 spotView = glm::lookAtLH(pos, pos + dir, up);
-        const glm::mat4 spotProj = glm::perspectiveLH_ZO(
-                                       spot.outerConeAngle * 2.0f, 1.0f,
-                                       0.5f, spot.range);  // 0.5 near: no surface closer; much better NDC depth precision
-        frame.sunViewProj = spotProj * spotView;
+        const auto& spots = scene.spotLights;
+        const u32   rawCount = static_cast<u32>(spots.size());
 
-        spotGPU.positionRange     = glm::vec4(pos, spot.range);
-        spotGPU.directionOuterCos = glm::vec4(dir, std::cos(spot.outerConeAngle));
-        spotGPU.colorIntensity    = glm::vec4(spot.color, spot.intensity);
-        spotGPU.innerCosAndPad    = glm::vec4(std::cos(spot.innerConeAngle), 0.f, 0.f, 0.f);
-    }
-    else
-    {
-        // Outdoor fallback: orthographic sun shadow
-        const glm::vec3 lightDir = glm::normalize(scene.sunDirection);
-        const glm::vec3 up       = (std::abs(lightDir.y) > 0.99f)
-                                   ? glm::vec3(0.f, 0.f, 1.f)
-                                   : glm::vec3(0.f, 1.f, 0.f);
-        const glm::vec3 center(0.0f, 2.0f, 0.0f);
-        const glm::mat4 lightView = glm::lookAtLH(center + lightDir * 20.f, center, up);
-        const glm::mat4 lightProj = glm::orthoLH_ZO(-12.f, 12.f, -12.f, 12.f, 0.1f, 40.f);
-        frame.sunViewProj = lightProj * lightView;
+        // Find nearest shadow-eligible light.
+        int   shadowIdx  = -1;
+        float bestDistSq = FLT_MAX;
+        for (u32 i = 0; i < rawCount; ++i)
+        {
+            if (!spots[i].castsShadows) continue;
+            const float d2 = glm::dot(spots[i].position - scene.cameraPos,
+                                       spots[i].position - scene.cameraPos);
+            if (d2 < bestDistSq) { bestDistSq = d2; shadowIdx = static_cast<int>(i); }
+        }
+
+        // Build sorted pointer list: shadow-caster first, then the rest.
+        std::vector<const SpotLight*> sorted;
+        sorted.reserve(rawCount);
+        if (shadowIdx >= 0) sorted.push_back(&spots[shadowIdx]);
+        for (u32 i = 0; i < rawCount; ++i)
+            if (static_cast<int>(i) != shadowIdx)
+                sorted.push_back(&spots[i]);
+
+        // Build frame.sunViewProj from the shadow caster (sorted[0]), else fall back to sun.
+        if (shadowIdx >= 0)
+        {
+            const SpotLight& spot = *sorted[0];
+            const glm::vec3  pos  = spot.position;
+            const glm::vec3  dir  = glm::normalize(spot.direction);
+            const glm::vec3  up   = (std::abs(dir.y) > 0.99f)
+                                    ? glm::vec3(1.f, 0.f, 0.f)
+                                    : glm::vec3(0.f, 1.f, 0.f);
+            const glm::mat4 spotView = glm::lookAtLH(pos, pos + dir, up);
+            const glm::mat4 spotProj = glm::perspectiveLH_ZO(
+                                           spot.outerConeAngle * 2.0f, 1.0f, 0.5f, spot.range);
+            frame.sunViewProj = spotProj * spotView;
+        }
+        else
+        {
+            // Outdoor fallback: orthographic sun shadow.
+            const glm::vec3 lightDir = glm::normalize(scene.sunDirection);
+            const glm::vec3 up       = (std::abs(lightDir.y) > 0.99f)
+                                       ? glm::vec3(0.f, 0.f, 1.f)
+                                       : glm::vec3(0.f, 1.f, 0.f);
+            const glm::vec3 center(0.0f, 2.0f, 0.0f);
+            const glm::mat4 lightView = glm::lookAtLH(center + lightDir * 20.f, center, up);
+            const glm::mat4 lightProj = glm::orthoLH_ZO(-12.f, 12.f, -12.f, 12.f, 0.1f, 40.f);
+            frame.sunViewProj = lightProj * lightView;
+        }
+
+        // Upload: u32 count + 3×pad (16 bytes) + SpotLightGPU[].
+        const u32 uploadCount = std::min(static_cast<u32>(sorted.size()), kMaxSpotLights);
+        void* base = m_spotLightBuf->map();
+        std::memcpy(base, &uploadCount, sizeof(u32));
+        u32 pad3[3] = {};
+        std::memcpy(static_cast<char*>(base) + sizeof(u32), pad3, sizeof(pad3));
+        auto* gpuSpots = reinterpret_cast<SpotLightGPU*>(static_cast<char*>(base) + 16);
+        for (u32 i = 0; i < uploadCount; ++i)
+        {
+            const SpotLight& s   = *sorted[i];
+            const glm::vec3  dir = glm::normalize(s.direction);
+            gpuSpots[i].positionRange     = glm::vec4(s.position, s.range);
+            gpuSpots[i].directionOuterCos = glm::vec4(dir, std::cos(s.outerConeAngle));
+            gpuSpots[i].colorIntensity    = glm::vec4(s.color, s.intensity);
+            gpuSpots[i].innerCosAndPad    = glm::vec4(std::cos(s.innerConeAngle), 0.f, 0.f, 0.f);
+        }
+        m_spotLightBuf->unmap();
     }
 
-    // ── Mirror reflected view-projection (unjittered, matches the mirror RT) ─────────────
+    // ── Mirror reflected view-projection (unjittered, matches the mirror RT) ─────────────────────────
     frame.mirrorViewProj = !scene.mirrors.empty()
         ? (scene.mirrors[0].reflectedProj * scene.mirrors[0].reflectedView)
         : glm::mat4(1.0f);
-
-    // Upload spot light buffer
-    {
-        void* p = m_spotLightBuf->map();
-        std::memcpy(p, &spotGPU, sizeof(SpotLightGPU));
-        m_spotLightBuf->unmap();
-    }
 
     {
         void* p = m_frameConstBuf->map();
@@ -1461,7 +1493,8 @@ void FrameRenderer::renderFrame(IRenderDevice& device,
             enc->setBytes  (&fogConst, sizeof(fogConst), 1); // VolumetricFogConstants  buffer(1)
             enc->setBuffer (lightBuf,  0,     2);         // lightCount       buffer(2)
             enc->setBuffer (lightBuf, 16,     3);         // PointLightGPU[]  buffer(3)
-            enc->setBuffer (spotBuf,   0,     4);         // SpotLightGPU     buffer(4)
+            enc->setBuffer (spotBuf,   0,     4);         // spotCount        buffer(4)
+            enc->setBuffer (spotBuf,  16,     5);         // SpotLightGPU[]   buffer(5)
             enc->dispatch  (160, 90, 64);                 // 3D: one thread per froxel
         };
         m_graph.addComputePass(std::move(p));
@@ -1504,7 +1537,8 @@ void FrameRenderer::renderFrame(IRenderDevice& device,
             enc->setBuffer(frameBuf,  0, 0);
             enc->setBuffer(lightBuf,  0, 1);  // lightCount at offset 0
             enc->setBuffer(lightBuf, 16, 2);  // PointLightGPU[] at offset 16
-            enc->setBuffer(spotBuf,   0, 3);  // SpotLightGPU
+            enc->setBuffer(spotBuf,   0, 3);  // spotCount
+            enc->setBuffer(spotBuf,  16, 4);  // SpotLightGPU[]
             enc->dispatch(swapW, swapH, 1);
         };
         m_graph.addComputePass(std::move(p));
@@ -1575,8 +1609,9 @@ void FrameRenderer::renderFrame(IRenderDevice& device,
                                                      draw.material.uvOffset,
                                                      draw.material.uvScale };
                 enc->setFragmentBytes(&matConst, sizeof(MaterialConstantsGPU), 1);
-                // Fragment stage: spot light
-                enc->setFragmentBuffer(spotBuf, 0, 3);
+                // Fragment stage: spot lights
+                enc->setFragmentBuffer(spotBuf,  0, 3);  // spotCount
+                enc->setFragmentBuffer(spotBuf, 16, 4);  // SpotLightGPU[]
                 // Fragment stage: material textures (fallback if nullptr)
                 enc->setFragmentTexture(
                     draw.material.albedo    ? draw.material.albedo    : fallbackAlbedo,   0);
@@ -2261,7 +2296,8 @@ void FrameRenderer::renderMirrorPrepass(IRenderDevice& device,
                 enc->setBuffer(mFrameBuf, 0, 0);
                 enc->setBuffer(mLightBuf, 0, 1);     // lightCount at offset 0
                 enc->setBuffer(mLightBuf,16, 2);     // PointLightGPU[] at offset 16
-                enc->setBuffer(mSpotBuf,  0, 3);     // SpotLightGPU
+                enc->setBuffer(mSpotBuf,  0, 3);     // spotCount
+                enc->setBuffer(mSpotBuf, 16, 4);     // SpotLightGPU[]
                 enc->dispatch(rtW, rtH, 1);
             };
             m_mirrorGraph.addComputePass(std::move(p));

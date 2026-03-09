@@ -93,7 +93,8 @@ fragment float4 transparent_frag(
     sampler                        clampSamp   [[sampler(1)]],
     constant FrameConstants&       frame       [[buffer(0)]],
     constant MaterialConstants&    mat         [[buffer(1)]],
-    constant SpotLightGPU&         spotLight   [[buffer(3)]])
+    constant uint&                 spotCount   [[buffer(3)]],
+    constant SpotLightGPU*         spotLights  [[buffer(4)]])
 {
     // ─── Sprite sheet UV crop ────────────────────────────────────────────────
     const float2 uv = in.uv * mat.uvScale + mat.uvOffset;
@@ -112,42 +113,46 @@ fragment float4 transparent_frag(
     // ─── Ambient term ─────────────────────────────────────────────────────────
     const float3 ambient = frame.ambientColor.rgb * albedo;
 
-    // ─── Spot light contribution ──────────────────────────────────────────────
+    // ─── Spot lights ───────────────────────────────────────────────────────────
+    // All spots contribute; only index 0 (shadow-caster) uses the shadow map.
     float3 spotContrib = float3(0.0);
+    for (uint si = 0; si < spotCount; ++si)
     {
-        const float3 toLight  = spotLight.positionRange.xyz - in.worldPos;
-        const float3 L        = normalize(toLight);
-        const float  dist     = length(toLight);
-        const float  range    = spotLight.positionRange.w;
+        const SpotLightGPU spot = spotLights[si];
+        if (spot.colorIntensity.w <= 0.0f) continue;
 
-        // Inverse-square attenuation with smooth range cutoff.
+        const float3 toLight = spot.positionRange.xyz - in.worldPos;
+        const float3 L       = normalize(toLight);
+        const float  dist    = length(toLight);
+        const float  range   = spot.positionRange.w;
+
         const float attenuation =
             saturate(1.0 - (dist / range)) / (dist * dist + 1.0);
 
-        // Cone angle attenuation.
-        const float spotCos    = dot(-L, normalize(spotLight.directionOuterCos.xyz));
-        const float outerCos   = spotLight.directionOuterCos.w;
-        const float innerCos   = spotLight.innerCosAndPad.x;
-        const float coneAtten  = saturate((spotCos - outerCos) /
-                                          (innerCos - outerCos + 0.0001));
+        const float spotCos   = dot(-L, normalize(spot.directionOuterCos.xyz));
+        const float outerCos  = spot.directionOuterCos.w;
+        const float innerCos  = spot.innerCosAndPad.x;
+        const float coneAtten = saturate((spotCos - outerCos) /
+                                         (innerCos - outerCos + 0.0001));
 
-        // Shadow: reconstruct position in light clip space and bias-compare.
-        const float4 shadowClip   = frame.sunViewProj * float4(in.worldPos, 1.0);
-        const float3 shadowNDC    = shadowClip.xyz / shadowClip.w;
-        const float2 shadowUV     = shadowNDC.xy * float2(0.5, -0.5) + 0.5;
-        const float  surfaceDepth = shadowNDC.z;
-
+        // Shadow: only the first (shadow-casting) spotlight uses the shadow map.
         float shadow = 1.0;
-        if (all(shadowUV >= 0.0) && all(shadowUV <= 1.0))
+        if (si == 0)
         {
-            const float storedDepth = shadowTex.sample(clampSamp, shadowUV).r;
-            shadow = (surfaceDepth - 0.002 <= storedDepth) ? 1.0 : 0.0;
+            const float4 shadowClip   = frame.sunViewProj * float4(in.worldPos, 1.0);
+            const float3 shadowNDC    = shadowClip.xyz / shadowClip.w;
+            const float2 shadowUV     = shadowNDC.xy * float2(0.5, -0.5) + 0.5;
+            const float  surfaceDepth = shadowNDC.z;
+            if (all(shadowUV >= 0.0) && all(shadowUV <= 1.0))
+            {
+                const float storedDepth = shadowTex.sample(clampSamp, shadowUV).r;
+                shadow = (surfaceDepth - 0.002 <= storedDepth) ? 1.0 : 0.0;
+            }
         }
 
-        const float3 lightColor = spotLight.colorIntensity.rgb
-                                  * spotLight.colorIntensity.w;
-        spotContrib = cook_torrance(N, V, L, albedo, mat.roughness, mat.metalness)
-                    * lightColor * attenuation * coneAtten * shadow;
+        const float3 lightColor = spot.colorIntensity.rgb * spot.colorIntensity.w;
+        spotContrib += cook_torrance(N, V, L, albedo, mat.roughness, mat.metalness)
+                     * lightColor * attenuation * coneAtten * shadow;
     }
 
     // ─── Emissive (additive; self-illumination for sprites with NdotL ≈ 0) ──────
