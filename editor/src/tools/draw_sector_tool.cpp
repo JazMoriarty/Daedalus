@@ -82,10 +82,10 @@ bool DrawSectorTool::tryFinish(EditMapDocument& doc)
         return false;
     }
 
-    // Build the Sector.
+    // Build the Sector using the document's current defaults.
     world::Sector sector;
-    sector.floorHeight = 0.0f;
-    sector.ceilHeight  = 4.0f;
+    sector.floorHeight = doc.defaultFloorHeight();
+    sector.ceilHeight  = doc.defaultCeilHeight();
     for (const auto& v : m_vertices)
     {
         world::Wall wall;
@@ -94,6 +94,7 @@ bool DrawSectorTool::tryFinish(EditMapDocument& doc)
     }
 
     doc.pushCommand(std::make_unique<CmdDrawSector>(doc, std::move(sector)));
+    doc.appendSectorLayer();  // registers new sector on the active layer
     doc.log("Drew sector with " + std::to_string(m_vertices.size()) + " walls.");
 
     cancel();

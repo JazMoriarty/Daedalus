@@ -7,6 +7,8 @@
 
 #pragma once
 
+#include <glm/glm.hpp>
+
 namespace daedalus::editor
 {
 
@@ -48,6 +50,13 @@ public:
     virtual void onKey(EditMapDocument& /*doc*/,
                        int  /*keyCode*/,
                        bool /*pressed*/) {}
+
+    /// Drag-rectangle selection completed.  Both corners are in map XZ space
+    /// with minCorner guaranteed to have smaller x and y than maxCorner.
+    /// Default implementation is a no-op; SelectTool overrides this.
+    virtual void onRectSelect(EditMapDocument& /*doc*/,
+                              glm::vec2 /*minCorner*/,
+                              glm::vec2 /*maxCorner*/) {}
 
 protected:
     IEditorTool() = default;

@@ -1,0 +1,102 @@
+{
+    "active_layer": 0,
+    "entities": [],
+    "layers": [
+        {
+            "locked": false,
+            "name": "Default",
+            "visible": true
+        }
+    ],
+    "lights": [
+        {
+            "color": [
+                0.0,
+                0.028114216402173042,
+                0.3186274766921997
+            ],
+            "intensity": 2.0,
+            "position": [
+                10.0,
+                2.0,
+                20.0
+            ],
+            "radius": 10.0,
+            "type": 0
+        }
+    ],
+    "map_defaults": {
+        "ceil_height": 4.0,
+        "floor_height": 0.0,
+        "gravity": 9.8100004196167,
+        "sky_path": ""
+    },
+    "player_start": {
+        "position": [
+            10.850000381469727,
+            0.0,
+            11.649999618530273
+        ],
+        "yaw": 0.0
+    },
+    "prefabs": [],
+    "render_settings": {
+        "cg_enabled": false,
+        "cg_intensity": 1.0,
+        "cg_lut_path": "",
+        "dof_bokeh_radius": 8.0,
+        "dof_enabled": false,
+        "dof_far_trans": 3.0,
+        "dof_focus_dist": 5.0,
+        "dof_focus_range": 2.0,
+        "dof_near_trans": 1.0,
+        "fog_amb_b": 0.05999999865889549,
+        "fog_amb_g": 0.05000000074505806,
+        "fog_amb_r": 0.03999999910593033,
+        "fog_anisotropy": 0.30000001192092896,
+        "fog_density": 0.019999999552965164,
+        "fog_enabled": false,
+        "fog_far": 80.0,
+        "fog_near": 0.5,
+        "fog_scattering": 0.800000011920929,
+        "fx_ca_amount": 0.0,
+        "fx_enabled": false,
+        "fx_grain_amount": 0.03999999910593033,
+        "fx_vignette_intensity": 0.30000001192092896,
+        "fx_vignette_radius": 0.4000000059604645,
+        "mb_enabled": false,
+        "mb_num_samples": 8,
+        "mb_shutter_angle": 0.5,
+        "ssr_enabled": false,
+        "ssr_fade_start": 0.10000000149011612,
+        "ssr_max_dist": 20.0,
+        "ssr_max_steps": 64,
+        "ssr_roughness_cutoff": 0.6000000238418579,
+        "ssr_thickness": 0.15000000596046448,
+        "up_fxaa": true
+    },
+    "scene": {
+        "ambient_color": [
+            0.008866789750754833,
+            0.008866791613399982,
+            0.014705896377563477
+        ],
+        "ambient_intensity": 1.0,
+        "sun_color": [
+            1.0,
+            0.949999988079071,
+            0.800000011920929
+        ],
+        "sun_direction": [
+            0.3709999918937683,
+            0.9279999732971191,
+            0.27799999713897705
+        ],
+        "sun_intensity": 0.0
+    },
+    "sector_layers": [
+        0,
+        0
+    ],
+    "version": 3
+}

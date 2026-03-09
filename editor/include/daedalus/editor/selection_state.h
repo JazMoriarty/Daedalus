@@ -17,6 +17,9 @@ enum class SelectionType : unsigned
     Sector = 1,
     Wall   = 2,
     Vertex = 3,
+    Light       = 4,
+    Entity      = 5,  ///< An editor-placed EntityDef.
+    PlayerStart = 6,  ///< The map's player spawn point.
 };
 
 struct SelectionState
@@ -34,6 +37,12 @@ struct SelectionState
     world::SectorId vertexSectorId  = world::INVALID_SECTOR_ID;
     std::size_t     vertexWallIndex = 0;
 
+    /// For type == Light: index into EditMapDocument::lights().
+    std::size_t lightIndex = 0;
+
+    /// For type == Entity: index into EditMapDocument::entities().
+    std::size_t entityIndex = 0;
+
     void clear() noexcept
     {
         type            = SelectionType::None;
@@ -42,6 +51,8 @@ struct SelectionState
         wallIndex       = 0;
         vertexSectorId  = world::INVALID_SECTOR_ID;
         vertexWallIndex = 0;
+        lightIndex      = 0;
+        entityIndex     = 0;
     }
 
     [[nodiscard]] bool hasSelection() const noexcept
@@ -55,6 +66,16 @@ struct SelectionState
         for (auto sid : sectors)
             if (sid == id) return true;
         return false;
+    }
+
+    /// Select every sector in a map that has `sectorCount` sectors.
+    void selectAll(std::size_t sectorCount)
+    {
+        clear();
+        type = SelectionType::Sector;
+        sectors.reserve(sectorCount);
+        for (std::size_t i = 0; i < sectorCount; ++i)
+            sectors.push_back(static_cast<world::SectorId>(i));
     }
 };
 

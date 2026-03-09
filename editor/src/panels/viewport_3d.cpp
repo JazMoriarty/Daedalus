@@ -1,19 +1,34 @@
 #include "viewport_3d.h"
+#include "asset_browser_panel.h"
+#include "material_catalog.h"
 #include "daedalus/editor/edit_map_document.h"
+#include "daedalus/editor/render_settings_data.h"
+#include "daedalus/editor/light_def.h"
 #include "daedalus/world/map_data.h"
 #include "daedalus/world/sector_tessellator.h"
 #include "daedalus/render/i_asset_loader.h"
 #include "daedalus/render/vertex_types.h"
 #include "daedalus/render/rhi/rhi_types.h"
+#include "document/commands/cmd_move_entity.h"
+#include "document/commands/cmd_rotate_entity.h"
+#include "document/commands/cmd_scale_entity.h"
+#include "document/commands/cmd_set_wall_material.h"
+#include "document/commands/cmd_set_wall_uv.h"
+
+// stb_image (declaration only — implementation compiled once in asset_loader.cpp)
+#include "stb_image.h"
 
 #include "imgui.h"
 
+#include <SDL3/SDL.h>
 #include <glm/glm.hpp>
+#include <glm/gtc/constants.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 
 #include <algorithm>
 #include <cfloat>
 #include <cmath>
+#include <filesystem>
 #include <string>
 
 namespace daedalus::editor
@@ -46,7 +61,7 @@ void Viewport3D::ensureInit(rhi::IRenderDevice& device, unsigned w, unsigned h)
     }
 }
 
-// ─── retessellate ─────────────────────────────────────────────────────────────
+// ─── retessellate ─────────────────────────────────────────────────────
 
 void Viewport3D::retessellate(rhi::IRenderDevice& device,
                                const world::WorldMapData& map)
@@ -54,57 +69,431 @@ void Viewport3D::retessellate(rhi::IRenderDevice& device,
     m_vbos.clear();
     m_ibos.clear();
     m_draws.clear();
+    m_drawMaterialIds.clear();
+    m_mirrorCache.clear();
 
     if (map.sectors.empty()) return;
 
-    const auto meshes = world::tessellateMap(map);
-    const std::size_t n = meshes.size();
+    // Use per-material tagged tessellation so each draw call binds its texture.
+    const auto sectorBatches = world::tessellateMapTagged(map);
+    const std::size_t nSectors = sectorBatches.size();
 
-    m_vbos.resize(n);
-    m_ibos.resize(n);
-    m_draws.resize(n);
+    m_vbos.resize(nSectors);
+    m_ibos.resize(nSectors);
+    m_draws.resize(nSectors);
+    m_drawMaterialIds.resize(nSectors);
 
-    for (std::size_t i = 0; i < n; ++i)
+    for (std::size_t si = 0; si < nSectors; ++si)
     {
-        const render::MeshData& mesh = meshes[i];
-        if (mesh.vertices.empty()) continue;
+        const auto& batches = sectorBatches[si];
+        const std::size_t nb = batches.size();
 
+        m_vbos[si].resize(nb);
+        m_ibos[si].resize(nb);
+        m_draws[si].resize(nb);
+        m_drawMaterialIds[si].resize(nb);
+
+        for (std::size_t bi = 0; bi < nb; ++bi)
         {
-            rhi::BufferDescriptor d;
-            d.size      = mesh.vertices.size() * sizeof(render::StaticMeshVertex);
-            d.usage     = rhi::BufferUsage::Vertex;
-            d.initData  = mesh.vertices.data();
-            d.debugName = "EditorSectorVBO_" + std::to_string(i);
-            m_vbos[i]   = device.createBuffer(d);
+            const render::MeshData& mesh = batches[bi].mesh;
+            if (mesh.vertices.empty()) continue;
+
+            {
+                rhi::BufferDescriptor d;
+                d.size      = mesh.vertices.size() * sizeof(render::StaticMeshVertex);
+                d.usage     = rhi::BufferUsage::Vertex;
+                d.initData  = mesh.vertices.data();
+                d.debugName = "EditorSectorVBO_" + std::to_string(si)
+                              + "_" + std::to_string(bi);
+                m_vbos[si][bi] = device.createBuffer(d);
+            }
+            {
+                rhi::BufferDescriptor d;
+                d.size      = mesh.indices.size() * sizeof(unsigned);
+                d.usage     = rhi::BufferUsage::Index;
+                d.initData  = mesh.indices.data();
+                d.debugName = "EditorSectorIBO_" + std::to_string(si)
+                              + "_" + std::to_string(bi);
+                m_ibos[si][bi] = device.createBuffer(d);
+            }
+
+            render::MeshDraw& draw  = m_draws[si][bi];
+            draw.vertexBuffer       = m_vbos[si][bi].get();
+            draw.indexBuffer        = m_ibos[si][bi].get();
+            draw.indexCount         = static_cast<unsigned>(mesh.indices.size());
+            draw.modelMatrix        = glm::mat4(1.0f);
+            draw.prevModel          = glm::mat4(1.0f);
+            // Albedo filled in during draw() from the MaterialCatalog.
+
+            m_drawMaterialIds[si][bi] = batches[bi].materialId;
         }
+    }
+
+    // Rebuild world map for portal traversal.
+    m_worldMap = world::makeWorldMap(map);
+    if (!m_portalTraversal)
+        m_portalTraversal = world::makePortalTraversal();
+}
+
+// ─── reloadLutIfNeeded ───────────────────────────────────────────────────────
+
+void Viewport3D::reloadLutIfNeeded(render::IAssetLoader&  loader,
+                                    rhi::IRenderDevice&    device,
+                                    const std::string&     newPath)
+{
+    (void)loader;  // available for future IAssetLoader extensions
+
+    if (newPath == m_lutPath) return;  // path unchanged, nothing to do
+
+    m_lutPath    = newPath;
+    m_lutTexture = nullptr;  // drop the old texture
+
+    if (newPath.empty()) return;
+
+    // Load the PNG via stb_image (implementation lives in DaedalusRender).
+    // Expected format: 1024×32 RGBA8 strip — 32 horizontal 32×32 slices (one per
+    // blue channel value), stored in Z-major / G-row / R-column order so that
+    // the resulting 3D texture matches the renderer’s identity LUT layout.
+    int imgW = 0, imgH = 0, channels = 0;
+    stbi_uc* pixels = stbi_load(newPath.c_str(), &imgW, &imgH, &channels, 4);
+    if (!pixels)
+        return;  // file not found or decode error — identity LUT stays active
+
+    static constexpr int kLutSize = 32;
+    const bool validSize = (imgW == kLutSize * kLutSize) && (imgH == kLutSize);
+    if (!validSize)
+    {
+        stbi_image_free(pixels);
+        return;  // unrecognised layout — identity LUT stays active
+    }
+
+    // Repack from 1024×32 strip layout into Z×G×R linear order.
+    // Pixel at strip position (x, y) corresponds to (r=x%32, g=y, b=x/32).
+    const std::size_t kPixels = static_cast<std::size_t>(kLutSize * kLutSize * kLutSize);
+    std::vector<stbi_uc> lut3d(kPixels * 4u);
+
+    for (int b = 0; b < kLutSize; ++b)
+    for (int g = 0; g < kLutSize; ++g)
+    for (int r = 0; r < kLutSize; ++r)
+    {
+        const int   srcX   = b * kLutSize + r;
+        const int   srcY   = g;
+        const int   srcOff = (srcY * imgW + srcX) * 4;
+        const int   dstOff = (b * kLutSize * kLutSize + g * kLutSize + r) * 4;
+        lut3d[static_cast<std::size_t>(dstOff) + 0] = pixels[static_cast<std::size_t>(srcOff) + 0];
+        lut3d[static_cast<std::size_t>(dstOff) + 1] = pixels[static_cast<std::size_t>(srcOff) + 1];
+        lut3d[static_cast<std::size_t>(dstOff) + 2] = pixels[static_cast<std::size_t>(srcOff) + 2];
+        lut3d[static_cast<std::size_t>(dstOff) + 3] = pixels[static_cast<std::size_t>(srcOff) + 3];
+    }
+    stbi_image_free(pixels);
+
+    // Upload as a 32×32×32 3D texture (RGBA8Unorm, linear) for the CG shader.
+    rhi::TextureDescriptor d;
+    d.width     = static_cast<uint32_t>(kLutSize);
+    d.height    = static_cast<uint32_t>(kLutSize);
+    d.depth     = static_cast<uint32_t>(kLutSize);
+    d.format    = rhi::TextureFormat::RGBA8Unorm;
+    d.usage     = rhi::TextureUsage::ShaderRead;
+    d.initData  = lut3d.data();
+    d.debugName = std::filesystem::path(newPath).filename().string();
+    m_lutTexture = device.createTexture(d);
+}
+
+// ─── snapToPlayerStart ───────────────────────────────────────────────────────
+
+void Viewport3D::snapToPlayerStart(const PlayerStart& ps) noexcept
+{
+    constexpr float kEyeHeight = 1.75f;  // metres above player spawn Y
+    m_eye   = glm::vec3(ps.position.x,
+                        ps.position.y + kEyeHeight,
+                        ps.position.z);
+    m_yaw   = ps.yaw;
+    m_pitch = 0.0f;
+    // Update the orbit pivot to 5 units ahead along the new facing direction.
+    m_altFocus = m_eye + glm::vec3(std::sin(ps.yaw), 0.0f, std::cos(ps.yaw)) * 5.0f;
+}
+
+// ─── setGizmoMode ────────────────────────────────────────────────────────────
+
+void Viewport3D::setGizmoMode(GizmoMode mode) noexcept
+{
+    m_gizmoMode    = mode;
+    m_gizmoDragging = false;
+    m_gizmoDragAxis = -1;
+}
+
+// ─── drawGizmoAndHandleDrag ───────────────────────────────────────────────────
+
+void Viewport3D::drawGizmoAndHandleDrag(EditMapDocument&  doc,
+                                        const glm::mat4& view,
+                                        const glm::mat4& proj,
+                                        const ImVec2&    imageTopLeft,
+                                        unsigned         viewW,
+                                        unsigned         viewH)
+{
+    // Gizmos are suppressed during mouselook.
+    if (m_mouseCaptured) return;
+    if (m_gizmoMode == GizmoMode::None) return;
+
+    const SelectionState& sel = doc.selection();
+    if (sel.type != SelectionType::Entity) return;
+    const std::size_t idx = sel.entityIndex;
+    if (idx >= doc.entities().size()) return;
+
+    EntityDef& entity = doc.entities()[idx];
+
+    const float fw = static_cast<float>(viewW);
+    const float fh = static_cast<float>(viewH);
+
+    // Project world position to screen (image-relative).
+    auto project = [&](glm::vec3 world) -> ImVec2
+    {
+        glm::vec4 clip = proj * view * glm::vec4(world, 1.0f);
+        if (clip.w <= 0.0f) return ImVec2(-1e5f, -1e5f);
+        const float nx = clip.x / clip.w;
+        const float ny = clip.y / clip.w;
+        return ImVec2(
+            imageTopLeft.x + (nx * 0.5f + 0.5f) * fw,
+            imageTopLeft.y + (1.0f - (ny * 0.5f + 0.5f)) * fh);
+    };
+
+    // Compute a world arm-length so the gizmo appears ~60 px tall on screen.
+    const float eyeDist  = std::max(0.1f, glm::length(entity.position - m_eye));
+    const float tanHalf  = std::tan(glm::radians(30.0f)); // half of 60° fovY
+    const float armLen   = std::max(0.05f, (60.0f / fh) * 2.0f * eyeDist * tanHalf);
+
+    ImDrawList* dl  = ImGui::GetWindowDrawList();
+    const ImGuiIO& io = ImGui::GetIO();
+    const ImVec2 mousePos = io.MousePos;
+
+    // Euclidean distance between two ImVec2.
+    auto dist2 = [](ImVec2 a, ImVec2 b)
+    {
+        const float dx = a.x - b.x, dy = a.y - b.y;
+        return std::sqrt(dx * dx + dy * dy);
+    };
+
+    ImVec2 sp0 = project(entity.position);
+
+    // ─── Translate / Scale gizmos ─────────────────────────────────────────
+    if (m_gizmoMode == GizmoMode::Translate || m_gizmoMode == GizmoMode::Scale)
+    {
+        static const glm::vec3 kAxes[3]  = {{1,0,0},{0,1,0},{0,0,1}};
+        static const ImU32     kColors[3] = {
+            IM_COL32(230,  60,  60, 220),  // X – red
+            IM_COL32( 60, 210,  60, 220),  // Y – green
+            IM_COL32( 60, 100, 230, 220),  // Z – blue
+        };
+        constexpr float kHitRadius = 9.0f;
+
+        for (int a = 0; a < 3; ++a)
         {
-            rhi::BufferDescriptor d;
-            d.size      = mesh.indices.size() * sizeof(unsigned);
-            d.usage     = rhi::BufferUsage::Index;
-            d.initData  = mesh.indices.data();
-            d.debugName = "EditorSectorIBO_" + std::to_string(i);
-            m_ibos[i]   = device.createBuffer(d);
+            ImVec2 sp1 = project(entity.position + kAxes[a] * armLen);
+
+            // Highlight hovered / active axis.
+            const bool active  = m_gizmoDragging && m_gizmoDragAxis == a;
+            const bool hovered = !m_gizmoDragging && dist2(mousePos, sp1) < kHitRadius;
+            ImU32 col = (active || hovered)
+                ? IM_COL32(255, 255, 100, 255) : kColors[a];
+
+            dl->AddLine(sp0, sp1, col, 2.5f);
+            if (m_gizmoMode == GizmoMode::Translate)
+                dl->AddCircleFilled(sp1, 5.5f, col);
+            else
+                dl->AddRectFilled(
+                    ImVec2(sp1.x - 5.0f, sp1.y - 5.0f),
+                    ImVec2(sp1.x + 5.0f, sp1.y + 5.0f), col);
+
+            // Begin drag when mouse pressed over handle.
+            if (!m_gizmoDragging &&
+                ImGui::IsMouseClicked(ImGuiMouseButton_Left) &&
+                dist2(mousePos, sp1) < kHitRadius)
+            {
+                m_gizmoDragging       = true;
+                m_gizmoDragAxis       = a;
+                m_gizmoEntityOrigPos  = entity.position;
+                m_gizmoEntityOrigYaw  = entity.yaw;
+                m_gizmoEntityOrigScale= entity.scale;
+            }
         }
 
-        render::MeshDraw& draw = m_draws[i];
-        draw.vertexBuffer      = m_vbos[i].get();
-        draw.indexBuffer       = m_ibos[i].get();
-        draw.indexCount        = static_cast<unsigned>(mesh.indices.size());
-        draw.modelMatrix       = glm::mat4(1.0f);
-        draw.prevModel         = glm::mat4(1.0f);
-        // Null material pointers — FrameRenderer uses fallback white/flat-normal.
+        // Apply drag each frame.
+        if (m_gizmoDragging && m_gizmoDragAxis >= 0 &&
+            ImGui::IsMouseDown(ImGuiMouseButton_Left))
+        {
+            const glm::vec3 axisW = kAxes[m_gizmoDragAxis];
+            // Project a unit step along the axis to get the screen direction.
+            ImVec2 refSp0 = project(entity.position);
+            ImVec2 refSp1 = project(entity.position + axisW);
+            const float sdx = refSp1.x - refSp0.x;
+            const float sdy = refSp1.y - refSp0.y;
+            const float slen = std::sqrt(sdx * sdx + sdy * sdy);
+            if (slen > 0.5f)
+            {
+                const float proj1D =
+                    io.MouseDelta.x * (sdx / slen) +
+                    io.MouseDelta.y * (sdy / slen);
+                const float worldDelta = proj1D / slen; // slen px = 1 world unit
+
+                if (m_gizmoMode == GizmoMode::Translate)
+                    entity.position += axisW * worldDelta;
+                else
+                {
+                    entity.scale[m_gizmoDragAxis] += worldDelta;
+                    entity.scale[m_gizmoDragAxis] =
+                        std::max(entity.scale[m_gizmoDragAxis], 0.01f);
+                }
+                doc.markEntityDirty();
+            }
+        }
+        // End drag: push undo-able command.
+        else if (m_gizmoDragging && !ImGui::IsMouseDown(ImGuiMouseButton_Left))
+        {
+            m_gizmoDragging = false;
+            if (m_gizmoMode == GizmoMode::Translate &&
+                entity.position != m_gizmoEntityOrigPos)
+            {
+                doc.pushCommand(std::make_unique<CmdMoveEntity>(
+                    doc, idx, m_gizmoEntityOrigPos, entity.position));
+            }
+            else if (m_gizmoMode == GizmoMode::Scale &&
+                     entity.scale != m_gizmoEntityOrigScale)
+            {
+                doc.pushCommand(std::make_unique<CmdScaleEntity>(
+                    doc, idx, m_gizmoEntityOrigScale, entity.scale));
+            }
+        }
+    }
+
+    // ─── Rotate gizmo (yaw ring) ────────────────────────────────────────────
+    else if (m_gizmoMode == GizmoMode::Rotate)
+    {
+        constexpr float kRingR    = 42.0f;
+        constexpr float kHitWidth =  6.0f;
+        constexpr float kRotSens  =  0.02f;  // radians per screen pixel
+
+        const float dToCenter = dist2(mousePos, sp0);
+        const bool hovering = std::abs(dToCenter - kRingR) < kHitWidth;
+        const bool active   = m_gizmoDragging;
+        ImU32 col = (active || hovering)
+            ? IM_COL32(255, 200,  50, 255)
+            : IM_COL32(200, 200, 200, 200);
+
+        dl->AddCircle(sp0, kRingR, col, 64, 2.5f);
+
+        // Yaw tick line to show current orientation.
+        const float cosY = std::cos(entity.yaw), sinY = std::sin(entity.yaw);
+        // Project the +Z facing direction onto screen.
+        ImVec2 fwdScreen = project(entity.position + glm::vec3(sinY, 0.0f, cosY) * armLen);
+        dl->AddLine(sp0, fwdScreen, col, 2.0f);
+
+        if (!m_gizmoDragging &&
+            ImGui::IsMouseClicked(ImGuiMouseButton_Left) && hovering)
+        {
+            m_gizmoDragging       = true;
+            m_gizmoEntityOrigYaw  = entity.yaw;
+            m_gizmoEntityOrigPos  = entity.position;
+            m_gizmoEntityOrigScale= entity.scale;
+        }
+
+        if (m_gizmoDragging && ImGui::IsMouseDown(ImGuiMouseButton_Left))
+        {
+            entity.yaw += io.MouseDelta.x * kRotSens;
+            doc.markEntityDirty();
+        }
+        else if (m_gizmoDragging && !ImGui::IsMouseDown(ImGuiMouseButton_Left))
+        {
+            m_gizmoDragging = false;
+            if (entity.yaw != m_gizmoEntityOrigYaw)
+                doc.pushCommand(std::make_unique<CmdRotateEntity>(
+                    doc, idx, m_gizmoEntityOrigYaw, entity.yaw));
+        }
     }
 }
 
-// ─── draw ─────────────────────────────────────────────────────────────────────
+// ─── setMouseCapture ──────────────────────────────────────────────────────────
 
-void Viewport3D::draw(EditMapDocument&    doc,
-                       rhi::IRenderDevice& device,
-                       rhi::ICommandQueue& queue)
+void Viewport3D::setMouseCapture(SDL_Window* window, bool capture) noexcept
+{
+    m_mouseCaptured = capture;
+    (void)SDL_SetWindowRelativeMouseMode(window, capture);
+    if (capture)
+    {
+        // Drain accumulated relative motion so the camera doesn't jump on entry.
+        float dx = 0.0f, dy = 0.0f;
+        SDL_GetRelativeMouseState(&dx, &dy);
+    }
+    else
+    {
+        m_altDragging = false;
+    }
+}
+
+// ─── Ray picking helpers ──────────────────────────────────────────────────
+
+// Möller–Trumbore ray/triangle test.
+// outT receives the ray parameter on success.
+static bool rayTriangleIntersect(
+    const glm::vec3& orig, const glm::vec3& dir,
+    const glm::vec3& v0,   const glm::vec3& v1, const glm::vec3& v2,
+    float& outT) noexcept
+{
+    constexpr float kEps = 1e-8f;
+    const glm::vec3 edge1 = v1 - v0;
+    const glm::vec3 edge2 = v2 - v0;
+    const glm::vec3 h     = glm::cross(dir, edge2);
+    const float     det   = glm::dot(edge1, h);
+    if (std::abs(det) < kEps) return false;
+    const float     invDet = 1.0f / det;
+    const glm::vec3 s      = orig - v0;
+    const float     u      = glm::dot(s, h) * invDet;
+    if (u < 0.0f || u > 1.0f) return false;
+    const glm::vec3 q = glm::cross(s, edge1);
+    const float     v = glm::dot(dir, q) * invDet;
+    if (v < 0.0f || u + v > 1.0f) return false;
+    const float t = glm::dot(edge2, q) * invDet;
+    if (t < 0.0f) return false;
+    outT = t;
+    return true;
+}
+
+// Build a ray from a mouse position in image-space.
+// Uses near+far unprojection and returns the normalized direction.
+static glm::vec3 screenToWorldRay(
+    ImVec2 mousePos, ImVec2 imageTopLeft,
+    unsigned viewW, unsigned viewH,
+    const glm::vec3& eye,
+    const glm::mat4& view, const glm::mat4& proj) noexcept
+{
+    const float fw = static_cast<float>(viewW);
+    const float fh = static_cast<float>(viewH);
+    const float ndcX = (mousePos.x - imageTopLeft.x) / fw * 2.0f - 1.0f;
+    const float ndcY = 1.0f - (mousePos.y - imageTopLeft.y) / fh * 2.0f;
+
+    // Unproject near/far points (Z in [0,1] for LH_ZO projection).
+    const glm::mat4 invVP = glm::inverse(proj * view);
+    glm::vec4 nearW = invVP * glm::vec4(ndcX, ndcY, 0.0f, 1.0f);
+    glm::vec4 farW  = invVP * glm::vec4(ndcX, ndcY, 1.0f, 1.0f);
+    nearW /= nearW.w;
+    farW  /= farW.w;
+    return glm::normalize(glm::vec3(farW - nearW));
+}
+
+// ─── draw ─────────────────────────────────────────────────────────────────
+
+void Viewport3D::draw(EditMapDocument&      doc,
+                       render::IAssetLoader& loader,
+                       rhi::IRenderDevice&   device,
+                       rhi::ICommandQueue&   queue,
+                       MaterialCatalog&      catalog,
+                       AssetBrowserPanel&    assetBrowser)
 {
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
     ImGui::Begin("3D Viewport");
     ImGui::PopStyleVar();
+
+    // Cache for main.mm key handling (used next frame).
+    m_isHovered = ImGui::IsWindowHovered();
 
     const ImVec2 sz = ImGui::GetContentRegionAvail();
     const auto w = static_cast<unsigned>(sz.x > 8.0f ? sz.x : 8.0f);
@@ -119,80 +508,891 @@ void Viewport3D::draw(EditMapDocument&    doc,
         doc.clearGeometryDirty();
     }
 
-    // ── Orbit camera ──────────────────────────────────────────────────────────
-    // Compute map bounds to orbit around the map centre.
-    float centreX = 0.0f, centreZ = 0.0f;
-    if (!doc.mapData().sectors.empty())
+    // Rebuild entity GPU cache if entities changed.
+    if (doc.isEntityDirty())
     {
-        float minX =  FLT_MAX, maxX = -FLT_MAX;
-        float minZ =  FLT_MAX, maxZ = -FLT_MAX;
-        for (const auto& sector : doc.mapData().sectors)
+        m_entityCache.invalidate();
+        doc.clearEntityDirty();
+    }
+    m_entityCache.rebuild(loader, device, doc.entities(), doc);
+
+    // ── Free-fly camera ───────────────────────────────────────────────────────
+    const ImGuiIO& io = ImGui::GetIO();
+    const float dt = io.DeltaTime;
+
+    // Helper: build the forward unit vector from current yaw / pitch.
+    auto makeFwd = [&](float yaw, float pitch) -> glm::vec3
+    {
+        return {
+            std::sin(yaw)  * std::cos(pitch),
+            std::sin(pitch),
+            std::cos(yaw)  * std::cos(pitch)
+        };
+    };
+
+    glm::vec3 fwd   = makeFwd(m_yaw, m_pitch);
+    const glm::vec3 right = glm::normalize(glm::cross(glm::vec3(0.0f, 1.0f, 0.0f), fwd));
+
+    if (m_mouseCaptured)
+    {
+        // ── Fly mode: WASD + Q/E + mouselook ──────────────────────────────────
+        const bool* keys = SDL_GetKeyboardState(nullptr);
+        const bool  fast = keys[SDL_SCANCODE_LSHIFT] || keys[SDL_SCANCODE_RSHIFT];
+        const float spd  = (fast ? 5.0f : 1.0f) * 8.0f * dt;
+
+        if (keys[SDL_SCANCODE_W]) m_eye += fwd                          * spd;
+        if (keys[SDL_SCANCODE_S]) m_eye -= fwd                          * spd;
+        if (keys[SDL_SCANCODE_A]) m_eye -= right                        * spd;
+        if (keys[SDL_SCANCODE_D]) m_eye += right                        * spd;
+        if (keys[SDL_SCANCODE_Q]) m_eye -= glm::vec3(0.0f, 1.0f, 0.0f) * spd;
+        if (keys[SDL_SCANCODE_E]) m_eye += glm::vec3(0.0f, 1.0f, 0.0f) * spd;
+
+        // Mouselook via SDL relative-motion state (reset each call).
+        float mdx = 0.0f, mdy = 0.0f;
+        SDL_GetRelativeMouseState(&mdx, &mdy);
+        constexpr float kSens = 0.003f;
+        m_yaw   += mdx * kSens;
+        m_pitch -= mdy * kSens;
+        m_pitch  = std::clamp(m_pitch,
+                               -glm::pi<float>() * 0.45f,
+                                glm::pi<float>() * 0.45f);
+
+        // Recompute fwd after angle changes.
+        fwd = makeFwd(m_yaw, m_pitch);
+    }
+    else
+    {
+        // ── Navigation mode: Alt+LMB orbit + scroll dolly ─────────────────────
+        if (ImGui::IsWindowHovered())
         {
-            for (const auto& wall : sector.walls)
+            // Begin an orbit gesture when Alt+LMB is clicked inside the panel.
+            if (io.KeyAlt && ImGui::IsMouseClicked(ImGuiMouseButton_Left))
             {
-                minX = std::min(minX, wall.p0.x); maxX = std::max(maxX, wall.p0.x);
-                minZ = std::min(minZ, wall.p0.y); maxZ = std::max(maxZ, wall.p0.y);
+                m_altDragging = true;
+                // Pivot 10 units ahead (or closer to the map centre on F-frame).
+                m_altFocus = m_eye + fwd * 10.0f;
+            }
+
+            // Scroll: dolly forward/backward along view direction.
+            if (io.MouseWheel != 0.0f)
+                m_eye += fwd * io.MouseWheel * 0.5f;
+        }
+
+        // End orbit gesture when Alt or LMB is released.
+        if (!io.KeyAlt || !ImGui::IsMouseDown(ImGuiMouseButton_Left))
+            m_altDragging = false;
+
+        if (m_altDragging)
+        {
+            const float dist = std::max(0.1f, glm::length(m_eye - m_altFocus));
+            m_yaw   += io.MouseDelta.x * 0.008f;
+            m_pitch -= io.MouseDelta.y * 0.008f;
+            m_pitch  = std::clamp(m_pitch,
+                                   -glm::pi<float>() * 0.45f,
+                                    glm::pi<float>() * 0.45f);
+            // Swing the eye around the fixed pivot.
+            fwd   = makeFwd(m_yaw, m_pitch);
+            m_eye = m_altFocus - fwd * dist;
+        }
+
+        // P key — snap camera to player start (eye height + yaw); no fly-mode capture.
+        if (ImGui::IsWindowHovered() && ImGui::IsKeyPressed(ImGuiKey_P, /*repeat=*/false))
+        {
+            if (const auto& ps = doc.playerStart(); ps.has_value())
+                snapToPlayerStart(*ps);
+        }
+
+        // F key — frame the selected sectors (or all sectors if nothing selected).
+        if (ImGui::IsWindowHovered() && ImGui::IsKeyPressed(ImGuiKey_F, /*repeat=*/false))
+        {
+            const auto& sel     = doc.selection();
+            const auto& sectors = doc.mapData().sectors;
+
+            float minX = FLT_MAX, maxX = -FLT_MAX;
+            float minY = FLT_MAX, maxY = -FLT_MAX;
+            float minZ = FLT_MAX, maxZ = -FLT_MAX;
+
+            auto expandSector = [&](world::SectorId sid)
+            {
+                if (sid >= static_cast<world::SectorId>(sectors.size())) return;
+                const auto& s = sectors[sid];
+                minY = std::min(minY, s.floorHeight);
+                maxY = std::max(maxY, s.ceilHeight);
+                for (const auto& wl : s.walls)
+                {
+                    minX = std::min(minX, wl.p0.x); maxX = std::max(maxX, wl.p0.x);
+                    minZ = std::min(minZ, wl.p0.y); maxZ = std::max(maxZ, wl.p0.y);
+                }
+            };
+
+            if (sel.type == SelectionType::Sector && !sel.sectors.empty())
+            {
+                for (auto sid : sel.sectors)
+                    expandSector(sid);
+            }
+            else
+            {
+                for (std::size_t i = 0; i < sectors.size(); ++i)
+                    expandSector(static_cast<world::SectorId>(i));
+            }
+
+            if (minX < maxX)
+            {
+                const float cx     = (minX + maxX) * 0.5f;
+                const float cy     = (minY + maxY) * 0.5f;
+                const float cz     = (minZ + maxZ) * 0.5f;
+                const float radius = std::max({maxX - minX, maxY - minY, maxZ - minZ}) * 0.75f;
+
+                // Preserve current yaw; tilt down 30° to look at the selection.
+                m_pitch = glm::radians(-30.0f);
+                fwd     = makeFwd(m_yaw, m_pitch);
+                m_eye   = glm::vec3(cx, cy, cz) - fwd * std::max(2.0f, radius);
+                // Update pivot to the selection centre for the next orbit.
+                m_altFocus = glm::vec3(cx, cy, cz);
             }
         }
-        centreX = (minX + maxX) * 0.5f;
-        centreZ = (minZ + maxZ) * 0.5f;
-        m_orbitRadius = std::max(6.0f,
-                                  std::max(maxX - minX, maxZ - minZ) * 0.85f);
     }
 
-    m_orbitAngle += 0.006f;
-    const glm::vec3 eye{
-        centreX + std::cos(m_orbitAngle) * m_orbitRadius,
-        m_orbitHeight,
-        centreZ + std::sin(m_orbitAngle) * m_orbitRadius
-    };
-    const glm::vec3 target{centreX, 1.5f, centreZ};
-    const glm::vec3 up    {0.0f, 1.0f, 0.0f};
+    // ── Map AABB for fill light (computed once per frame) ─────────────────────
+    float fillX = m_eye.x, fillZ = m_eye.z;
+    if (!doc.mapData().sectors.empty())
+    {
+        float minX = FLT_MAX, maxX = -FLT_MAX;
+        float minZ = FLT_MAX, maxZ = -FLT_MAX;
+        for (const auto& sector : doc.mapData().sectors)
+            for (const auto& wl : sector.walls)
+            {
+                minX = std::min(minX, wl.p0.x); maxX = std::max(maxX, wl.p0.x);
+                minZ = std::min(minZ, wl.p0.y); maxZ = std::max(maxZ, wl.p0.y);
+            }
+        fillX = (minX + maxX) * 0.5f;
+        fillZ = (minZ + maxZ) * 0.5f;
+    }
 
+    // ── Build view / projection matrices ─────────────────────────────────────
+    const glm::vec3 target = m_eye + fwd;
     const float fovY   = glm::radians(60.0f);
     const float aspect = static_cast<float>(w) / static_cast<float>(h);
-    const glm::mat4 view = glm::lookAtLH(eye, target, up);
-    const glm::mat4 proj = glm::perspectiveLH_ZO(fovY, aspect, 0.1f, 200.0f);
+    const glm::mat4 view = glm::lookAtLH(m_eye, target, glm::vec3(0.0f, 1.0f, 0.0f));
+    const glm::mat4 proj = glm::perspectiveLH_ZO(fovY, aspect, 0.1f, 500.0f);
 
     // ── Build SceneView ───────────────────────────────────────────────────────
     render::SceneView scene;
-    scene.view      = view;
-    scene.proj      = proj;
-    scene.prevView  = (m_frameIdx == 0u) ? view : m_prevView;
-    scene.prevProj  = (m_frameIdx == 0u) ? proj : m_prevProj;
-    scene.cameraPos = eye;
-    scene.cameraDir = glm::normalize(target - eye);
+    scene.view       = view;
+    scene.proj       = proj;
+    scene.prevView   = (m_frameIdx == 0u) ? view : m_prevView;
+    scene.prevProj   = (m_frameIdx == 0u) ? proj : m_prevProj;
+    scene.cameraPos  = m_eye;
+    scene.cameraDir  = fwd;
     scene.frameIndex = m_frameIdx;
+    scene.deltaTime  = dt;
 
-    // Ambient + sun.
-    scene.sunDirection = glm::normalize(glm::vec3(0.4f, 1.0f, 0.3f));
-    scene.sunColor     = glm::vec3(1.0f, 0.95f, 0.8f);
-    scene.sunIntensity = 2.0f;
-    scene.ambientColor = glm::vec3(0.12f, 0.11f, 0.10f);
+    // Lighting from document SceneSettings.
+    const auto& ss      = doc.sceneSettings();
+    scene.sunDirection  = ss.sunDirection;
+    scene.sunColor      = ss.sunColor;
+    scene.sunIntensity  = ss.sunIntensity;
+    scene.ambientColor  = doc.mapData().globalAmbientColor
+                          * doc.mapData().globalAmbientIntensity;
 
-    // Fill light over the map centre.
+    // Fill point light centred above the map for overall visibility.
     scene.pointLights.push_back({
-        glm::vec3(centreX, std::max(4.0f, m_orbitHeight - 1.0f), centreZ),
-        std::max(15.0f, m_orbitRadius * 1.2f),
+        glm::vec3(fillX, 8.0f, fillZ),
+        20.0f,
         glm::vec3(1.0f, 0.94f, 0.82f),
         2.5f
     });
 
-    // Add the sector mesh draws.
-    for (const auto& draw : m_draws)
-        if (draw.vertexBuffer) scene.meshDraws.push_back(draw);
+    // Editor-placed lights from the document.
+    for (const auto& ld : doc.lights())
+    {
+        if (ld.type == LightType::Point)
+        {
+            scene.pointLights.push_back({
+                ld.position,
+                ld.radius,
+                ld.color,
+                ld.intensity
+            });
+        }
+        else if (ld.type == LightType::Spot)
+        {
+            scene.spotLights.push_back({
+                ld.position,
+                ld.direction,
+                ld.innerConeAngle,
+                ld.outerConeAngle,
+                ld.range,
+                ld.color,
+                ld.intensity
+            });
+        }
+    }
+
+    // ── Apply render settings ───────────────────────────────────────────────
+    {
+        const RenderSettingsData& r = doc.renderSettings();
+
+        // Volumetric fog
+        scene.fog.enabled    = r.fog.enabled;
+        scene.fog.density    = r.fog.density;
+        scene.fog.anisotropy = r.fog.anisotropy;
+        scene.fog.scattering = r.fog.scattering;
+        scene.fog.fogNear    = r.fog.fogNear;
+        scene.fog.fogFar     = r.fog.fogFar;
+        scene.fog.ambientFog = glm::vec3(r.fog.ambientFogR,
+                                         r.fog.ambientFogG,
+                                         r.fog.ambientFogB);
+
+        // Screen-space reflections
+        scene.ssr.enabled         = r.ssr.enabled;
+        scene.ssr.maxDistance     = r.ssr.maxDistance;
+        scene.ssr.thickness       = r.ssr.thickness;
+        scene.ssr.roughnessCutoff = r.ssr.roughnessCutoff;
+        scene.ssr.fadeStart       = r.ssr.fadeStart;
+        scene.ssr.maxSteps        = r.ssr.maxSteps;
+
+        // Depth of field
+        scene.dof.enabled        = r.dof.enabled;
+        scene.dof.focusDistance  = r.dof.focusDistance;
+        scene.dof.focusRange     = r.dof.focusRange;
+        scene.dof.bokehRadius    = r.dof.bokehRadius;
+        scene.dof.nearTransition = r.dof.nearTransition;
+        scene.dof.farTransition  = r.dof.farTransition;
+
+        // Motion blur
+        scene.motionBlur.enabled      = r.motionBlur.enabled;
+        scene.motionBlur.shutterAngle = r.motionBlur.shutterAngle;
+        scene.motionBlur.numSamples   = r.motionBlur.numSamples;
+
+        // Colour grading: load LUT on path change, bind to scene.
+        reloadLutIfNeeded(loader, device, r.colorGrading.lutPath);
+        scene.colorGrading.enabled    = r.colorGrading.enabled;
+        scene.colorGrading.intensity  = r.colorGrading.intensity;
+        scene.colorGrading.lutTexture = m_lutTexture.get();  // nullptr = identity LUT
+
+        // Optional FX
+        scene.optionalFx.enabled           = r.optionalFx.enabled;
+        scene.optionalFx.caAmount          = r.optionalFx.caAmount;
+        scene.optionalFx.vignetteIntensity = r.optionalFx.vignetteIntensity;
+        scene.optionalFx.vignetteRadius    = r.optionalFx.vignetteRadius;
+        scene.optionalFx.grainAmount       = r.optionalFx.grainAmount;
+
+        // Upscaling
+        scene.upscaling.mode = r.upscaling.fxaaEnabled
+            ? render::UpscalingMode::FXAA
+            : render::UpscalingMode::None;
+    }
+
+    // ── Refresh material albedo textures from catalog (lazy, each frame) ───────
+    for (std::size_t si = 0; si < m_draws.size(); ++si)
+        for (std::size_t bi = 0; bi < m_draws[si].size(); ++bi)
+        {
+            const UUID& uuid = m_drawMaterialIds[si][bi];
+            m_draws[si][bi].material.albedo = uuid.isValid()
+                ? catalog.getOrLoadTexture(uuid, device, loader)
+                : nullptr;
+        }
+
+    // ── Submit sector draws, filtered through portal traversal when possible ────
+    if (m_worldMap && !m_draws.empty())
+    {
+        const world::SectorId camSector =
+            m_worldMap->findSector(glm::vec2(m_eye.x, m_eye.z));
+
+        if (camSector != world::INVALID_SECTOR_ID && m_portalTraversal)
+        {
+            // Camera is inside a known sector: submit only the visible set.
+            const glm::mat4 viewProj = proj * view;
+            const auto visible =
+                m_portalTraversal->traverse(*m_worldMap, camSector, viewProj);
+
+            for (const auto& vs : visible)
+            {
+                const std::size_t si = static_cast<std::size_t>(vs.sectorId);
+                if (si < m_draws.size())
+                    for (const auto& draw : m_draws[si])
+                        if (draw.vertexBuffer) scene.meshDraws.push_back(draw);
+            }
+        }
+        else
+        {
+            // Camera outside map — fall back to submitting all sectors.
+            for (const auto& sectorDraws : m_draws)
+                for (const auto& draw : sectorDraws)
+                    if (draw.vertexBuffer) scene.meshDraws.push_back(draw);
+        }
+    }
+    else
+    {
+        // No world map yet (empty map) — submit all.
+        for (const auto& sectorDraws : m_draws)
+            for (const auto& draw : sectorDraws)
+                if (draw.vertexBuffer) scene.meshDraws.push_back(draw);
+    }
+
+    // ── Mirror surfaces ────────────────────────────────────────────────────────
+    // Snapshot sector draws first so reflectedDraws never contain mirror surfaces
+    // themselves (prevents feedback and matches the MirrorDraw contract in scene_view.h).
+    {
+        const std::vector<render::MeshDraw> sectorSnapshot = scene.meshDraws;
+        const auto& sectors = doc.mapData().sectors;
+
+        for (std::size_t si = 0; si < sectors.size(); ++si)
+        {
+            const world::Sector& sector = sectors[si];
+            const std::size_t    n      = sector.walls.size();
+
+            for (std::size_t wi = 0; wi < n; ++wi)
+            {
+                const world::Wall& wall = sector.walls[wi];
+                if (!world::hasFlag(wall.flags, world::WallFlags::Mirror)) continue;
+
+                // Wall tangent and inward normal (matches appendWallQuad convention).
+                const glm::vec2 p0     = wall.p0;
+                const glm::vec2 p1     = sector.walls[(wi + 1) % n].p0;
+                const float     dx     = p1.x - p0.x;
+                const float     dz     = p1.y - p0.y;
+                const float     len    = std::sqrt(dx * dx + dz * dz);
+                if (len < 1e-6f) continue;
+                const float invLen = 1.0f / len;
+                const float wallTx = dx * invLen;  // tangent X
+                const float wallTz = dz * invLen;  // tangent Z
+                const float nx     = -wallTz;       // inward normal X
+                const float nz     =  wallTx;       // inward normal Z
+
+                // Find or lazily create the MirrorEntry for this wall.
+                MirrorEntry* entry = nullptr;
+                for (auto& e : m_mirrorCache)
+                    if (e.sectorId == static_cast<world::SectorId>(si) && e.wallIdx == wi)
+                    { entry = &e; break; }
+
+                if (!entry)
+                {
+                    MirrorEntry newEntry;
+                    newEntry.sectorId = static_cast<world::SectorId>(si);
+                    newEntry.wallIdx  = wi;
+
+                    // 512×512 BGRA8Unorm render target.
+                    {
+                        rhi::TextureDescriptor td;
+                        td.width     = 512u;
+                        td.height    = 512u;
+                        td.format    = rhi::TextureFormat::BGRA8Unorm;
+                        td.usage     = rhi::TextureUsage::RenderTarget |
+                                       rhi::TextureUsage::ShaderRead;
+                        td.debugName = "Mirror_" + std::to_string(si) +
+                                       "_" + std::to_string(wi);
+                        newEntry.renderTarget = device.createTexture(td);
+                    }
+
+                    // Quad: p0-floor, p1-floor, p1-ceil, p0-ceil.
+                    // Winding matches appendWallQuad: {0,2,1}, {0,3,2}.
+                    const float yFloor = sector.floorHeight;
+                    const float yCeil  = sector.ceilHeight;
+                    render::StaticMeshVertex verts[4];
+                    verts[0] = {{ p0.x, yFloor, p0.y }, { nx, 0.0f, nz }, { 0.0f, 1.0f }, { wallTx, 0.0f, wallTz, 1.0f }};
+                    verts[1] = {{ p1.x, yFloor, p1.y }, { nx, 0.0f, nz }, { 1.0f, 1.0f }, { wallTx, 0.0f, wallTz, 1.0f }};
+                    verts[2] = {{ p1.x, yCeil,  p1.y }, { nx, 0.0f, nz }, { 1.0f, 0.0f }, { wallTx, 0.0f, wallTz, 1.0f }};
+                    verts[3] = {{ p0.x, yCeil,  p0.y }, { nx, 0.0f, nz }, { 0.0f, 0.0f }, { wallTx, 0.0f, wallTz, 1.0f }};
+                    const unsigned indices[6] = { 0u, 2u, 1u, 0u, 3u, 2u };
+
+                    {
+                        rhi::BufferDescriptor bd;
+                        bd.size      = sizeof(verts);
+                        bd.usage     = rhi::BufferUsage::Vertex;
+                        bd.initData  = verts;
+                        bd.debugName = "MirrorVBO_" + std::to_string(si) +
+                                       "_" + std::to_string(wi);
+                        newEntry.vbo = device.createBuffer(bd);
+                    }
+                    {
+                        rhi::BufferDescriptor bd;
+                        bd.size      = sizeof(indices);
+                        bd.usage     = rhi::BufferUsage::Index;
+                        bd.initData  = indices;
+                        bd.debugName = "MirrorIBO_" + std::to_string(si) +
+                                       "_" + std::to_string(wi);
+                        newEntry.ibo = device.createBuffer(bd);
+                    }
+
+                    m_mirrorCache.push_back(std::move(newEntry));
+                    entry = &m_mirrorCache.back();
+                }
+
+                if (!entry->renderTarget || !entry->vbo || !entry->ibo) continue;
+
+                // Reflect m_eye and fwd across the mirror plane.
+                const glm::vec3 mirrorN(nx, 0.0f, nz);
+                const glm::vec3 wallMid(
+                    (p0.x + p1.x) * 0.5f,
+                    (sector.floorHeight + sector.ceilHeight) * 0.5f,
+                    (p0.y + p1.y) * 0.5f);
+                const float     mirrorD  = glm::dot(mirrorN, wallMid);
+                const float     eyeDist  = glm::dot(mirrorN, m_eye) - mirrorD;
+                const glm::vec3 reflEye  = m_eye - 2.0f * eyeDist * mirrorN;
+                const glm::vec3 reflFwd  = fwd   - 2.0f * glm::dot(mirrorN, fwd) * mirrorN;
+                const glm::mat4 reflView = glm::lookAtLH(
+                    reflEye, reflEye + reflFwd, glm::vec3(0.0f, 1.0f, 0.0f));
+
+                // Populate MirrorDraw.
+                render::MirrorDraw md;
+                md.renderTarget   = entry->renderTarget.get();
+                md.rtWidth        = 512u;
+                md.rtHeight       = 512u;
+                md.reflectedView  = reflView;
+                md.reflectedProj  = proj;
+                md.reflectedDraws = sectorSnapshot;
+                scene.mirrors.push_back(std::move(md));
+
+                // Mirror surface draw (isMirrorSurface + albedo = render target).
+                render::MeshDraw surfDraw;
+                surfDraw.vertexBuffer          = entry->vbo.get();
+                surfDraw.indexBuffer           = entry->ibo.get();
+                surfDraw.indexCount            = 6u;
+                surfDraw.modelMatrix           = glm::mat4(1.0f);
+                surfDraw.prevModel             = glm::mat4(1.0f);
+                surfDraw.material.isMirrorSurface = true;
+                surfDraw.material.albedo          = entry->renderTarget.get();
+                surfDraw.material.roughness        = 0.0f;
+                scene.meshDraws.push_back(std::move(surfDraw));
+            }
+        }
+    }
+
+    // Entities.
+    m_entityCache.populateSceneView(scene, doc.entities(), view);
+    render::sortTransparentDraws(scene);
 
     // ── Render ────────────────────────────────────────────────────────────────
     m_renderer.renderFrame(device, queue, *m_offscreenSwap, scene, w, h);
 
-    // ── Display ───────────────────────────────────────────────────────────────
-    // The offscreen texture is now filled (CB committed to queue).
-    // ImGui's CB will execute after it, so sampling is safe.
+    // ── Display ─────────────────────────────────────────────────────────────
     rhi::ITexture* tex = m_offscreenSwap->nextDrawable();
+    const ImVec2 imageTopLeft = ImGui::GetCursorScreenPos();
     ImGui::Image(reinterpret_cast<ImTextureID>(tex->nativeHandle()),
                  ImVec2(static_cast<float>(w), static_cast<float>(h)));
 
-    // ── Bookkeeping ───────────────────────────────────────────────────────────
+    // Overlay: show a hint when mouse is captured.
+    if (m_mouseCaptured)
+    {
+        ImGui::SetCursorPos(ImVec2(8.0f, 8.0f));
+        ImGui::TextDisabled("[Tab] release cursor   WASD = move   Q/E = up/down   Shift = fast");
+    }
+    else
+    {
+        ImGui::SetCursorPos(ImVec2(8.0f, 8.0f));
+        ImGui::TextDisabled("[Tab] capture   Alt+drag = orbit   Scroll = dolly   F = frame   P = player   M = pick material");
+    }
+
+    // ── Wall / floor / ceiling hover ray + click selection ─────────────────────
+    const ImGuiIO& io3d = ImGui::GetIO();
+    if (!m_mouseCaptured && ImGui::IsWindowHovered(ImGuiHoveredFlags_None))
+    {
+        const ImVec2 mp = io3d.MousePos;
+        const float fw = static_cast<float>(w);
+        const float fh = static_cast<float>(h);
+        const bool inImage = mp.x >= imageTopLeft.x && mp.y >= imageTopLeft.y
+                          && mp.x < imageTopLeft.x + fw
+                          && mp.y < imageTopLeft.y + fh;
+
+        if (inImage)
+        {
+            const glm::vec3 rayDir = screenToWorldRay(
+                mp, imageTopLeft, w, h, m_eye, view, proj);
+            const auto& sectors = doc.mapData().sectors;
+
+            float           closestT   = FLT_MAX;
+            world::SectorId hitSector  = world::INVALID_SECTOR_ID;
+            std::size_t     hitWall    = 0;
+            HoveredSurface  hitSurface = HoveredSurface::None;
+
+            // ── Solid wall triangles ────────────────────────────────────────────
+            for (std::size_t si = 0; si < sectors.size(); ++si)
+            {
+                const world::Sector& sec = sectors[si];
+                const std::size_t    ns  = sec.walls.size();
+                for (std::size_t wi = 0; wi < ns; ++wi)
+                {
+                    const world::Wall& wall = sec.walls[wi];
+                    if (wall.portalSectorId != world::INVALID_SECTOR_ID) continue;
+
+                    const glm::vec2 p0 = wall.p0;
+                    const glm::vec2 p1 = sec.walls[(wi + 1) % ns].p0;
+                    const glm::vec3 bl = {p0.x, sec.floorHeight, p0.y};
+                    const glm::vec3 br = {p1.x, sec.floorHeight, p1.y};
+                    const glm::vec3 tr = {p1.x, sec.ceilHeight,  p1.y};
+                    const glm::vec3 tl = {p0.x, sec.ceilHeight,  p0.y};
+
+                    float t;
+                    if (rayTriangleIntersect(m_eye, rayDir, bl, tr, br, t) && t < closestT)
+                    { closestT = t; hitSector = static_cast<world::SectorId>(si); hitWall = wi; hitSurface = HoveredSurface::Wall; }
+                    if (rayTriangleIntersect(m_eye, rayDir, bl, tl, tr, t) && t < closestT)
+                    { closestT = t; hitSector = static_cast<world::SectorId>(si); hitWall = wi; hitSurface = HoveredSurface::Wall; }
+                }
+            }
+
+            // ── Floor and ceiling (horizontal plane + point-in-sector) ─────────────
+            // 2-D ray-casting point-in-polygon (XZ plane).
+            auto pointInSector = [](const world::Sector& sec, glm::vec2 pt) -> bool
+            {
+                const std::size_t n = sec.walls.size();
+                int crossings = 0;
+                for (std::size_t i = 0; i < n; ++i)
+                {
+                    const glm::vec2 a = sec.walls[i].p0;
+                    const glm::vec2 b = sec.walls[(i + 1) % n].p0;
+                    if ((a.y <= pt.y) != (b.y <= pt.y))
+                        if (pt.x < a.x + (pt.y - a.y) / (b.y - a.y) * (b.x - a.x))
+                            ++crossings;
+                }
+                return (crossings & 1) != 0;
+            };
+
+            constexpr float kMinT = 1e-3f;
+            if (std::abs(rayDir.y) > kMinT)
+            {
+                for (std::size_t si = 0; si < sectors.size(); ++si)
+                {
+                    const world::Sector& sec = sectors[si];
+
+                    const float tFloor = (sec.floorHeight - m_eye.y) / rayDir.y;
+                    if (tFloor > kMinT && tFloor < closestT)
+                    {
+                        const glm::vec2 xz(m_eye.x + tFloor * rayDir.x,
+                                           m_eye.z + tFloor * rayDir.z);
+                        if (pointInSector(sec, xz))
+                        { closestT = tFloor; hitSector = static_cast<world::SectorId>(si);
+                          hitSurface = HoveredSurface::Floor; }
+                    }
+
+                    const float tCeil = (sec.ceilHeight - m_eye.y) / rayDir.y;
+                    if (tCeil > kMinT && tCeil < closestT)
+                    {
+                        const glm::vec2 xz(m_eye.x + tCeil * rayDir.x,
+                                           m_eye.z + tCeil * rayDir.z);
+                        if (pointInSector(sec, xz))
+                        { closestT = tCeil; hitSector = static_cast<world::SectorId>(si);
+                          hitSurface = HoveredSurface::Ceil; }
+                    }
+                }
+            }
+
+            m_hoveredSectorId = hitSector;
+            m_hoveredWallIdx  = hitWall;
+            m_hoveredSurface  = hitSurface;
+
+            // Left-click: select hovered surface, or deselect if already selected.
+            if (ImGui::IsMouseClicked(ImGuiMouseButton_Left) && !io3d.KeyAlt)
+            {
+                SelectionState& sel = doc.selection();
+                if (hitSector != world::INVALID_SECTOR_ID)
+                {
+                    if (hitSurface == HoveredSurface::Wall)
+                    {
+                        // Toggle: clicking the same wall deselects it.
+                        if (sel.type == SelectionType::Wall &&
+                            sel.wallSectorId == hitSector && sel.wallIndex == hitWall)
+                            sel.clear();
+                        else
+                        {
+                            sel.type         = SelectionType::Wall;
+                            sel.wallSectorId = hitSector;
+                            sel.wallIndex    = hitWall;
+                        }
+                    }
+                    else
+                    {
+                        // Floor or ceiling: select/deselect the owning sector.
+                        if (sel.type == SelectionType::Sector &&
+                            !sel.sectors.empty() && sel.sectors[0] == hitSector &&
+                            m_selectedSurface == hitSurface)
+                            sel.clear();
+                        else
+                        {
+                            sel.type          = SelectionType::Sector;
+                            sel.sectors       = {hitSector};
+                            m_selectedSurface = hitSurface;
+                        }
+                    }
+                }
+            }
+        }
+        else
+        {
+            m_hoveredSectorId = world::INVALID_SECTOR_ID;
+            m_hoveredSurface  = HoveredSurface::None;
+        }
+    }
+    else if (m_mouseCaptured)
+    {
+        m_hoveredSectorId = world::INVALID_SECTOR_ID;
+        m_hoveredSurface  = HoveredSurface::None;
+    }
+
+    // ── Wall outline overlay ────────────────────────────────────────────────────────────
+    {
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        const float fw = static_cast<float>(w);
+        const float fh = static_cast<float>(h);
+        const auto& sectors = doc.mapData().sectors;
+        const glm::mat4 VP   = proj * view;
+        constexpr float kNearEps = 1e-4f;
+
+        // Project a clip-space point to ImGui screen space.
+        auto projClip = [&](const glm::vec4& c) -> ImVec2
+        {
+            return ImVec2(
+                imageTopLeft.x + (c.x / c.w * 0.5f + 0.5f) * fw,
+                imageTopLeft.y + (1.0f - (c.y / c.w * 0.5f + 0.5f)) * fh);
+        };
+
+        // Draw the boundary edges of a sector polygon at a given Y height.
+        // Uses Sutherland-Hodgman near-plane clipping on the full polygon so the
+        // near-plane cap edge is generated when multiple vertices are behind the camera.
+        auto drawSectorOutline = [&](world::SectorId sid, float y, ImU32 lineCol)
+        {
+            if (sid >= static_cast<world::SectorId>(sectors.size())) return;
+            const world::Sector& sec = sectors[sid];
+            const std::size_t ns = sec.walls.size();
+            if (ns < 2) return;
+
+            // Build clip-space polygon.
+            std::vector<glm::vec4> in(ns);
+            for (std::size_t i = 0; i < ns; ++i)
+                in[i] = VP * glm::vec4(sec.walls[i].p0.x, y, sec.walls[i].p0.y, 1.0f);
+
+            // Sutherland-Hodgman clip against near plane (w > kNearEps).
+            std::vector<glm::vec4> poly;
+            poly.reserve(ns + 1);
+            for (std::size_t i = 0; i < ns; ++i)
+            {
+                const glm::vec4& cur  = in[i];
+                const glm::vec4& next = in[(i + 1) % ns];
+                const bool curIn  = cur.w  > kNearEps;
+                const bool nextIn = next.w > kNearEps;
+                if (curIn)
+                    poly.push_back(cur);
+                if (curIn != nextIn)
+                {
+                    const float t = (kNearEps - cur.w) / (next.w - cur.w);
+                    poly.push_back(glm::mix(cur, next, t));
+                }
+            }
+            if (poly.size() < 2) return;
+
+            for (std::size_t i = 0; i < poly.size(); ++i)
+                dl->AddLine(projClip(poly[i]), projClip(poly[(i + 1) % poly.size()]),
+                            lineCol, 2.0f);
+        };
+
+        // Draw a wall quad outline using Sutherland-Hodgman near-plane clipping.
+        // Clips all 4 corners as a polygon so the near-plane "cap" edge is always
+        // drawn even when multiple corners are behind the camera.
+        auto drawWallOutline = [&](world::SectorId sid, std::size_t wi,
+                                   ImU32 fillCol, ImU32 lineCol)
+        {
+            if (sid >= static_cast<world::SectorId>(sectors.size())) return;
+            const world::Sector& sec = sectors[sid];
+            const std::size_t    ns  = sec.walls.size();
+            if (wi >= ns) return;
+            const glm::vec2 p0 = sec.walls[wi].p0;
+            const glm::vec2 p1 = sec.walls[(wi + 1) % ns].p0;
+
+            // Clip-space corners: bl, br, tr, tl (CCW order).
+            const glm::vec4 in[4] = {
+                VP * glm::vec4(p0.x, sec.floorHeight, p0.y, 1.0f),
+                VP * glm::vec4(p1.x, sec.floorHeight, p1.y, 1.0f),
+                VP * glm::vec4(p1.x, sec.ceilHeight,  p1.y, 1.0f),
+                VP * glm::vec4(p0.x, sec.ceilHeight,  p0.y, 1.0f),
+            };
+
+            // Sutherland-Hodgman clip against w > kNearEps (near plane).
+            // A quad can yield at most 5 vertices after one half-plane clip.
+            glm::vec4 poly[5];
+            int n = 0;
+            for (int i = 0; i < 4; ++i)
+            {
+                const glm::vec4& cur  = in[i];
+                const glm::vec4& next = in[(i + 1) % 4];
+                const bool curIn  = cur.w  > kNearEps;
+                const bool nextIn = next.w > kNearEps;
+                if (curIn)
+                    poly[n++] = cur;
+                if (curIn != nextIn)
+                {
+                    const float t = (kNearEps - cur.w) / (next.w - cur.w);
+                    poly[n++] = glm::mix(cur, next, t);
+                }
+            }
+            if (n < 2) return;
+
+            // Draw outline edges.
+            for (int i = 0; i < n; ++i)
+                dl->AddLine(projClip(poly[i]), projClip(poly[(i + 1) % n]),
+                            lineCol, 2.0f);
+
+            // Fill: fan triangulation from poly[0].
+            if (fillCol & IM_COL32(0, 0, 0, 255))
+                for (int i = 1; i + 1 < n; ++i)
+                    dl->AddTriangleFilled(projClip(poly[0]),
+                                         projClip(poly[i]),
+                                         projClip(poly[i + 1]), fillCol);
+        };
+
+        // Hover outlines.
+        if (m_hoveredSectorId != world::INVALID_SECTOR_ID)
+        {
+            if (m_hoveredSurface == HoveredSurface::Wall)
+                drawWallOutline(m_hoveredSectorId, m_hoveredWallIdx,
+                                0, IM_COL32(255, 255, 255, 200));
+            else if (m_hoveredSurface == HoveredSurface::Floor)
+                drawSectorOutline(m_hoveredSectorId,
+                                  sectors[m_hoveredSectorId].floorHeight,
+                                  IM_COL32(255, 255, 255, 200));
+            else if (m_hoveredSurface == HoveredSurface::Ceil)
+                drawSectorOutline(m_hoveredSectorId,
+                                  sectors[m_hoveredSectorId].ceilHeight,
+                                  IM_COL32(255, 255, 255, 200));
+        }
+
+        // Selection outlines.
+        const SelectionState& sel2 = doc.selection();
+        if (sel2.type == SelectionType::Wall &&
+            sel2.wallSectorId != world::INVALID_SECTOR_ID)
+        {
+            drawWallOutline(sel2.wallSectorId, sel2.wallIndex,
+                            IM_COL32(255, 200, 0, 45),
+                            IM_COL32(255, 200, 0, 220));
+        }
+        else if (sel2.type == SelectionType::Sector && !sel2.sectors.empty())
+        {
+            const world::SectorId sid = sel2.sectors[0];
+            if (sid < static_cast<world::SectorId>(sectors.size()))
+            {
+                const float selY = (m_selectedSurface == HoveredSurface::Ceil)
+                    ? sectors[sid].ceilHeight
+                    : sectors[sid].floorHeight;
+                drawSectorOutline(sid, selY, IM_COL32(255, 200, 0, 220));
+            }
+        }
+    }
+
+    // ── M key: open in-viewport material picker popup ────────────────────────
+    if (!m_mouseCaptured && ImGui::IsWindowHovered(ImGuiHoveredFlags_None))
+    {
+        const SelectionState& selM = doc.selection();
+        if (ImGui::IsKeyPressed(ImGuiKey_M, /*repeat=*/false) &&
+            selM.type == SelectionType::Wall)
+        {
+            // Capture the selected wall at open-time so the callback is stable.
+            const world::SectorId capSid = selM.wallSectorId;
+            const std::size_t     capWi  = selM.wallIndex;
+            assetBrowser.openPicker(
+                [&doc, capSid, capWi](const UUID& uuid)
+                {
+                    doc.pushCommand(std::make_unique<CmdSetWallMaterial>(
+                        doc, capSid, capWi, WallSurface::Front, uuid));
+                });
+        }
+    }
+
+    // ── UV keyboard shortcuts ──────────────────────────────────────────────────
+    // Active when the 3D viewport is hovered, not in mouselook, and a wall is
+    // selected.  A single press applies a discrete change and pushes an undo entry.
+    if (!m_mouseCaptured && ImGui::IsWindowHovered(ImGuiHoveredFlags_None) &&
+        !ImGui::GetIO().WantCaptureKeyboard)
+    {
+        const SelectionState& selUV = doc.selection();
+        if (selUV.type == SelectionType::Wall)
+        {
+            const world::SectorId uvSid = selUV.wallSectorId;
+            const std::size_t     uvWi  = selUV.wallIndex;
+            auto& uvSectors = doc.mapData().sectors;
+
+            if (uvSid < static_cast<world::SectorId>(uvSectors.size()) &&
+                uvWi  < uvSectors[uvSid].walls.size())
+            {
+                world::Wall& uvWall = uvSectors[uvSid].walls[uvWi];
+
+                // Helper: push a CmdSetWallUV with new values (constructor reads
+                // the CURRENT wall as "old", so call it before modifying the wall).
+                auto pushUV = [&](glm::vec2 newOff, glm::vec2 newSc, float newRot)
+                {
+                    doc.pushCommand(std::make_unique<CmdSetWallUV>(
+                        doc, uvSid, uvWi, newOff, newSc, newRot));
+                };
+
+                constexpr float kNudge    = 0.1f;
+                constexpr float kScale    = 0.1f;
+                constexpr float kRotDeg   = glm::pi<float>() / 12.0f;  // 15°
+
+                // Arrow keys: nudge offset.
+                if (ImGui::IsKeyPressed(ImGuiKey_UpArrow))
+                    pushUV({uvWall.uvOffset.x, uvWall.uvOffset.y + kNudge},
+                           uvWall.uvScale, uvWall.uvRotation);
+                if (ImGui::IsKeyPressed(ImGuiKey_DownArrow))
+                    pushUV({uvWall.uvOffset.x, uvWall.uvOffset.y - kNudge},
+                           uvWall.uvScale, uvWall.uvRotation);
+                if (ImGui::IsKeyPressed(ImGuiKey_LeftArrow))
+                    pushUV({uvWall.uvOffset.x - kNudge, uvWall.uvOffset.y},
+                           uvWall.uvScale, uvWall.uvRotation);
+                if (ImGui::IsKeyPressed(ImGuiKey_RightArrow))
+                    pushUV({uvWall.uvOffset.x + kNudge, uvWall.uvOffset.y},
+                           uvWall.uvScale, uvWall.uvRotation);
+
+                // [ / ] — scale U.
+                if (ImGui::IsKeyPressed(ImGuiKey_LeftBracket))
+                    pushUV(uvWall.uvOffset,
+                           {std::max(0.01f, uvWall.uvScale.x - kScale), uvWall.uvScale.y},
+                           uvWall.uvRotation);
+                if (ImGui::IsKeyPressed(ImGuiKey_RightBracket))
+                    pushUV(uvWall.uvOffset,
+                           {uvWall.uvScale.x + kScale, uvWall.uvScale.y},
+                           uvWall.uvRotation);
+
+                // , / . — scale V.
+                if (ImGui::IsKeyPressed(ImGuiKey_Comma))
+                    pushUV(uvWall.uvOffset,
+                           {uvWall.uvScale.x, std::max(0.01f, uvWall.uvScale.y - kScale)},
+                           uvWall.uvRotation);
+                if (ImGui::IsKeyPressed(ImGuiKey_Period))
+                    pushUV(uvWall.uvOffset,
+                           {uvWall.uvScale.x, uvWall.uvScale.y + kScale},
+                           uvWall.uvRotation);
+
+                // < / > — rotate ±15°.
+                if (ImGui::IsKeyPressed(ImGuiKey_Comma) && ImGui::GetIO().KeyShift)
+                    pushUV(uvWall.uvOffset, uvWall.uvScale,
+                           uvWall.uvRotation - kRotDeg);
+                if (ImGui::IsKeyPressed(ImGuiKey_Period) && ImGui::GetIO().KeyShift)
+                    pushUV(uvWall.uvOffset, uvWall.uvScale,
+                           uvWall.uvRotation + kRotDeg);
+
+                // H — flip U.  Shift+H — flip V.
+                if (ImGui::IsKeyPressed(ImGuiKey_H, /*repeat=*/false))
+                {
+                    if (ImGui::GetIO().KeyShift)
+                        pushUV(uvWall.uvOffset,
+                               {uvWall.uvScale.x, -uvWall.uvScale.y},
+                               uvWall.uvRotation);
+                    else
+                        pushUV(uvWall.uvOffset,
+                               {-uvWall.uvScale.x, uvWall.uvScale.y},
+                               uvWall.uvRotation);
+                }
+
+                // Backspace — reset UVs to default.
+                if (ImGui::IsKeyPressed(ImGuiKey_Backspace, /*repeat=*/false))
+                    pushUV({0.0f, 0.0f}, {1.0f, 1.0f}, 0.0f);
+            }
+        }
+    }
+
+    // ── Gizmo overlay (drawn on top of the image) ───────────────────────
+    drawGizmoAndHandleDrag(doc, view, proj, imageTopLeft, w, h);
+
+    // ── Bookkeeping ────────────────────────────────────────────────────────────
     m_prevView = view;
     m_prevProj = proj;
     ++m_frameIdx;

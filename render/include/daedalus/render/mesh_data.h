@@ -9,6 +9,7 @@
 #include "daedalus/render/vertex_types.h"
 #include "daedalus/core/types.h"
 
+#include <string>
 #include <vector>
 
 namespace daedalus::render
@@ -21,6 +22,9 @@ struct MeshData
 {
     std::vector<StaticMeshVertex> vertices;
     std::vector<u32>              indices;
+    /// Relative URI of the first primitive's baseColor texture, as stored in
+    /// the glTF file.  Empty when no material or texture is present.
+    std::string                   albedoPath;
 };
 
 } // namespace daedalus::render

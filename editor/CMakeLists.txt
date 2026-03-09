@@ -8,15 +8,55 @@ target_sources(DaedalusEdit PRIVATE
     src/document/commands/cmd_set_sector_heights.cpp
     src/document/commands/cmd_set_wall_flags.cpp
     src/document/commands/cmd_move_vertex.cpp
+    src/document/commands/cmd_duplicate_sector.cpp
+    src/document/commands/cmd_paste_sector.cpp
     src/document/commands/cmd_link_portal.cpp
     src/document/commands/cmd_unlink_portal.cpp
     src/tools/geometry_utils.cpp
     src/tools/select_tool.cpp
     src/tools/draw_sector_tool.cpp
+    src/tools/vertex_tool.cpp
+    src/document/commands/cmd_split_wall.cpp
+    src/document/commands/cmd_delete_sector.cpp
+    src/document/commands/cmd_move_sector.cpp
+    src/document/commands/cmd_slide_wall.cpp
+    src/document/commands/cmd_set_wall_uv.cpp
+    src/document/commands/cmd_set_sector_ambient.cpp
+    src/document/commands/cmd_set_sector_flags.cpp
+    src/document/map_doctor.cpp
+    src/document/map_doctor_runner.cpp
+    src/document/commands/cmd_place_light.cpp
+    src/document/commands/cmd_move_light.cpp
+    src/document/commands/cmd_delete_light.cpp
+    src/document/commands/cmd_set_light_props.cpp
+    src/document/commands/cmd_place_entity.cpp
+    src/document/commands/cmd_delete_entity.cpp
+    src/document/commands/cmd_move_entity.cpp
+    src/document/commands/cmd_rotate_entity.cpp
+    src/document/commands/cmd_scale_entity.cpp
+    src/document/commands/cmd_set_entity_props.cpp
+    src/document/commands/cmd_rotate_sector.cpp
+    src/document/commands/cmd_set_player_start.cpp
+    src/document/commands/compound_command.cpp
+    src/document/commands/cmd_save_prefab.cpp
+    src/document/commands/cmd_place_prefab.cpp
+    src/document/commands/cmd_set_wall_material.cpp
+    src/document/commands/cmd_set_sector_material.cpp
+    src/document/commands/cmd_set_map_meta.cpp
+    src/document/commands/cmd_set_map_defaults.cpp
+    src/document/commands/cmd_set_global_ambient.cpp
     src/panels/viewport_2d.cpp
     src/panels/viewport_3d.cpp
+    src/panels/entity_gpu_cache.cpp
     src/panels/property_inspector.cpp
     src/panels/output_log.cpp
+    src/panels/render_settings_panel.cpp
+    src/panels/object_browser_panel.cpp
+    src/panels/layers_panel.cpp
+    src/panels/help_panel.cpp
+    src/document/emap_sidecar.cpp
+    src/material_catalog.cpp
+    src/panels/asset_browser_panel.cpp
 )
 
 target_include_directories(DaedalusEdit
@@ -28,8 +68,10 @@ target_link_libraries(DaedalusEdit PRIVATE
     DaedalusCore
     DaedalusRender
     DaedalusWorld
+    DaedalusThirdParty
     DaedalusImGui
     SDL3::SDL3-static
+    nlohmann_json::nlohmann_json
 )
 
 target_compile_features(DaedalusEdit PRIVATE cxx_std_23)

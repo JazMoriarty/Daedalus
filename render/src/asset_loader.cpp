@@ -368,6 +368,19 @@ public:
                 result.indices[i] = static_cast<u32>(i);
         }
 
+        // ── Albedo path (baseColor texture URI from first primitive's material) ──
+        if (prim.material)
+        {
+            const cgltf_material& mat = *prim.material;
+            if (mat.has_pbr_metallic_roughness)
+            {
+                const cgltf_texture* tex =
+                    mat.pbr_metallic_roughness.base_color_texture.texture;
+                if (tex && tex->image && tex->image->uri)
+                    result.albedoPath = tex->image->uri;
+            }
+        }
+
         cgltf_free(data);
         return result;
     }

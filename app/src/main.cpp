@@ -234,7 +234,7 @@ static render::MeshData makeMirrorQuadMesh()
 
 // ─── Entry point ──────────────────────────────────────────────────────────────
 
-int main(int /*argc*/, char* /*argv*/[])
+int main(int argc, char* argv[])
 {
     // ─── Platform ─────────────────────────────────────────────────────────────
 
@@ -419,8 +419,8 @@ int main(int /*argc*/, char* /*argv*/[])
     auto wallNormal = std::move(*normalResult);
 
     // ─── World map ────────────────────────────────────────────────────────────
-    // Build or load the test map. Persist it as a .dmap on first run so it can
-    // be inspected / edited outside the app.
+    // Prefer a map path provided by the editor via argv[1].  If none is given,
+    // build/load the hard-coded test map (generated once on first run).
     {
         const auto testMapPath = std::filesystem::path(dmapPath);
         if (!std::filesystem::exists(testMapPath))
@@ -435,8 +435,23 @@ int main(int /*argc*/, char* /*argv*/[])
         }
     }
 
-    auto loadResult = world::loadDmap(std::filesystem::path(dmapPath));
-    DAEDALUS_ASSERT(loadResult.has_value(), "Failed to load test_map.dmap");
+    const std::filesystem::path dmapLoadPath = [&]() -> std::filesystem::path
+    {
+        if (argc >= 2 && argv[1] != nullptr)
+        {
+            const std::filesystem::path p(argv[1]);
+            if (std::filesystem::exists(p))
+            {
+                std::printf("[Daedalus] Editor map: %s\n", p.string().c_str());
+                return p;
+            }
+            std::printf("[Daedalus] Warning: map path '%s' not found; using test map.\n", argv[1]);
+        }
+        return std::filesystem::path(dmapPath);
+    }();
+
+    auto loadResult = world::loadDmap(dmapLoadPath);
+    DAEDALUS_ASSERT(loadResult.has_value(), "Failed to load map");
 
     auto worldMap      = world::makeWorldMap(std::move(*loadResult));
     auto portalTraversal = world::makePortalTraversal();

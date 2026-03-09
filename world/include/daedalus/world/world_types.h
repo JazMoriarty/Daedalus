@@ -38,6 +38,7 @@ enum class WallFlags : u32
     Climbable   = 1u << 2,  ///< Player can mantle / climb this wall.
     TriggerZone = 1u << 3,  ///< Generates a trigger event when crossed.
     Invisible   = 1u << 4,  ///< Wall exists for collision but is not rendered.
+    Mirror      = 1u << 5,  ///< Planar mirror surface; rendered via MirrorDraw pre-pass.
 };
 
 [[nodiscard]] inline constexpr WallFlags operator|(WallFlags a, WallFlags b) noexcept

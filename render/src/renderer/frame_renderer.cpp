@@ -785,6 +785,7 @@ void FrameRenderer::resize(IRenderDevice& device, u32 width, u32 height)
     m_width  = width;
     m_height = height;
     recreateTAAHistory(device, width, height);
+    m_frameIndex = 0;  // force TAA history re-clear on next renderFrame
 }
 
 // ─── renderFrame ─────────────────────────────────────────────────────────────

@@ -19,6 +19,7 @@
 
 #include "daedalus/world/map_data.h"
 #include "daedalus/render/i_asset_loader.h"  // for render::MeshData
+#include "daedalus/core/types.h"               // for UUID
 
 #include <vector>
 
@@ -32,5 +33,28 @@ namespace daedalus::world
 /// @return  A vector of MeshData, one entry per sector, indexed by SectorId.
 ///          The vector size equals map.sectors.size().
 [[nodiscard]] std::vector<render::MeshData> tessellateMap(const WorldMapData& map);
+
+// ─── TaggedMeshBatch ──────────────────────────────────────────────────────────
+// One CPU-side mesh batch for a single (sector, materialId) pair.
+// Produced by tessellateMapTagged() so the renderer can issue one draw call per
+// material per sector and bind the correct texture.
+
+struct TaggedMeshBatch
+{
+    render::MeshData mesh;        ///< Interleaved vertex + index data ready for GPU upload.
+    daedalus::UUID   materialId;  ///< Null UUID → engine-default / no texture.
+};
+
+/// Tessellate all sectors into per-material batches.
+///
+/// Surfaces sharing the same materialId within a sector are merged into one
+/// TaggedMeshBatch so the caller can issue one draw call per material.
+///
+/// @param map  The world map to tessellate.
+///
+/// @return  Outer vector indexed by SectorId (size == map.sectors.size()).
+///          Inner vector has one TaggedMeshBatch per unique materialId in that sector.
+[[nodiscard]] std::vector<std::vector<TaggedMeshBatch>>
+tessellateMapTagged(const WorldMapData& map);
 
 } // namespace daedalus::world

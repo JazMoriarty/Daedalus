@@ -5,6 +5,7 @@
 
 #include <glm/glm.hpp>
 #include <cstddef>
+#include <vector>
 
 namespace daedalus::editor
 {
@@ -26,17 +27,30 @@ public:
                      float mapX, float mapZ,
                      int   button) override;
 
+    /// Selects all sectors that have at least one vertex inside the rectangle.
+    void onRectSelect(EditMapDocument& doc,
+                      glm::vec2 minCorner,
+                      glm::vec2 maxCorner) override;
+
+    /// True while an element (vertex, wall, or sector) is being live-dragged.
+    [[nodiscard]] bool isDragging() const noexcept { return m_dragTarget != DragTarget::None; }
+
 private:
     // ─── Hit thresholds (map units) ───────────────────────────────────────────
-    static constexpr float k_vertexRadius    = 0.4f;   ///< Vertex pick radius.
-    static constexpr float k_wallThresholdSq = 0.25f * 0.25f;  ///< Wall pick dist².
+    static constexpr float k_vertexRadius    = 0.4f;          ///< Vertex pick radius.
+    static constexpr float k_wallThresholdSq = 0.25f * 0.25f; ///< Wall pick dist².
 
     // ─── Drag state ───────────────────────────────────────────────────────────
-    bool            m_dragging       = false;
-    world::SectorId m_dragSectorId   = world::INVALID_SECTOR_ID;
-    std::size_t     m_dragWallIndex  = 0;
-    glm::vec2       m_dragOrigPos{};
-    bool            m_dragMoved      = false;  ///< True once the vertex actually moved.
+    enum class DragTarget { None, Vertex, Wall, Sector };
+
+    DragTarget              m_dragTarget    = DragTarget::None;
+    world::SectorId         m_dragSectorId  = world::INVALID_SECTOR_ID;
+    std::size_t             m_dragWallIndex = 0;  ///< Wall index for Vertex and Wall drag.
+    glm::vec2               m_dragOrigPos{};      ///< Vertex: orig p0; Wall: orig wall[i].p0.
+    glm::vec2               m_dragOrig2{};        ///< Wall drag: orig p0 of wall[(i+1)%n].
+    glm::vec2               m_dragClickPos{};     ///< Wall/Sector: map pos at drag start.
+    std::vector<glm::vec2>  m_dragOrigAll{};      ///< Sector drag: orig p0 for every wall.
+    bool                    m_dragMoved     = false; ///< True once target actually moved.
 
     // ─── Hit testing ─────────────────────────────────────────────────────────
     [[nodiscard]] world::SectorId hitTestSector(

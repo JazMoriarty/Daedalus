@@ -19,6 +19,7 @@
 #include "daedalus/world/sector_tessellator.h"
 
 #include <cmath>
+#include <unordered_map>
 
 namespace daedalus::world
 {
@@ -158,7 +159,7 @@ void appendWallQuad(
 
 } // anonymous namespace
 
-// ─── tessellateMap ────────────────────────────────────────────────────────────
+// ─── tessellateMap ───────────────────────────────────────────────────────────────
 
 std::vector<render::MeshData> tessellateMap(const WorldMapData& map)
 {
@@ -234,6 +235,115 @@ std::vector<render::MeshData> tessellateMap(const WorldMapData& map)
                 if (adj.floorHeight > sector.floorHeight)
                 {
                     appendWallQuad(mesh.vertices, mesh.indices,
+                                   wall.p0, wallP1,
+                                   sector.floorHeight, adj.floorHeight,
+                                   uScale, vScale,
+                                   wall.uvOffset.x, wall.uvOffset.y);
+                }
+            }
+        }
+    }
+
+    return result;
+}
+
+// ─── tessellateMapTagged ──────────────────────────────────────────────────
+//
+// Groups every surface in each sector into per-materialId batches so the
+// renderer can issue one draw call per material per sector and bind the
+// correct texture from the MaterialCatalog.
+
+std::vector<std::vector<TaggedMeshBatch>> tessellateMapTagged(const WorldMapData& map)
+{
+    std::vector<std::vector<TaggedMeshBatch>> result;
+    result.resize(map.sectors.size());
+
+    for (std::size_t si = 0; si < map.sectors.size(); ++si)
+    {
+        const Sector& sector = map.sectors[si];
+        const auto    n      = sector.walls.size();
+        if (n < 3) continue;
+
+        // Map UUID → index in result[si] for O(1) batch lookup.
+        std::unordered_map<daedalus::UUID, std::size_t, daedalus::UUIDHash> uuidToIdx;
+
+        // Return a reference to the batch for uuid, creating it if needed.
+        // IMPORTANT: each returned reference is only used within its own block;
+        // never hold two references simultaneously across a push_back.
+        auto getBatch = [&](const daedalus::UUID& uuid) -> TaggedMeshBatch&
+        {
+            const auto it = uuidToIdx.find(uuid);
+            if (it != uuidToIdx.end())
+                return result[si][it->second];
+            const std::size_t idx = result[si].size();
+            result[si].push_back(TaggedMeshBatch{ render::MeshData{}, uuid });
+            uuidToIdx[uuid] = idx;
+            return result[si].back();
+        };
+
+        // Gather polygon points for floor/ceiling tessellation.
+        std::vector<glm::vec2> poly;
+        poly.reserve(n);
+        for (const auto& w : sector.walls)
+            poly.push_back(w.p0);
+
+        // ── Floor ───────────────────────────────────────────────────────────────
+        {
+            TaggedMeshBatch& batch = getBatch(sector.floorMaterialId);
+            appendHorizontalSurface(batch.mesh.vertices, batch.mesh.indices, poly,
+                                    sector.floorHeight, +1.0f,
+                                    1.0f, 1.0f, 0.0f, 0.0f);
+        }
+
+        // ── Ceiling ────────────────────────────────────────────────────────────
+        {
+            TaggedMeshBatch& batch = getBatch(sector.ceilMaterialId);
+            appendHorizontalSurface(batch.mesh.vertices, batch.mesh.indices, poly,
+                                    sector.ceilHeight, -1.0f,
+                                    1.0f, 1.0f, 0.0f, 0.0f);
+        }
+
+        // ── Walls ────────────────────────────────────────────────────────────
+        for (std::size_t wi = 0; wi < n; ++wi)
+        {
+            const Wall&     wall   = sector.walls[wi];
+            const glm::vec2 wallP1 = sector.walls[(wi + 1) % n].p0;
+
+            const float uScale = (wall.uvScale.x > 0.0f) ? wall.uvScale.x : 1.0f;
+            const float vScale = (wall.uvScale.y > 0.0f) ? wall.uvScale.y : 1.0f;
+
+            if (wall.portalSectorId == INVALID_SECTOR_ID)
+            {
+                // Solid wall: full height, frontMaterialId.
+                TaggedMeshBatch& batch = getBatch(wall.frontMaterialId);
+                appendWallQuad(batch.mesh.vertices, batch.mesh.indices,
+                               wall.p0, wallP1,
+                               sector.floorHeight, sector.ceilHeight,
+                               uScale, vScale,
+                               wall.uvOffset.x, wall.uvOffset.y);
+            }
+            else
+            {
+                const std::size_t adjId = wall.portalSectorId;
+                if (adjId >= map.sectors.size()) continue;
+                const Sector& adj = map.sectors[adjId];
+
+                // Upper strip: upperMaterialId.
+                if (adj.ceilHeight < sector.ceilHeight)
+                {
+                    TaggedMeshBatch& batch = getBatch(wall.upperMaterialId);
+                    appendWallQuad(batch.mesh.vertices, batch.mesh.indices,
+                                   wall.p0, wallP1,
+                                   adj.ceilHeight, sector.ceilHeight,
+                                   uScale, vScale,
+                                   wall.uvOffset.x, wall.uvOffset.y);
+                }
+
+                // Lower strip: lowerMaterialId.
+                if (adj.floorHeight > sector.floorHeight)
+                {
+                    TaggedMeshBatch& batch = getBatch(wall.lowerMaterialId);
+                    appendWallQuad(batch.mesh.vertices, batch.mesh.indices,
                                    wall.p0, wallP1,
                                    sector.floorHeight, adj.floorHeight,
                                    uScale, vScale,

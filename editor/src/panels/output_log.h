@@ -13,7 +13,7 @@ public:
     OutputLog()  = default;
     ~OutputLog() = default;
 
-    void draw(const EditMapDocument& doc);
+    void draw(EditMapDocument& doc);
 
 private:
     std::size_t m_lastCount = 0;  ///< Used to detect new messages for auto-scroll.

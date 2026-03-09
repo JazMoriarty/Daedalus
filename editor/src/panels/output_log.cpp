@@ -8,18 +8,17 @@
 namespace daedalus::editor
 {
 
-void OutputLog::draw(const EditMapDocument& doc)
+void OutputLog::draw(EditMapDocument& doc)
 {
     ImGui::Begin("Output");
 
     const auto& msgs = doc.logMessages();
 
-    // Clear button.
+    // Clear button — now functional via clearLog().
     if (ImGui::SmallButton("Clear"))
     {
-        // Output log is read-only from the panel's perspective; we can't clear
-        // it here without a non-const reference. Just reset scroll position.
-        m_lastCount = msgs.size();
+        doc.clearLog();
+        m_lastCount = 0;
     }
     ImGui::SameLine();
     ImGui::Text("%zu messages", msgs.size());
@@ -29,8 +28,22 @@ void OutputLog::draw(const EditMapDocument& doc)
     ImGui::BeginChild("##log_scroll", ImVec2(0, 0), false,
                        ImGuiWindowFlags_HorizontalScrollbar);
 
-    for (const auto& msg : msgs)
-        ImGui::TextUnformatted(msg.c_str());
+    for (std::size_t i = 0; i < msgs.size(); ++i)
+    {
+        const LogEntry& entry = msgs[i];
+
+        // Jump-to button for entries that carry a selection target.
+        if (entry.jumpTo.has_value())
+        {
+            ImGui::PushID(static_cast<int>(i));
+            if (ImGui::SmallButton("\xe2\x86\x92"))  // UTF-8 right arrow →
+                doc.selection() = entry.jumpTo.value();
+            ImGui::SameLine();
+            ImGui::PopID();
+        }
+
+        ImGui::TextUnformatted(entry.message.c_str());
+    }
 
     // Auto-scroll when new messages arrive.
     if (msgs.size() != m_lastCount)

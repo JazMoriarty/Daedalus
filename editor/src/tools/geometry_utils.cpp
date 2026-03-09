@@ -126,7 +126,8 @@ findMatchingWall(world::SectorId sA, std::size_t wA,
     const glm::vec2 a0 = secA.walls[wA].p0;
     const glm::vec2 a1 = secA.walls[(wA + 1) % nA].p0;
 
-    for (world::SectorId sB = 0; sB < static_cast<world::SectorId>(map.sectors.size()); ++sB)
+    for (world::SectorId sB = 0;
+         sB < static_cast<world::SectorId>(map.sectors.size()); ++sB)
     {
         if (sB == sA) continue;
         const world::Sector& secB = map.sectors[sB];

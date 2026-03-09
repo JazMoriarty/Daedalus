@@ -44,11 +44,12 @@ struct Wall
     /// If != INVALID_SECTOR_ID, this wall is a portal into that sector.
     SectorId portalSectorId = INVALID_SECTOR_ID;
 
-    // ─── Material references (UUID) ───────────────────────────────────────────
+    // ─── Material references (UUID) ───────────────────────────────────────────────────
     // Null UUID (hi=lo=0) → engine default material for that surface type.
     UUID frontMaterialId;   ///< Full-height wall face (used when solid, or strips on portal).
     UUID upperMaterialId;   ///< Strip above a portal opening (this_ceil > portal_ceil).
     UUID lowerMaterialId;   ///< Strip below a portal opening (this_floor < portal_floor).
+    UUID backMaterialId;    ///< Face seen looking back through a portal from the adjacent sector.
 
     // ─── UV mapping ───────────────────────────────────────────────────────────
     glm::vec2 uvOffset  = {0.0f, 0.0f};  ///< Texture coordinate offset.
