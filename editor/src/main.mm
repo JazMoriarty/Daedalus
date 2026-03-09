@@ -169,7 +169,6 @@ static void buildDefaultDockLayout(ImGuiID dockspaceId)
 enum class ActiveTool { Select, DrawSector, Vertex };
 
 static void drawMenuBar(EditMapDocument& doc,
-                         MaterialCatalog&  catalog,
                          ActiveTool&       activeTool,
                          SelectTool&       selectTool,
                          DrawSectorTool&   drawSectorTool,
@@ -201,11 +200,9 @@ static void drawMenuBar(EditMapDocument& doc,
             {
                 const auto path = showOpenPanelForDirectory();
                 if (!path.empty())
-                {
                     doc.setAssetRoot(path.string());
-                    catalog.setRoot(path);
-                    catalog.scan();
-                }
+                    // The main loop detects the change via lastKnownAssetRoot,
+                    // rescans the catalog, and persists the root to the INI.
             }
 
             ImGui::Separator();
@@ -351,6 +348,17 @@ static void drawMenuBar(EditMapDocument& doc,
     }
 }
 
+// ─── Editor settings persisted across sessions ────────────────────────────────
+// Stored in the [DaedalusEdit] section of daedalusedit.ini via ImGui's
+// settings-handler API.  pendingApply is set on the first NewFrame() when
+// ImGui loads the INI; the main loop applies it that same frame.
+
+struct EditorPersistState
+{
+    std::string assetRoot;            // last-used asset root directory
+    bool        pendingApply = false; // true until the root has been applied
+};
+
 // ─── New Map dialog state ────────────────────────────────────────────────────
 
 struct NewMapDialogState
@@ -417,6 +425,42 @@ int main(int /*argc*/, char* /*argv*/[])
     ImGuiIO& io = ImGui::GetIO();
     io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
     io.IniFilename  = "daedalusedit.ini";
+
+    // ── Persist editor settings in daedalusedit.ini ───────────────────────────
+    // Must be registered before the first NewFrame(), which is when ImGui reads
+    // the INI file and calls our ReadLineFn.  State is accessed through UserData
+    // (stateless lambdas convertible to plain function pointers).
+    EditorPersistState persistState;
+    {
+        ImGuiSettingsHandler h = {};
+        h.TypeName   = "DaedalusEdit";
+        h.TypeHash   = ImHashStr("DaedalusEdit");
+        h.UserData   = &persistState;
+        h.ReadOpenFn = [](ImGuiContext*, ImGuiSettingsHandler*, const char*) -> void*
+        {
+            return (void*)1u;  // non-null = accept this section entry
+        };
+        h.ReadLineFn = [](ImGuiContext*, ImGuiSettingsHandler* handler,
+                          void*, const char* line)
+        {
+            auto* s = static_cast<EditorPersistState*>(handler->UserData);
+            char  buf[4096] = {};
+            if (sscanf(line, "assetRoot=%4095[^\n]", buf) == 1)
+            {
+                s->assetRoot    = buf;
+                s->pendingApply = true;
+            }
+        };
+        h.WriteAllFn = [](ImGuiContext*, ImGuiSettingsHandler* handler,
+                          ImGuiTextBuffer* out)
+        {
+            const auto* s = static_cast<const EditorPersistState*>(handler->UserData);
+            out->appendf("[%s][Data]\n", handler->TypeName);
+            out->appendf("assetRoot=%s\n", s->assetRoot.c_str());
+            out->append("\n");
+        };
+        ImGui::AddSettingsHandler(&h);
+    }
 
     ImGui::StyleColorsDark();
 
@@ -917,7 +961,17 @@ int main(int /*argc*/, char* /*argv*/[])
             ImGui::End();
         }
 
-        // ── Asset catalog: rescan if doc's assetRoot changed (e.g. after load) ──
+        // ── First-frame: restore asset root persisted in a previous session ────────
+        if (persistState.pendingApply)
+        {
+            persistState.pendingApply = false;
+            if (!persistState.assetRoot.empty() && doc.assetRoot().empty())
+                doc.setAssetRoot(persistState.assetRoot);
+        }
+
+        // ── Asset catalog: rescan whenever doc's assetRoot changes ────────────────
+        // Triggered by: INI restore above, File > Set Asset Root, or loading a .dmap
+        // that carries its own assetRoot.  Also persists the new root to the INI.
         {
             const std::string ar = doc.assetRoot();
             if (ar != lastKnownAssetRoot)
@@ -927,12 +981,14 @@ int main(int /*argc*/, char* /*argv*/[])
                 {
                     catalog.setRoot(std::filesystem::path(ar));
                     catalog.scan();
+                    persistState.assetRoot = ar;
+                    ImGui::MarkIniSettingsDirty();
                 }
             }
         }
 
         // ── Menu bar ──────────────────────────────────────────────────────────
-        drawMenuBar(doc, catalog, activeToolId, selectTool, drawSectorTool, vertexTool, activeTool,
+        drawMenuBar(doc, activeToolId, selectTool, drawSectorTool, vertexTool, activeTool,
                     vp2d.gridStep(), vp2d.lastMouseMapPos(), nmDlg.open, helpPanel);
 
         // ── Panels ────────────────────────────────────────────────────────────

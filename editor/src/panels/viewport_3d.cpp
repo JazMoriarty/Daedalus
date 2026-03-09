@@ -1029,7 +1029,7 @@ void Viewport3D::draw(EditMapDocument&      doc,
     else
     {
         ImGui::SetCursorPos(ImVec2(8.0f, 8.0f));
-        ImGui::TextDisabled("[Tab] capture   Alt+drag = orbit   Scroll = dolly   F = frame   P = player   M = pick material");
+        ImGui::TextDisabled("[Tab] capture   Alt+drag = orbit   Scroll = dolly   F = frame   P = player   M = pick front material");
     }
 
     // ── Wall / floor / ceiling hover ray + click selection ─────────────────────
@@ -1334,6 +1334,7 @@ void Viewport3D::draw(EditMapDocument&      doc,
             selM.type == SelectionType::Wall)
         {
             // Capture the selected wall at open-time so the callback is stable.
+            // In the 3D view you always see the Front face, so we assign Front.
             const world::SectorId capSid = selM.wallSectorId;
             const std::size_t     capWi  = selM.wallIndex;
             assetBrowser.openPicker(
@@ -1341,7 +1342,8 @@ void Viewport3D::draw(EditMapDocument&      doc,
                 {
                     doc.pushCommand(std::make_unique<CmdSetWallMaterial>(
                         doc, capSid, capWi, WallSurface::Front, uuid));
-                });
+                },
+                "Wall Front");
         }
     }
 
