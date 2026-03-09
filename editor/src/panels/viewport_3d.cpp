@@ -1,6 +1,6 @@
 #include "viewport_3d.h"
 #include "asset_browser_panel.h"
-#include "material_catalog.h"
+#include "catalog/material_catalog.h"
 #include "daedalus/editor/edit_map_document.h"
 #include "daedalus/editor/render_settings_data.h"
 #include "daedalus/editor/light_def.h"

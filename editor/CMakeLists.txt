@@ -55,7 +55,7 @@ target_sources(DaedalusEdit PRIVATE
     src/panels/layers_panel.cpp
     src/panels/help_panel.cpp
     src/document/emap_sidecar.cpp
-    src/material_catalog.cpp
+    src/catalog/material_catalog.cpp
     src/panels/asset_browser_panel.cpp
 )
 
@@ -105,6 +105,14 @@ if(DAEDALUS_PLATFORM_MACOS)
     add_custom_target(CopyDaedalusShadersEdit ALL DEPENDS "${METALLIB_EDITOR_COPY}")
     add_dependencies(CopyDaedalusShadersEdit DaedalusShaders)
     add_dependencies(DaedalusEdit CopyDaedalusShadersEdit)
+
+    # Copy shared assets directory next to the editor executable.
+    add_custom_command(TARGET DaedalusEdit POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+                "${CMAKE_SOURCE_DIR}/assets"
+                "$<TARGET_FILE_DIR:DaedalusEdit>/assets"
+        COMMENT "Copying shared assets to editor binary dir"
+    )
 endif()
 
 if(BUILD_TESTING)

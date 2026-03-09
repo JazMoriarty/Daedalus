@@ -38,4 +38,12 @@ if(DAEDALUS_PLATFORM_MACOS)
     # .metal files) before we attempt to copy the metallib to the app directory.
     add_dependencies(CopyDaedalusShaders DaedalusShaders)
     add_dependencies(DaedalusApp CopyDaedalusShaders)
+
+    # Copy shared assets directory next to the app executable.
+    add_custom_command(TARGET DaedalusApp POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+                "${CMAKE_SOURCE_DIR}/assets"
+                "$<TARGET_FILE_DIR:DaedalusApp>/assets"
+        COMMENT "Copying shared assets to app binary dir"
+    )
 endif()

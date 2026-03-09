@@ -1,7 +1,7 @@
 // asset_browser_panel.cpp
 
 #include "asset_browser_panel.h"
-#include "material_catalog.h"
+#include "catalog/material_catalog.h"
 
 #include "imgui.h"
 

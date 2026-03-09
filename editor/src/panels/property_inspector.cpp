@@ -1,6 +1,6 @@
 #include "property_inspector.h"
 #include "asset_browser_panel.h"
-#include "material_catalog.h"
+#include "catalog/material_catalog.h"
 #include "daedalus/editor/edit_map_document.h"
 #include "daedalus/world/map_data.h"
 #include "document/commands/cmd_set_sector_heights.h"

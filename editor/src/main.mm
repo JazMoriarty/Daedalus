@@ -45,7 +45,7 @@
 #include "document/commands/cmd_place_entity.h"
 #include "document/commands/cmd_delete_entity.h"
 #include "document/commands/cmd_set_player_start.h"
-#include "material_catalog.h"
+#include "catalog/material_catalog.h"
 #include "panels/asset_browser_panel.h"
 
 #include <SDL3/SDL.h>

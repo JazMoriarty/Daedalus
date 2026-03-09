@@ -317,12 +317,17 @@ int main(int argc, char* argv[])
 
     // ─── Asset setup ──────────────────────────────────────────────────────────────────────
 
-    const std::string assetsDir  = platform->getExecutableDir();
-    const std::string albedoPath = assetsDir + "/wall_albedo.png";
-    const std::string normalPath = assetsDir + "/wall_normal.png";
-    const std::string dmapPath   = assetsDir + "/test_map.dmap";
+    const std::string assetsDir  = platform->getExecutableDir() + "/assets";
+    const std::string albedoPath = assetsDir + "/textures/wall_albedo.png";
+    const std::string normalPath = assetsDir + "/textures/wall_normal.png";
+    const std::string dmapPath   = assetsDir + "/maps/test_map.dmap";
 
-    // Generate test textures if they don’t already exist.
+    // Ensure asset subdirectories exist in the binary dir (created by the POST_BUILD
+    // copy step, but guarded here so a first-run without a build step still works).
+    (void)std::filesystem::create_directories(assetsDir + "/textures");
+    (void)std::filesystem::create_directories(assetsDir + "/maps");
+
+    // Generate test textures if they don't already exist.
     // Albedo: 256×256 warm brick pattern.
     // Normal: 256×256 near-flat tangent-space normal with subtle brick indents.
     {
@@ -430,7 +435,7 @@ int main(int argc, char* argv[])
             std::printf("[Daedalus] Saved %s\n", dmapPath.c_str());
 
             // Also emit the .dmap.json alongside it for inspection.
-            const auto jsonPath = std::filesystem::path(assetsDir + "/test_map.dmap.json");
+            const auto jsonPath = std::filesystem::path(assetsDir + "/maps/test_map.dmap.json");
             world::saveDmapJson(buildTestMap(), jsonPath);  // best-effort
         }
     }
