@@ -55,3 +55,6 @@ third_party/
 # ─── Runtime / test output ───────────────────────────────────────────────────
 *.log
 *.tmp
+
+# ─── Editor-generated asset metadata ─────────────────────────────────────────
+*.meta

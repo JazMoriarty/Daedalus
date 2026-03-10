@@ -120,6 +120,56 @@ if(APPLE)
     )
 endif()
 
+# Jolt Physics — deterministic rigid-body + character physics
+# SOURCE_SUBDIR Build tells CMake to use Build/CMakeLists.txt which creates the
+# 'Jolt' static library target. PHYSICS_REPO_ROOT is set automatically by
+# Build/CMakeLists.txt as CMAKE_CURRENT_SOURCE_DIR/.. == the repo root.
+# Adjust GIT_TAG to a newer Jolt release as needed; the v5.x API is stable.
+set(DOUBLE_PRECISION          OFF CACHE BOOL "" FORCE)
+set(GENERATE_DEBUG_SYMBOLS    ON  CACHE BOOL "" FORCE)
+set(DEBUG_RENDERER_IN_DEBUG_AND_RELEASE OFF CACHE BOOL "" FORCE)
+set(PROFILER_IN_DEBUG_AND_RELEASE       OFF CACHE BOOL "" FORCE)
+FetchContent_Declare(
+    JoltPhysics
+    GIT_REPOSITORY  https://github.com/jrouwe/JoltPhysics.git
+    GIT_TAG         v5.0.0
+    SOURCE_SUBDIR   Build
+    GIT_SHALLOW     TRUE
+)
+FetchContent_MakeAvailable(JoltPhysics)
+
+# miniaudio — single-header cross-platform audio (MIT)
+FetchContent_Declare(
+    miniaudio
+    GIT_REPOSITORY https://github.com/mackron/miniaudio.git
+    GIT_TAG        0.11.25
+    GIT_SHALLOW    TRUE
+)
+FetchContent_MakeAvailable(miniaudio)
+
+# Lua 5.4 — scripting VM (MIT)
+set(LUA_ENABLE_TESTING  OFF CACHE BOOL "" FORCE)
+set(LUA_ENABLE_SHARED   OFF CACHE BOOL "" FORCE)
+set(LUA_BUILD_BINARY    OFF CACHE BOOL "" FORCE)
+set(LUA_BUILD_COMPILER  OFF CACHE BOOL "" FORCE)
+FetchContent_Declare(
+    lua
+    GIT_REPOSITORY https://github.com/walterschell/Lua.git
+    GIT_TAG        v5.4.7
+    GIT_SHALLOW    TRUE
+)
+FetchContent_MakeAvailable(lua)
+
+# sol2 — C++17/20/23 Lua bindings (MIT, header-only)
+# Note: v3.3.1 has an Apple Clang C++23 optional<T&> bug; develop fixes it.
+FetchContent_Declare(
+    sol2
+    GIT_REPOSITORY https://github.com/ThePhD/sol2.git
+    GIT_TAG        develop
+    GIT_SHALLOW    TRUE
+)
+FetchContent_MakeAvailable(sol2)
+
 # GoogleTest — unit testing
 FetchContent_Declare(
     googletest

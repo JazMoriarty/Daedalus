@@ -1333,6 +1333,12 @@ void FrameRenderer::renderFrame(IRenderDevice& device,
             enc->setFragmentSampler(repeatSamp, 0); // sampler(0) for all material textures
             for (const MeshDraw& draw : draws)
             {
+                // Apply per-draw portal scissor (spec §Pass 1 GPU scissor step).
+                // Restore the full-viewport scissor after each scissored draw so
+                // the next draw's default is always full-screen.
+                if (draw.scissorValid)
+                    enc->setScissor(draw.scissorRect);
+
                 const ModelGPU modelGPU{
                     draw.modelMatrix,
                     glm::mat4(glm::inverse(glm::transpose(draw.modelMatrix))),
@@ -1362,6 +1368,9 @@ void FrameRenderer::renderFrame(IRenderDevice& device,
                     draw.material.emissive  ? draw.material.emissive  : fallbackEmissive, 2);
                 enc->setIndexBuffer(draw.indexBuffer, 0, true);
                 enc->drawIndexed(draw.indexCount);
+
+                if (draw.scissorValid)
+                    enc->setScissor(sc);  // restore full-viewport scissor
             }
         };
         m_graph.addRenderPass(std::move(p));

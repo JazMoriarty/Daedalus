@@ -833,8 +833,34 @@ void Viewport3D::draw(EditMapDocument&      doc,
             {
                 const std::size_t si = static_cast<std::size_t>(vs.sectorId);
                 if (si < m_draws.size())
-                    for (const auto& draw : m_draws[si])
-                        if (draw.vertexBuffer) scene.meshDraws.push_back(draw);
+                {
+                    // Convert the NDC portal window to a pixel scissor rect and
+                    // stamp it onto every draw in this sector batch so the
+                    // G-buffer pass clips geometry to the visible opening.
+                    const float fW = static_cast<float>(m_currentW);
+                    const float fH = static_cast<float>(m_currentH);
+                    const float px0 = (vs.windowMin.x + 1.0f) * 0.5f * fW;
+                    const float py0 = (1.0f - vs.windowMax.y) * 0.5f * fH;
+                    const float px1 = (vs.windowMax.x + 1.0f) * 0.5f * fW;
+                    const float py1 = (1.0f - vs.windowMin.y) * 0.5f * fH;
+                    const i32 sx = static_cast<i32>(std::max(0.0f, std::floor(px0)));
+                    const i32 sy = static_cast<i32>(std::max(0.0f, std::floor(py0)));
+                    const u32 ex = static_cast<u32>(std::min(fW, std::ceil(px1)));
+                    const u32 ey = static_cast<u32>(std::min(fH, std::ceil(py1)));
+                    const rhi::ScissorRect scissor{
+                        sx, sy,
+                        ex > static_cast<u32>(sx) ? ex - static_cast<u32>(sx) : 0u,
+                        ey > static_cast<u32>(sy) ? ey - static_cast<u32>(sy) : 0u
+                    };
+
+                    for (auto draw : m_draws[si])
+                    {
+                        if (!draw.vertexBuffer) continue;
+                        draw.scissorValid = true;
+                        draw.scissorRect  = scissor;
+                        scene.meshDraws.push_back(draw);
+                    }
+                }
             }
         }
         else

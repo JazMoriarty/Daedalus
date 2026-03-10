@@ -1,12 +1,14 @@
 add_library(DaedalusAudio STATIC)
 
 target_sources(DaedalusAudio PRIVATE
-    src/stub.cpp
+    src/miniaudio_engine.cpp
+    src/audio_system.cpp
 )
 
 target_include_directories(DaedalusAudio
     PUBLIC  ${CMAKE_CURRENT_SOURCE_DIR}/include
     PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src
+    PRIVATE ${miniaudio_SOURCE_DIR}   # miniaudio.h — private to this module only
 )
 
 target_link_libraries(DaedalusAudio PUBLIC DaedalusCore)

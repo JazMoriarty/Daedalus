@@ -25,8 +25,19 @@
 #include "daedalus/world/i_portal_traversal.h"
 #include "daedalus/world/sector_tessellator.h"
 #include "daedalus/world/dmap_io.h"
+#include "daedalus/world/dlevel_io.h"
 
+#include "daedalus/audio/audio_system.h"
+#include "daedalus/audio/i_audio_engine.h"
+
+#include "daedalus/script/i_script_engine.h"
+#include "daedalus/script/components/script_component.h"
+#include "daedalus/audio/components/sound_emitter_component.h"
+
+#include "daedalus/physics/i_physics_world.h"
+#include "daedalus/physics/physics_types.h"
 #include "daedalus/core/components/transform_component.h"
+#include "daedalus/core/components/character_controller_component.h"
 #include "daedalus/render/components/static_mesh_component.h"
 #include "daedalus/render/components/billboard_sprite_component.h"
 #include "daedalus/render/systems/mesh_render_system.h"
@@ -53,6 +64,7 @@
 #include <cstring>
 #include <filesystem>
 #include <memory>
+#include <unordered_map>
 
 using namespace daedalus;
 using namespace daedalus::rhi;
@@ -315,6 +327,485 @@ int main(int argc, char* argv[])
     render::FrameRenderer renderer;
     renderer.initialize(*device, metalLibPath, WINDOW_W, WINDOW_H);
 
+    // ─── .dlevel game loop ────────────────────────────────────────────────────
+    // When DaedalusApp is launched with a .dlevel path (e.g. from F5 in
+    // DaedalusEdit) we enter a self-contained first-person runtime that never
+    // falls through to the demo/test-map code below.
+
+    const bool isDlevel = (argc >= 2 && argv[1] != nullptr &&
+        std::filesystem::path(argv[1]).extension() == ".dlevel");
+
+    if (isDlevel)
+    {
+        // ── 1. Load .dlevel ───────────────────────────────────────────────────
+        auto packResult = world::loadDlevel(std::filesystem::path(argv[1]));
+        DAEDALUS_ASSERT(packResult.has_value(), "Failed to load .dlevel file");
+        world::LevelPackData pack = std::move(*packResult);
+
+        std::printf("[DLevel] Loaded '%s' — %zu sector(s), %zu light(s), %zu texture(s)\n",
+                    argv[1],
+                    pack.map.sectors.size(),
+                    pack.lights.size(),
+                    pack.textures.size());
+
+        // ── 2. Upload textures to GPU ─────────────────────────────────────────
+        // UUID → GPU texture. Missing UUIDs fall back to nullptr (engine default white).
+        std::unordered_map<daedalus::UUID, std::unique_ptr<rhi::ITexture>, daedalus::UUIDHash>
+            packTextures;
+
+        for (auto& [uuid, ltex] : pack.textures)
+        {
+            if (ltex.pixels.empty()) { continue; }
+
+            rhi::TextureDescriptor td;
+            td.width     = ltex.width;
+            td.height    = ltex.height;
+            td.format    = rhi::TextureFormat::RGBA8Unorm_sRGB;
+            td.usage     = rhi::TextureUsage::ShaderRead;
+            td.initData  = ltex.pixels.data();
+            td.debugName = "dlevel_tex";
+            packTextures[uuid] = device->createTexture(td);
+        }
+
+        std::printf("[DLevel] Uploaded %zu material texture(s) to GPU.\n",
+                    packTextures.size());
+
+        // ── 3+4. Tessellate map (tagged) and upload VBOs/IBOs ─────────────────
+        // Returns: outer = per-sector, inner = per-material-batch.
+        const std::vector<std::vector<world::TaggedMeshBatch>> sectorBatches =
+            world::tessellateMapTagged(pack.map);
+        const std::size_t numSectors = sectorBatches.size();
+
+        // GPU buffer ownership: one vector-of-vectors mirroring sectorBatches.
+        std::vector<std::vector<std::unique_ptr<rhi::IBuffer>>> sectorVBOs(numSectors);
+        std::vector<std::vector<std::unique_ptr<rhi::IBuffer>>> sectorIBOs(numSectors);
+
+        // Draw lists: one inner draw per batch, ready for portal submission.
+        std::vector<std::vector<render::MeshDraw>> sectorDraws(numSectors);
+
+        for (std::size_t si = 0; si < numSectors; ++si)
+        {
+            const auto& batches = sectorBatches[si];
+            sectorVBOs[si].resize(batches.size());
+            sectorIBOs[si].resize(batches.size());
+            sectorDraws[si].resize(batches.size());
+
+            for (std::size_t bi = 0; bi < batches.size(); ++bi)
+            {
+                const world::TaggedMeshBatch& batch = batches[bi];
+                if (batch.mesh.vertices.empty()) { continue; }
+
+                // VBO
+                {
+                    rhi::BufferDescriptor d;
+                    d.size      = batch.mesh.vertices.size() * sizeof(render::StaticMeshVertex);
+                    d.usage     = rhi::BufferUsage::Vertex;
+                    d.initData  = batch.mesh.vertices.data();
+                    d.debugName = "DL_VBO_" + std::to_string(si) + "_" + std::to_string(bi);
+                    sectorVBOs[si][bi] = device->createBuffer(d);
+                }
+                // IBO
+                {
+                    rhi::BufferDescriptor d;
+                    d.size      = batch.mesh.indices.size() * sizeof(u32);
+                    d.usage     = rhi::BufferUsage::Index;
+                    d.initData  = batch.mesh.indices.data();
+                    d.debugName = "DL_IBO_" + std::to_string(si) + "_" + std::to_string(bi);
+                    sectorIBOs[si][bi] = device->createBuffer(d);
+                }
+
+                // MeshDraw — bind texture if the UUID is in packTextures
+                render::MeshDraw& draw = sectorDraws[si][bi];
+                draw.vertexBuffer  = sectorVBOs[si][bi].get();
+                draw.indexBuffer   = sectorIBOs[si][bi].get();
+                draw.indexCount    = static_cast<u32>(batch.mesh.indices.size());
+                draw.modelMatrix   = glm::mat4(1.0f);
+                draw.prevModel     = glm::mat4(1.0f);
+                draw.material.roughness = 0.85f;
+                draw.material.metalness = 0.0f;
+
+                // Look up albedo texture for this material UUID.
+                const auto it = packTextures.find(batch.materialId);
+                if (it != packTextures.end())
+                    draw.material.albedo = it->second.get();
+                // nullptr → engine-default white (no fallback needed here)
+            }
+        }
+
+        std::printf("[DLevel] Tessellated + uploaded %zu sector(s).\n", numSectors);
+
+        // ── 5. Build world map + portal traversal ─────────────────────────────
+        auto dlWorldMap       = world::makeWorldMap(std::move(pack.map));
+        auto dlPortalTraversal = world::makePortalTraversal();
+
+        // ── 6. Seed first-person camera from player start (if present) ─────────
+        glm::vec3 fpCamPos  = glm::vec3(0.0f, 1.65f, 0.0f);  // standing eye height
+        float     fpCamYaw   = 0.0f;
+        float     fpCamPitch = 0.0f;
+
+        if (dlWorldMap->data().sectors.empty() == false)
+        {
+            // If the loaded map has sectors, at least clamp y to standing height.
+        }
+        if (pack.playerStart.has_value())
+        {
+            const auto& ps = *pack.playerStart;
+            fpCamPos  = glm::vec3(ps.position.x, ps.position.y + 1.65f, ps.position.z);
+            fpCamYaw  = ps.yaw;
+        }
+
+        // ── 5b. Physics world — load level geometry ──────────────────────────
+        auto dlPhysicsWorld = physics::makePhysicsWorld();
+        {
+            auto physResult = dlPhysicsWorld->loadLevel(dlWorldMap->data());
+            DAEDALUS_ASSERT(physResult.has_value(), "[DLevel] Physics loadLevel failed");
+        }
+        std::printf("[DLevel] Physics world loaded.\n");
+
+        // ── 5c. ECS World + player character entity ───────────────────────────
+        daedalus::World dlWorld;
+
+        const physics::CharacterDesc kPlayerDesc{};  // default capsule (0.35 r, 0.55 hh)
+
+        // fpCamPos is the eye position; feet = eye − eyeHeight.
+        const glm::vec3 playerFeetPos = glm::vec3(
+            fpCamPos.x,
+            fpCamPos.y - physics::kDefaultEyeHeight,
+            fpCamPos.z
+        );
+
+        const EntityId playerEntity = dlWorld.createEntity();
+        dlWorld.addComponent(playerEntity, daedalus::TransformComponent{
+            .position = playerFeetPos
+        });
+        dlWorld.addComponent(playerEntity, daedalus::CharacterControllerComponent{
+            .desc = kPlayerDesc
+        });
+
+        {
+            auto charResult = dlPhysicsWorld->addCharacter(
+                playerEntity, kPlayerDesc, playerFeetPos);
+            DAEDALUS_ASSERT(charResult.has_value(), "[DLevel] addCharacter failed");
+        }
+
+        // ── 5d. Register placed entities (physics + script + audio) ──────────────
+        {
+            u32 registered = 0u;
+            for (const world::LevelEntity& ent : pack.entities)
+            {
+                const EntityId entityId = dlWorld.createEntity();
+                dlWorld.addComponent(entityId, daedalus::TransformComponent{
+                    .position = ent.position
+                });
+
+                // Physics body (optional; None = decorative / script-only)
+                if (ent.shape != world::LevelCollisionShape::None)
+                {
+                    physics::RigidBodyDesc desc;
+                    // LevelCollisionShape ordinals match physics::CollisionShape exactly.
+                    desc.shape       = static_cast<physics::CollisionShape>(ent.shape);
+                    desc.halfExtents = ent.halfExtents;
+                    desc.radius      = ent.halfExtents.x;  // Capsule: x = radius
+                    desc.halfHeight  = ent.halfExtents.y;  // Capsule: y = halfHeight
+                    desc.mass        = ent.mass;
+                    desc.isStatic    = !ent.dynamic;
+
+                    auto rbResult = dlPhysicsWorld->addRigidBody(entityId, desc, ent.position);
+                    if (!rbResult.has_value())
+                    {
+                        std::fprintf(stderr,
+                            "[DLevel] Warning: physics body creation failed for entity '%s'\n",
+                            ent.name.c_str());
+                    }
+                    else
+                    {
+                        ++registered;
+                    }
+                }
+
+                // Script component (optional)
+                if (!ent.scriptPath.empty())
+                {
+                    dlWorld.addComponent(entityId, script::ScriptComponent{
+                        .scriptPath  = ent.scriptPath,
+                        .exposedVars = ent.exposedVars,
+                    });
+                }
+
+                // Sound emitter component (optional)
+                if (!ent.soundPath.empty())
+                {
+                    dlWorld.addComponent(entityId, audio::SoundEmitterComponent{
+                        .soundPath     = ent.soundPath,
+                        .volume        = ent.soundVolume,
+                        .falloffRadius = ent.soundFalloffRadius,
+                        .looping       = ent.soundLoop,
+                        .autoPlay      = ent.soundAutoPlay,
+                    });
+                }
+            }
+            std::printf("[DLevel] Registered %u placed entity physics body/ies.\n", registered);
+        }
+
+        // ── 5e. Audio engine + AudioSystem ───────────────────────────────────
+        std::unique_ptr<audio::IAudioEngine> dlAudioEngine;
+        audio::AudioSystem                   dlAudioSystem;
+        {
+            auto audioResult = audio::makeAudioEngine();
+            if (audioResult.has_value())
+            {
+                dlAudioEngine = std::move(*audioResult);
+                std::printf("[DLevel] Audio engine initialised.\n");
+            }
+            else
+            {
+                // Non-fatal: run without audio (headless / no device).
+                std::fprintf(stderr, "[DLevel] Warning: audio device unavailable "
+                                     "(no sound will be played).\n");
+            }
+        }
+
+        // ── 5f. Script engine ─────────────────────────────────────────────────
+        auto dlScriptEngine = script::makeScriptEngine();
+        std::printf("[DLevel] Script engine initialised (Lua 5.4).\n");
+
+
+        // ── 7. Capture relative mouse for mouselook
+        SDL_SetWindowRelativeMouseMode(window, true);
+
+        // ── 8. First-person game loop ─────────────────────────────────────────
+        using FPClock = std::chrono::steady_clock;
+        auto fpPrevTP = FPClock::now();
+
+        u32 fpFrameIdx = 0;
+        glm::mat4 fpPrevView(1.0f);
+        glm::mat4 fpPrevProj(1.0f);
+
+        u32 dlSwapW = WINDOW_W;
+        u32 dlSwapH = WINDOW_H;
+
+        bool fpRunning = true;
+        while (fpRunning)
+        {
+            // ── Events ────────────────────────────────────────────────────────
+            SDL_Event event;
+            while (SDL_PollEvent(&event))
+            {
+                if (event.type == SDL_EVENT_QUIT)
+                {
+                    fpRunning = false;
+                }
+                else if (event.type == SDL_EVENT_KEY_DOWN &&
+                         event.key.scancode == SDL_SCANCODE_ESCAPE)
+                {
+                    fpRunning = false;
+                }
+                else if (event.type == SDL_EVENT_WINDOW_RESIZED)
+                {
+                    dlSwapW = static_cast<u32>(event.window.data1);
+                    dlSwapH = static_cast<u32>(event.window.data2);
+                    swapchain->resize(dlSwapW, dlSwapH);
+                    renderer.resize(*device, dlSwapW, dlSwapH);
+                }
+            }
+            if (!fpRunning) { break; }
+
+            // ── Timing ────────────────────────────────────────────────────────
+            const auto fpNowTP = FPClock::now();
+            const float fpDt   = std::chrono::duration<float>(fpNowTP - fpPrevTP).count();
+            fpPrevTP = fpNowTP;
+
+            // ── Mouselook ─────────────────────────────────────────────────────
+            {
+                float mdx = 0.0f, mdy = 0.0f;
+                SDL_GetRelativeMouseState(&mdx, &mdy);
+                constexpr float kMouseSensitivity = 0.002f;
+                fpCamYaw   += mdx * kMouseSensitivity;
+                fpCamPitch -= mdy * kMouseSensitivity;
+                // Clamp pitch: ±80 degrees
+                constexpr float kPitchMax = 1.3963f;
+                if (fpCamPitch >  kPitchMax) { fpCamPitch =  kPitchMax; }
+                if (fpCamPitch < -kPitchMax) { fpCamPitch = -kPitchMax; }
+            }
+
+            // ── Camera direction ──────────────────────────────────────────────
+            const glm::vec3 camDir = glm::normalize(glm::vec3(
+                std::sin(fpCamYaw) * std::cos(fpCamPitch),
+                std::sin(fpCamPitch),
+                std::cos(fpCamYaw) * std::cos(fpCamPitch)
+            ));
+            const glm::vec3 up      = glm::vec3(0.0f, 1.0f, 0.0f);
+            const glm::vec3 right   = glm::normalize(glm::cross(camDir, up));
+
+            // ── WASD movement → physics character controller ─────────────────────
+            {
+                const bool* keys = SDL_GetKeyboardState(nullptr);
+                constexpr float kMoveSpeed = 4.0f;  // m/s
+
+                // Horizontal movement only; gravity is applied by the physics step.
+                const glm::vec3 flatDir = glm::normalize(
+                    glm::vec3(camDir.x, 0.0f, camDir.z));
+                const glm::vec3 flatRight = glm::normalize(
+                    glm::vec3(right.x, 0.0f, right.z));
+
+                glm::vec3 desiredVel(0.0f);
+                if (keys[SDL_SCANCODE_W]) { desiredVel += flatDir   * kMoveSpeed; }
+                if (keys[SDL_SCANCODE_S]) { desiredVel -= flatDir   * kMoveSpeed; }
+                if (keys[SDL_SCANCODE_A]) { desiredVel -= flatRight * kMoveSpeed; }
+                if (keys[SDL_SCANCODE_D]) { desiredVel += flatRight * kMoveSpeed; }
+                // Q/E vertical is removed: gravity handles Y movement.
+
+                dlPhysicsWorld->setCharacterInput(playerEntity, desiredVel);
+                dlPhysicsWorld->step(fpDt);
+                dlPhysicsWorld->syncTransforms(dlWorld);
+
+                // Camera eye position = character feet + standing eye height.
+                fpCamPos = dlWorld.getComponent<daedalus::TransformComponent>(playerEntity).position
+                         + glm::vec3(0.0f, physics::kDefaultEyeHeight, 0.0f);
+            }
+
+            // ── Audio ─────────────────────────────────────────────────────────
+            if (dlAudioEngine)
+            {
+                dlAudioEngine->update();
+                dlAudioSystem.update(*dlAudioEngine, dlWorld, fpCamPos, camDir, up);
+            }
+
+            // ── Scripts ───────────────────────────────────────────────────────
+            dlScriptEngine->update(fpDt, dlWorld);
+
+            // ── View + projection ─────────────────────────────────────────────
+            const float fpAspect = static_cast<float>(dlSwapW) / static_cast<float>(dlSwapH);
+            const glm::mat4 fpView = glm::lookAtLH(fpCamPos, fpCamPos + camDir, up);
+            const glm::mat4 fpProj = glm::perspectiveLH_ZO(
+                glm::radians(70.0f), fpAspect, 0.1f, 200.0f);
+
+            // ── Portal traversal ──────────────────────────────────────────────
+            world::SectorId dlCamSector =
+                dlWorldMap->findSector({fpCamPos.x, fpCamPos.z});
+            if (dlCamSector == world::INVALID_SECTOR_ID) { dlCamSector = 0u; }
+
+            const glm::mat4 fpViewProj = fpProj * fpView;
+            const auto dlVisibleSectors =
+                dlPortalTraversal->traverse(*dlWorldMap, dlCamSector, fpViewProj);
+
+            // ── Build SceneView ───────────────────────────────────────────────
+            render::SceneView fpScene;
+
+            // NDC → pixel helper (identical to viewport_3d.cpp scissor logic).
+            const float fW = static_cast<float>(dlSwapW);
+            const float fH = static_cast<float>(dlSwapH);
+
+            for (const auto& vs : dlVisibleSectors)
+            {
+                if (vs.sectorId >= numSectors) { continue; }
+
+                // Compute pixel scissor rect from NDC window min/max.
+                const float px0f = (vs.windowMin.x + 1.0f) * 0.5f * fW;
+                const float py0f = (1.0f - vs.windowMax.y) * 0.5f * fH;
+                const float px1f = (vs.windowMax.x + 1.0f) * 0.5f * fW;
+                const float py1f = (1.0f - vs.windowMin.y) * 0.5f * fH;
+
+                rhi::ScissorRect sr;
+                sr.x      = static_cast<u32>(std::max(0.0f, std::floor(px0f)));
+                sr.y      = static_cast<u32>(std::max(0.0f, std::floor(py0f)));
+                sr.width  = static_cast<u32>(std::min(fW, std::ceil(px1f)))
+                            - sr.x;
+                sr.height = static_cast<u32>(std::min(fH, std::ceil(py1f)))
+                            - sr.y;
+
+                const bool scissorValid = (sr.width > 0 && sr.height > 0);
+
+                for (const auto& draw : sectorDraws[vs.sectorId])
+                {
+                    if (draw.vertexBuffer == nullptr) { continue; }
+
+                    render::MeshDraw d = draw;
+                    d.scissorValid = scissorValid;
+                    d.scissorRect  = sr;
+                    fpScene.meshDraws.push_back(std::move(d));
+                }
+            }
+
+            // ── Lights from pack ──────────────────────────────────────────────
+            for (const auto& ll : pack.lights)
+            {
+                if (ll.type == world::LevelLightType::Point)
+                {
+                    fpScene.pointLights.push_back({
+                        ll.position,
+                        ll.radius,
+                        ll.color,
+                        ll.intensity
+                    });
+                }
+                else  // Spot
+                {
+                    render::SpotLight sl;
+                    sl.position       = ll.position;
+                    sl.direction      = ll.direction;
+                    sl.innerConeAngle = ll.innerConeAngle;
+                    sl.outerConeAngle = ll.outerConeAngle;
+                    sl.range          = ll.range;
+                    sl.color          = ll.color;
+                    sl.intensity      = ll.intensity;
+                    sl.castsShadows   = true;
+                    fpScene.spotLights.push_back(sl);
+                }
+            }
+
+            // ── Sun + ambient ─────────────────────────────────────────────────
+            fpScene.sunDirection = pack.sun.direction;
+            fpScene.sunColor     = pack.sun.color;
+            fpScene.sunIntensity = pack.sun.intensity;
+            fpScene.ambientColor = dlWorldMap->data().globalAmbientColor;
+
+            // ── Camera ────────────────────────────────────────────────────────
+            fpScene.view      = fpView;
+            fpScene.proj      = fpProj;
+            fpScene.prevView  = (fpFrameIdx == 0u) ? fpView : fpPrevView;
+            fpScene.prevProj  = (fpFrameIdx == 0u) ? fpProj : fpPrevProj;
+            fpScene.cameraPos = fpCamPos;
+            fpScene.cameraDir = camDir;
+
+            // ── Post-FX: disable for dlevel runtime ───────────────────────────
+            fpScene.fog.enabled = false;
+            fpScene.ssr.enabled = false;
+            fpScene.dof.enabled = false;
+
+            fpScene.motionBlur.enabled    = true;
+            fpScene.motionBlur.shutterAngle = 0.25f;
+            fpScene.motionBlur.numSamples   = 8u;
+
+            fpScene.colorGrading.enabled   = true;
+            fpScene.colorGrading.intensity  = 1.0f;
+            fpScene.colorGrading.lutTexture = nullptr;
+
+            fpScene.optionalFx.enabled           = true;
+            fpScene.optionalFx.vignetteIntensity  = 0.30f;
+            fpScene.optionalFx.vignetteRadius     = 0.40f;
+            fpScene.optionalFx.grainAmount        = 0.03f;
+            fpScene.optionalFx.caAmount           = 0.0f;
+
+            fpScene.upscaling.mode = render::UpscalingMode::FXAA;
+
+            // ── Render ────────────────────────────────────────────────────────
+            renderer.renderFrame(*device, *queue, *swapchain, fpScene, dlSwapW, dlSwapH);
+
+            fpPrevView = fpView;
+            fpPrevProj = fpProj;
+            ++fpFrameIdx;
+        }
+
+        // ── 9. Cleanup and exit ───────────────────────────────────────────────
+        SDL_SetWindowRelativeMouseMode(window, false);
+        swapchain.reset();
+        SDL_DestroyWindow(window);
+        SDL_Quit();
+        std::printf("[DLevel] Clean shutdown.\n");
+        return 0;
+    }
+
     // ─── Asset setup ──────────────────────────────────────────────────────────────────────
 
     const std::string assetsDir  = platform->getExecutableDir() + "/assets";
@@ -436,7 +927,7 @@ int main(int argc, char* argv[])
 
             // Also emit the .dmap.json alongside it for inspection.
             const auto jsonPath = std::filesystem::path(assetsDir + "/maps/test_map.dmap.json");
-            world::saveDmapJson(buildTestMap(), jsonPath);  // best-effort
+            (void)world::saveDmapJson(buildTestMap(), jsonPath);  // best-effort
         }
     }
 

@@ -6,6 +6,7 @@
 #include "daedalus/core/types.h"
 #include "daedalus/render/rhi/i_buffer.h"
 #include "daedalus/render/rhi/i_texture.h"
+#include "daedalus/render/rhi/rhi_types.h"
 #include "daedalus/render/particle_pool.h"
 #include "daedalus/render/scene_data.h"
 
@@ -61,6 +62,13 @@ struct MeshDraw
     glm::mat4      prevModel    = glm::mat4(1.0f); ///< For TAA motion vectors
 
     Material       material;                       ///< PBR material for this draw
+
+    /// Optional per-draw portal scissor rect (spec §Pass 1, GPU scissor step).
+    /// When scissorValid is true, FrameRenderer sets this scissor before the
+    /// draw call and restores the full-viewport scissor immediately after.
+    /// When false (the default), no extra setScissor call is made.
+    bool               scissorValid = false;
+    rhi::ScissorRect   scissorRect  = {};
 };
 
 // ─── PointLight ───────────────────────────────────────────────────────────────

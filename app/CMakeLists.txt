@@ -12,6 +12,9 @@ target_link_libraries(DaedalusApp PRIVATE
     DaedalusCore
     DaedalusRender
     DaedalusWorld
+    DaedalusPhysics
+    DaedalusAudio
+    DaedalusScript
     DaedalusThirdParty
     SDL3::SDL3-static
 )

@@ -1,7 +1,9 @@
 add_executable(WorldTests
     test_dmap_io.cpp
+    test_dlevel_io.cpp
     test_sector_tessellator.cpp
     test_portal_traversal.cpp
+    test_pathfinder.cpp
 )
 
 target_link_libraries(WorldTests

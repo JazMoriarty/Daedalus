@@ -4,8 +4,10 @@ target_sources(DaedalusWorld PRIVATE
     src/world_map.cpp
     src/portal_traversal.cpp
     src/sector_tessellator.cpp
+    src/sector_pathfinder.cpp
     src/dmap_binary.cpp
     src/dmap_json.cpp
+    src/dlevel_binary.cpp
 )
 
 target_include_directories(DaedalusWorld

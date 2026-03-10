@@ -1,7 +1,7 @@
 // emap_sidecar.cpp
 // JSON serialisation of editor-only EditMapDocument state.
 //
-// JSON schema (version 3):
+// JSON schema (version 4):
 // {
 //   "version": 2,
 //   "scene": {
@@ -46,7 +46,9 @@
 //       // Component stubs (always persisted):
 //       "physics_shape": 0, "physics_is_static": true, "physics_mass": 1.0,
 //       "script_path": "",
+//       "script_exposed_vars": { "key": "value" },
 //       "audio_sound_path": "", "audio_falloff_radius": 10.0, "audio_loop": false,
+//       "audio_volume": 1.0, "audio_auto_play": true,
 //       // ParticleEmitterParams:
 //       "particle_emission_rate": 10.0, "particle_emit_dir": [0,1,0],
 //       "particle_cone_half_angle": 0.26, "particle_speed_min": 1.0,
@@ -108,7 +110,7 @@ namespace daedalus::editor
 namespace
 {
 
-constexpr int k_VERSION = 3;
+constexpr int k_VERSION = 4;
 
 // ─── Write helpers ────────────────────────────────────────────────────────────
 
@@ -182,9 +184,17 @@ nlohmann::json vec2ToJson(const glm::vec2& v)
         {"physics_is_static",    ed.physics.isStatic},
         {"physics_mass",         ed.physics.mass},
         {"script_path",          ed.script.scriptPath},
+        {"script_exposed_vars",  [&]{
+            nlohmann::json obj = nlohmann::json::object();
+            for (const auto& [k, v] : ed.script.exposedVars)
+                obj[k] = v;
+            return obj;
+        }()},
         {"audio_sound_path",     ed.audio.soundPath},
         {"audio_falloff_radius", ed.audio.falloffRadius},
         {"audio_loop",           ed.audio.loop},
+        {"audio_volume",         ed.audio.volume},
+        {"audio_auto_play",      ed.audio.autoPlay},
         // ParticleEmitterParams
         {"particle_emission_rate",   ed.particle.emissionRate},
         {"particle_emit_dir",        vec3ToJson(ed.particle.emitDir)},
@@ -236,9 +246,14 @@ nlohmann::json vec2ToJson(const glm::vec2& v)
     ed.physics.isStatic     = je["physics_is_static"].get<bool>();
     ed.physics.mass         = je["physics_mass"].get<float>();
     ed.script.scriptPath    = je["script_path"].get<std::string>();
+    if (je.contains("script_exposed_vars") && je["script_exposed_vars"].is_object())
+        for (const auto& [k, v] : je["script_exposed_vars"].items())
+            ed.script.exposedVars.emplace(k, v.get<std::string>());
     ed.audio.soundPath      = je["audio_sound_path"].get<std::string>();
     ed.audio.falloffRadius  = je["audio_falloff_radius"].get<float>();
     ed.audio.loop           = je["audio_loop"].get<bool>();
+    ed.audio.volume         = je.contains("audio_volume")    ? je["audio_volume"].get<float>()  : 1.0f;
+    ed.audio.autoPlay       = je.contains("audio_auto_play") ? je["audio_auto_play"].get<bool>() : true;
     // ParticleEmitterParams
     ed.particle.emissionRate   = je["particle_emission_rate"].get<float>();
     ed.particle.emitDir        = vec3FromJson(je["particle_emit_dir"]);

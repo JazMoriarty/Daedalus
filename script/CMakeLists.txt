@@ -1,7 +1,8 @@
 add_library(DaedalusScript STATIC)
 
 target_sources(DaedalusScript PRIVATE
-    src/stub.cpp
+    src/lua_ecs_bindings.cpp
+    src/sol_script_engine.cpp
 )
 
 target_include_directories(DaedalusScript
@@ -9,7 +10,11 @@ target_include_directories(DaedalusScript
     PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src
 )
 
-target_link_libraries(DaedalusScript PUBLIC DaedalusCore)
+target_link_libraries(DaedalusScript
+    PUBLIC  DaedalusCore
+    PRIVATE lua_static
+            sol2::sol2
+)
 target_compile_features(DaedalusScript PUBLIC cxx_std_23)
 
 if(BUILD_TESTING)

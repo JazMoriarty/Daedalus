@@ -47,6 +47,10 @@
 #include "document/commands/cmd_set_player_start.h"
 #include "catalog/material_catalog.h"
 #include "panels/asset_browser_panel.h"
+#include "daedalus/world/dlevel_io.h"
+
+// stb_image (declaration only — implementation compiled once in asset_loader.cpp)
+#include "stb_image.h"
 
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_metal.h>
@@ -57,6 +61,7 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 using namespace daedalus;
@@ -686,16 +691,142 @@ int main(int /*argc*/, char* /*argv*/[])
                         }
                         else if (sc == SDL_SCANCODE_F5)
                         {
-                            // Save the current map (to its file path, or to a
-                            // temporary file if it has never been saved).
-                            std::filesystem::path mapPath = doc.filePath();
-                            if (mapPath.empty())
-                                mapPath = std::filesystem::temp_directory_path()
-                                          / "daedalus_playtest.dmap";
+                            // Compile the current editor document to a .dlevel bundle
+                            // and launch DaedalusApp with it.  All textures referenced
+                            // by the map are embedded as RGBA8 pixel blobs keyed by UUID.
+                            const std::filesystem::path dlevelPath =
+                                std::filesystem::temp_directory_path()
+                                / "daedalus_playtest.dlevel";
 
-                            if (!doc.saveToFile(mapPath))
+                            // ── Collect material UUIDs referenced by the map ──────
+                            std::unordered_set<UUID, UUIDHash> uuids;
+                            for (const auto& sector : doc.mapData().sectors)
                             {
-                                doc.log("F5 — Test Map: save failed.");
+                                if (sector.floorMaterialId.isValid())
+                                    uuids.insert(sector.floorMaterialId);
+                                if (sector.ceilMaterialId.isValid())
+                                    uuids.insert(sector.ceilMaterialId);
+                                for (const auto& wall : sector.walls)
+                                {
+                                    if (wall.frontMaterialId.isValid())
+                                        uuids.insert(wall.frontMaterialId);
+                                    if (wall.upperMaterialId.isValid())
+                                        uuids.insert(wall.upperMaterialId);
+                                    if (wall.lowerMaterialId.isValid())
+                                        uuids.insert(wall.lowerMaterialId);
+                                }
+                            }
+
+                            // ── Build LevelPackData ───────────────────────────────
+                            world::LevelPackData pack;
+                            pack.map = doc.mapData();
+
+                            // Sun from scene settings.
+                            const auto& ss   = doc.sceneSettings();
+                            pack.sun.direction = ss.sunDirection;
+                            pack.sun.color     = ss.sunColor;
+                            pack.sun.intensity = ss.sunIntensity;
+
+                            // Player start.
+                            if (doc.playerStart().has_value())
+                            {
+                                world::LevelPlayerStart ps;
+                                ps.position = doc.playerStart()->position;
+                                ps.yaw      = doc.playerStart()->yaw;
+                                pack.playerStart = ps;
+                            }
+
+                            // Lights.
+                            for (const auto& ld : doc.lights())
+                            {
+                                world::LevelLight ll;
+                                ll.type = static_cast<world::LevelLightType>(
+                                    static_cast<uint32_t>(ld.type));
+                                ll.position       = ld.position;
+                                ll.color          = ld.color;
+                                ll.radius         = ld.radius;
+                                ll.intensity      = ld.intensity;
+                                ll.direction      = ld.direction;
+                                ll.innerConeAngle = ld.innerConeAngle;
+                                ll.outerConeAngle = ld.outerConeAngle;
+                                ll.range          = ld.range;
+                                pack.lights.push_back(ll);
+                            }
+
+                            // Textures: load each referenced UUID from disk.
+                            for (const UUID& uuid : uuids)
+                            {
+                                const MaterialEntry* entry = catalog.find(uuid);
+                                if (!entry) continue;
+
+                                int imgW = 0, imgH = 0, channels = 0;
+                                stbi_uc* pixels = stbi_load(
+                                    entry->absPath.string().c_str(),
+                                    &imgW, &imgH, &channels, 4);
+                                if (!pixels) continue;
+
+                                world::LevelTexture tex;
+                                tex.width  = static_cast<u32>(imgW);
+                                tex.height = static_cast<u32>(imgH);
+                                tex.pixels.assign(pixels,
+                                                  pixels + imgW * imgH * 4);
+                                stbi_image_free(pixels);
+                                pack.textures.emplace(uuid, std::move(tex));
+                            }
+
+                            // ── Entities ─────────────────────────────────────────
+                            for (const EntityDef& ed : doc.entities())
+                            {
+                                world::LevelEntity ent;
+                                ent.name     = ed.entityName;
+                                ent.position = ed.position;
+                                ent.yaw      = ed.yaw;
+                                ent.sectorId = 0xFFFFFFFFu;  // INVALID; no spatial query here
+
+                                // CollisionShape (editor) → LevelCollisionShape (runtime)
+                                switch (ed.physics.shape)
+                                {
+                                    case CollisionShape::Box:
+                                        ent.shape       = world::LevelCollisionShape::Box;
+                                        ent.halfExtents = ed.scale * 0.5f;
+                                        break;
+                                    case CollisionShape::Sphere:
+                                        // No sphere in LevelCollisionShape — use box
+                                        ent.shape       = world::LevelCollisionShape::Box;
+                                        ent.halfExtents = glm::vec3(
+                                            std::max({ed.scale.x, ed.scale.y, ed.scale.z}) * 0.5f);
+                                        break;
+                                    case CollisionShape::Capsule:
+                                        ent.shape       = world::LevelCollisionShape::Capsule;
+                                        ent.halfExtents = glm::vec3(
+                                            std::min(ed.scale.x, ed.scale.z) * 0.5f,
+                                            ed.scale.y * 0.5f,
+                                            0.0f);
+                                        break;
+                                }
+                                ent.dynamic = !ed.physics.isStatic;
+                                ent.mass    = ed.physics.mass;
+
+                                // Script descriptor (v3)
+                                ent.scriptPath  = ed.script.scriptPath;
+                                ent.exposedVars = ed.script.exposedVars;
+
+                                // Audio descriptor (v3)
+                                ent.soundPath          = ed.audio.soundPath;
+                                ent.soundFalloffRadius = ed.audio.falloffRadius;
+                                ent.soundVolume        = ed.audio.volume;
+                                ent.soundLoop          = ed.audio.loop;
+                                ent.soundAutoPlay      = ed.audio.autoPlay;
+
+                                pack.entities.push_back(std::move(ent));
+                            }
+
+                            // ── Serialise .dlevel ────────────────────────────────
+                            const auto saveResult =
+                                world::saveDlevel(pack, dlevelPath);
+                            if (!saveResult.has_value())
+                            {
+                                doc.log("F5 — Test Map: .dlevel save failed.");
                             }
                             else
                             {
@@ -716,20 +847,20 @@ int main(int /*argc*/, char* /*argv*/[])
                                 {
                                     NSString* appNS = [NSString
                                         stringWithUTF8String:appPath.string().c_str()];
-                                    NSString* mapNS = [NSString
-                                        stringWithUTF8String:mapPath.string().c_str()];
+                                    NSString* levelNS = [NSString
+                                        stringWithUTF8String:dlevelPath.string().c_str()];
 
                                     NSTask* task = [[NSTask alloc] init];
                                     task.executableURL =
                                         [NSURL fileURLWithPath:appNS];
-                                    task.arguments = @[mapNS];
+                                    task.arguments = @[levelNS];
 
                                     NSError* launchErr = nil;
                                     if ([task launchAndReturnError:&launchErr])
                                     {
                                         doc.log(std::format(
                                             "F5 — Test Map launched: '{}'.",
-                                            mapPath.string()));
+                                            dlevelPath.string()));
                                     }
                                     else
                                     {

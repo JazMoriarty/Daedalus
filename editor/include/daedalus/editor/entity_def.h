@@ -8,6 +8,7 @@
 #include <cmath>
 #include <cstdint>
 #include <string>
+#include <unordered_map>
 #include <glm/glm.hpp>
 #include <glm/gtc/constants.hpp>
 
@@ -136,6 +137,10 @@ struct EntityPhysicsProps
 struct EntityScriptProps
 {
     std::string scriptPath;  ///< Path to the Lua behaviour script for this entity.
+
+    /// Named string values injected as Lua globals before the first update() call.
+    /// Keys must be valid Lua identifiers.
+    std::unordered_map<std::string, std::string> exposedVars;
 };
 
 // ─── EntityAudioProps ──────────────────────────────────────────────────────────
@@ -144,8 +149,10 @@ struct EntityScriptProps
 struct EntityAudioProps
 {
     std::string soundPath;                  ///< Path to the sound asset (ogg/wav).
+    float       volume        = 1.0f;       ///< Per-emitter volume multiplier [0, 1].
     float       falloffRadius = 10.0f;      ///< Distance at which volume reaches zero (metres).
     bool        loop          = false;      ///< Whether the sound loops continuously.
+    bool        autoPlay      = true;       ///< Start playing on first AudioSystem::update().
 };
 
 // ─── EntityDef ───────────────────────────────────────────────────────────────

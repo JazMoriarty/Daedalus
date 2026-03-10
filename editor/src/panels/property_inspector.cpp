@@ -1125,6 +1125,81 @@ void PropertyInspector::draw(EditMapDocument&      doc,
                 newDef.script.scriptPath = scriptBuf;
                 doc.pushCommand(std::make_unique<CmdSetEntityProps>(doc, ei, oldDef, newDef));
             }
+
+            // ── Exposed variables ────────────────────────────────────────────
+            ImGui::Spacing();
+            ImGui::SeparatorText("Exposed Variables");
+
+            // Sort for stable display order
+            std::vector<std::pair<std::string, std::string>> vars(
+                ed.script.exposedVars.begin(), ed.script.exposedVars.end());
+            std::sort(vars.begin(), vars.end(),
+                      [](const auto& a, const auto& b){ return a.first < b.first; });
+
+            int toDelete = -1;
+            for (int vi = 0; vi < static_cast<int>(vars.size()); ++vi)
+            {
+                ImGui::PushID(vi);
+                char keyBuf[256] = {};
+                char valBuf[256] = {};
+                std::strncpy(keyBuf, vars[vi].first.c_str(),  255);
+                std::strncpy(valBuf, vars[vi].second.c_str(), 255);
+
+                const float avail = ImGui::GetContentRegionAvail().x;
+                const float btnW  = ImGui::GetFrameHeight();
+                const float half  = (avail - btnW - ImGui::GetStyle().ItemSpacing.x * 2.0f) * 0.5f;
+
+                ImGui::SetNextItemWidth(half);
+                ImGui::InputText("##vkey", keyBuf, sizeof(keyBuf));
+                if (ImGui::IsItemDeactivatedAfterEdit())
+                {
+                    std::string newKey(keyBuf);
+                    if (newKey != vars[vi].first)
+                    {
+                        EntityDef oldDef = ed; EntityDef newDef = ed;
+                        newDef.script.exposedVars.erase(vars[vi].first);
+                        newDef.script.exposedVars.emplace(std::move(newKey), vars[vi].second);
+                        doc.pushCommand(std::make_unique<CmdSetEntityProps>(doc, ei, oldDef, newDef));
+                    }
+                }
+
+                ImGui::SameLine();
+                ImGui::SetNextItemWidth(half);
+                ImGui::InputText("##vval", valBuf, sizeof(valBuf));
+                if (ImGui::IsItemDeactivatedAfterEdit())
+                {
+                    std::string newVal(valBuf);
+                    if (newVal != vars[vi].second)
+                    {
+                        EntityDef oldDef = ed; EntityDef newDef = ed;
+                        newDef.script.exposedVars[vars[vi].first] = std::move(newVal);
+                        doc.pushCommand(std::make_unique<CmdSetEntityProps>(doc, ei, oldDef, newDef));
+                    }
+                }
+
+                ImGui::SameLine();
+                if (ImGui::Button("X"))
+                    toDelete = vi;
+                ImGui::PopID();
+            }
+
+            if (toDelete >= 0)
+            {
+                EntityDef oldDef = ed; EntityDef newDef = ed;
+                newDef.script.exposedVars.erase(vars[toDelete].first);
+                doc.pushCommand(std::make_unique<CmdSetEntityProps>(doc, ei, oldDef, newDef));
+            }
+
+            if (ImGui::Button("Add Variable"))
+            {
+                EntityDef oldDef = ed; EntityDef newDef = ed;
+                std::string newKey = "var";
+                int suffix = 0;
+                while (newDef.script.exposedVars.count(newKey))
+                    newKey = "var" + std::to_string(++suffix);
+                newDef.script.exposedVars.emplace(newKey, "");
+                doc.pushCommand(std::make_unique<CmdSetEntityProps>(doc, ei, oldDef, newDef));
+            }
         }
 
         // ── Audio ───────────────────────────────────────────────────────────────────
@@ -1159,6 +1234,24 @@ void PropertyInspector::draw(EditMapDocument&      doc,
             {
                 EntityDef oldDef = ed; EntityDef newDef = ed;
                 newDef.audio.loop = loop;
+                doc.pushCommand(std::make_unique<CmdSetEntityProps>(doc, ei, oldDef, newDef));
+            }
+
+            float volume = ed.audio.volume;
+            ImGui::SetNextItemWidth(-1.0f);
+            ImGui::SliderFloat("##svol", &volume, 0.0f, 1.0f, "Volume: %.2f");
+            if (ImGui::IsItemDeactivatedAfterEdit() && volume != ed.audio.volume)
+            {
+                EntityDef oldDef = ed; EntityDef newDef = ed;
+                newDef.audio.volume = volume;
+                doc.pushCommand(std::make_unique<CmdSetEntityProps>(doc, ei, oldDef, newDef));
+            }
+
+            bool autoPlay = ed.audio.autoPlay;
+            if (ImGui::Checkbox("Auto-Play##audio", &autoPlay))
+            {
+                EntityDef oldDef = ed; EntityDef newDef = ed;
+                newDef.audio.autoPlay = autoPlay;
                 doc.pushCommand(std::make_unique<CmdSetEntityProps>(doc, ei, oldDef, newDef));
             }
         }
