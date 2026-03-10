@@ -152,7 +152,9 @@ The complete sequence of render graph passes executed every frame, in order:
 
 #### Pass 1 — Portal Traversal (CPU)
 
-Runs on the CPU before any GPU work is submitted. Starting from the camera's sector, the traversal projects the visible window (initially the full screen frustum) onto each portal opening, clips the window against the portal rectangle in screen space, and recurses into the adjacent sector with the clipped window. The result is a small list of visible sectors and their contributing portal windows. Only geometry and entities from visible sectors are submitted to the GPU. Sector geometry is pre-built and cached on the GPU; traversal only determines what to draw, not how to tessellate it.
+Runs on the CPU before any GPU work is submitted. Starting from the camera's sector, the traversal projects the visible window (initially the full screen frustum) onto each portal opening, clips the window against the portal rectangle in screen space, and recurses into the adjacent sector with the clipped window. The result is a small list of visible sectors, each accompanied by an NDC-space portal window — the screen-space rectangle representing the intersection of all portal openings on the path to that sector from the camera.
+
+Only geometry and entities from visible sectors are submitted to the GPU. Each sector's portal window is forwarded to the renderer as a GPU scissor rect when submitting that sector's draw calls. This ensures geometry from a sector behind a portal cannot render outside the opening through which it is visible — a correctness requirement (preventing geometry bleed at oblique viewing angles) and a performance primitive (eliminating overdraw in deeply nested portal chains on complex levels). Sector geometry is pre-built and cached on the GPU; traversal only determines what to draw, not how to tessellate it.
 
 #### Pass 2 — Animation Update
 
@@ -325,9 +327,13 @@ Materials are data assets defining: albedo map, normal map, roughness map, metal
 
 Defines the Daedalus map format and world representation.
 
-### The .dmap Format
+### Level Data Formats
 
-A clean binary format designed for Daedalus. Not compatible with Build or Build2 — designed from scratch to accommodate all Daedalus features from day one. The format is versioned and forwards-compatible. An ASCII representation (`.dmap.json`) is available for debugging and source control diffs.
+Daedalus uses three distinct level data formats with clearly separated concerns:
+
+- **`.emap`** — the editor's source format. Contains the complete editable state of a map: sector and wall geometry, entity placements with full property bags, layer assignments, material UUID references for all surfaces, and editor metadata (grid settings, camera state). This is what DaedalusEdit saves and loads. It is never read by the game runtime.
+- **`.dmap`** — a compact binary subset written by the editor alongside `.emap`. Contains geometry and material UUID references; used as the input to the level compile step. An ASCII variant (`.dmap.json`) is available for debugging and source control diffs. Versioned and forwards-compatible.
+- **`.dlevel`** — the compiled runtime level pack produced by the compile step. The only level format loaded by DaedalusApp. See **The .dlevel Level Pack** section below.
 
 ### World Model
 
@@ -345,6 +351,19 @@ Sector-Over-Sector is native. A single vertical column of space can contain mult
 ### Portal Visibility
 
 At runtime, the visible sector set is determined by a portal traversal algorithm starting from the camera's sector. The traversal clips the visible frustum against each portal rectangle as it crosses sector boundaries. Only visible sectors submit geometry to the renderer. This is the core performance primitive of the 2.5D paradigm.
+
+### The .dlevel Level Pack
+
+`.dlevel` is the compiled binary level format loaded exclusively by the game runtime. The editor's source formats (`.emap`, `.dmap`) are never read by DaedalusApp. The compile step — triggered automatically on F5 or explicitly for distribution export — produces a `.dlevel` containing:
+
+- **Sector geometry** — vertex and index data per sector, each surface tagged by material UUID, ready for GPU upload.
+- **Entity placements** — all placed entities (props, enemies, lights, triggers, player start, sound emitters) with their type UUID, world transform, sector assignment, and serialised property values.
+- **Compiled binary textures** — every texture referenced in the level compiled offline to a GPU-native format (BC7 for colour maps, BC5 for normal maps), keyed by UUID. Shared textures are deduplicated — each UUID appears once regardless of how many surfaces reference it.
+- **Portal graph** — precomputed sector adjacency for fast traversal initialisation at load time.
+
+Assets are resolved UUID → GPU texture entirely from the pack; no filesystem path lookups occur at runtime. This satisfies the DaedalusCore invariant: assets are addressed by UUID — never by path at runtime.
+
+For distribution, all `.dlevel` files and shared compiled assets are bundled into a `.dpak` archive — a flat binary container analogous to Build's `.GRP` group file. DaedalusApp accepts either a standalone `.dlevel` path (development) or a `.dpak` path (distribution).
 
 ---
 
@@ -536,7 +555,7 @@ Continuous background validation: crossing walls (red), unclosed sectors (highli
 
 ### Map Testing
 
-F5 compiles the current map and launches a test session in the game runtime. The editor remains open. No file export required — the test session reads directly from the editor's live map data.
+F5 triggers a background level compile — the editor assembles a temporary `.dlevel` level pack from the current map data and launches the game runtime against it. The editor remains open. No manual export step is required; from the designer's perspective it is a single keystroke. The runtime never loads editor formats (`.emap`, `.dmap`) directly — it always receives a compiled `.dlevel` pack, even for test sessions.
 
 ### Core Keyboard Shortcuts
 
