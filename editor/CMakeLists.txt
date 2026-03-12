@@ -79,14 +79,16 @@ target_compile_features(DaedalusEdit PRIVATE cxx_std_23)
 if(DAEDALUS_PLATFORM_MACOS)
     target_compile_definitions(DaedalusEdit PRIVATE DAEDALUS_BACKEND_METAL)
 
-    find_library(METAL_FRAMEWORK     Metal       REQUIRED)
-    find_library(QUARTZCORE_FRAMEWORK QuartzCore REQUIRED)
-    find_library(COCOA_FRAMEWORK      Cocoa      REQUIRED)
+    find_library(METAL_FRAMEWORK       Metal       REQUIRED)
+    find_library(QUARTZCORE_FRAMEWORK   QuartzCore REQUIRED)
+    find_library(COCOA_FRAMEWORK        Cocoa      REQUIRED)
+    find_library(COREGRAPHICS_FRAMEWORK CoreGraphics REQUIRED)
 
     target_link_libraries(DaedalusEdit PRIVATE
         ${METAL_FRAMEWORK}
         ${QUARTZCORE_FRAMEWORK}
         ${COCOA_FRAMEWORK}
+        ${COREGRAPHICS_FRAMEWORK}
     )
 
     # Enable ARC for the Obj-C++ entry point.

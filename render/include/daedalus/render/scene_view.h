@@ -47,6 +47,12 @@ struct Material
     /// Static geometry leaves these at their defaults (full texture, no offset).
     glm::vec2 uvOffset = glm::vec2(0.0f);  ///< UV origin of the active frame cell.
     glm::vec2 uvScale  = glm::vec2(1.0f);  ///< UV size of one frame cell.
+
+    /// Per-sector ambient light color (pre-multiplied by intensity).
+    /// Baked into the G-buffer emissive channel so every sector can have its own
+    /// ambient color independent of the global frame ambient.
+    /// Entities use globalAmbientColor * globalAmbientIntensity set from the CPU.
+    glm::vec3 sectorAmbient = glm::vec3(0.0f);
 };
 
 // ─── MeshDraw ─────────────────────────────────────────────────────────────────

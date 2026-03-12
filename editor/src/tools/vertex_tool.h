@@ -33,6 +33,13 @@ public:
                      float mapX, float mapZ,
                      int   button) override;
 
+    /// True while a vertex is being live-dragged (for vertex snap).
+    [[nodiscard]] bool            isDragging()    const noexcept { return m_dragging; }
+
+    /// Sector/wall of the vertex currently being dragged (valid only when isDragging()).
+    [[nodiscard]] world::SectorId dragSectorId()  const noexcept { return m_dragSectorId; }
+    [[nodiscard]] std::size_t     dragWallIndex()  const noexcept { return m_dragWallIndex; }
+
 private:
     /// Pick radius in map units — slightly larger than SelectTool's to make
     /// individual vertices easier to click in vertex-only mode.

@@ -1,21 +1,18 @@
 // dlevel_binary.cpp
-// Binary .dlevel v2 serialisation / deserialisation.
+// Binary .dlevel v4 serialisation / deserialisation.
 //
-// ─── Format specification (version 2) ────────────────────────────────────────
+// ─── Format specification (version 4) ─────────────────────────────────────────────────────────────────────────────────────────────────────────────
 //
 // All multi-byte integers are little-endian.
 //
 // Header (28 bytes):
 //   [4]  magic          u32 = 0x4C564C44  ('D','L','V','L' as little-endian)
-//   [4]  version        u32 = 2
+//   [4]  version        u32 = 4  (exact match required)
 //   [4]  sectorCount    u32
 //   [4]  textureCount   u32
 //   [4]  lightCount     u32
 //   [4]  hasPlayerStart u32  (0 = absent, 1 = present)
-//   [4]  entityCount    u32   ← added in v2; absent in v1 files
-//
-// (Version 1 header was 24 bytes with no entityCount field. v2 readers treat
-//  v1 files as entityCount = 0 and do not attempt to read the entity section.)
+//   [4]  entityCount    u32
 //
 // Map meta (variable):
 //   [2]  nameLen        u16  (byte length of name string)
@@ -98,13 +95,45 @@
 //     [2]  valueLen u16
 //     [valueLen] value UTF-8
 //
-//   --- Audio descriptor (v3) ---
+//   --- Audio descriptor ---
 //   [2]  soundPathLen    u16
 //   [soundPathLen] soundPath UTF-8
 //   [4]  soundFalloffRadius f32
 //   [4]  soundVolume        f32
 //   [4]  soundLoop          u32  (0 = false, 1 = true)
 //   [4]  soundAutoPlay      u32  (0 = false, 1 = true)
+//
+//   --- Visual descriptor (v4) ---
+//   [4]  visualType      u32  (LevelEntityVisualType; 0xFF = None)
+//   [2]  assetPathLen    u16
+//   [assetPathLen] assetPath UTF-8
+//   [16] tint            f32[4]
+//   [12] visualScale     f32[3]
+//   [4]  visualPitch     f32
+//   [4]  visualRoll      f32
+//   [4]  animFrameCount  u32
+//   [4]  animCols        u32
+//   [4]  animRows        u32
+//   [4]  animFrameRate   f32
+//   [4]  rotatedSpriteDirCount u32
+//   [2]  decalNormalPathLen u16
+//   [decalNormalPathLen] decalNormalPath UTF-8
+//   [4]  decalRoughness  f32
+//   [4]  decalMetalness  f32
+//   [4]  decalOpacity    f32
+//   [4]  particleEmissionRate   f32
+//   [12] particleEmitDir        f32[3]
+//   [4]  particleConeHalfAngle  f32
+//   [4]  particleSpeedMin       f32
+//   [4]  particleSpeedMax       f32
+//   [4]  particleLifetimeMin    f32
+//   [4]  particleLifetimeMax    f32
+//   [16] particleColorStart     f32[4]
+//   [16] particleColorEnd       f32[4]
+//   [4]  particleSizeStart      f32
+//   [4]  particleSizeEnd        f32
+//   [4]  particleDrag           f32
+//   [12] particleGravity        f32[3]
 
 #include "daedalus/world/dlevel_io.h"
 
@@ -118,7 +147,7 @@ namespace
 {
 
 constexpr u32 k_MAGIC   = 0x4C564C44u;  // 'D','L','V','L' as little-endian u32
-constexpr u32 k_VERSION = 3u;
+constexpr u32 k_VERSION = 4u;
 
 // ─── Write helpers ────────────────────────────────────────────────────────────
 
@@ -295,10 +324,10 @@ std::expected<void, DlevelError> saveDlevel(const LevelPackData&         pack,
         w.write(pack.playerStart->yaw);
     }
 
-    // ── Entities (v3) ──────────────────────────────────────────────────────────────────────
+    // ── Entities ─────────────────────────────────────────────────────────────
     for (const LevelEntity& ent : pack.entities)
     {
-        // v2 base fields
+        // base fields
         w.writeStr(ent.name);
         w.writeVec3(ent.position);
         w.write(ent.yaw);
@@ -308,7 +337,7 @@ std::expected<void, DlevelError> saveDlevel(const LevelPackData&         pack,
         w.write(ent.mass);
         w.writeVec3(ent.halfExtents);
 
-        // v3 script descriptor
+        // script descriptor
         w.writeStr(ent.scriptPath);
         w.write(static_cast<u32>(ent.exposedVars.size()));
         for (const auto& [k, v] : ent.exposedVars)
@@ -317,12 +346,44 @@ std::expected<void, DlevelError> saveDlevel(const LevelPackData&         pack,
             w.writeStr(v);
         }
 
-        // v3 audio descriptor
+        // audio descriptor
         w.writeStr(ent.soundPath);
         w.write(ent.soundFalloffRadius);
         w.write(ent.soundVolume);
         w.write(static_cast<u32>(ent.soundLoop     ? 1u : 0u));
         w.write(static_cast<u32>(ent.soundAutoPlay  ? 1u : 0u));
+
+        // v4 visual descriptor
+        w.write(static_cast<u32>(ent.visualType));
+        w.writeStr(ent.assetPath);
+        w.write(ent.tint.r); w.write(ent.tint.g); w.write(ent.tint.b); w.write(ent.tint.a);
+        w.writeVec3(ent.visualScale);
+        w.write(ent.visualPitch);
+        w.write(ent.visualRoll);
+        w.write(ent.animFrameCount);
+        w.write(ent.animCols);
+        w.write(ent.animRows);
+        w.write(ent.animFrameRate);
+        w.write(ent.rotatedSpriteDirCount);
+        w.writeStr(ent.decalNormalPath);
+        w.write(ent.decalRoughness);
+        w.write(ent.decalMetalness);
+        w.write(ent.decalOpacity);
+        w.write(ent.particleEmissionRate);
+        w.writeVec3(ent.particleEmitDir);
+        w.write(ent.particleConeHalfAngle);
+        w.write(ent.particleSpeedMin);
+        w.write(ent.particleSpeedMax);
+        w.write(ent.particleLifetimeMin);
+        w.write(ent.particleLifetimeMax);
+        w.write(ent.particleColorStart.r); w.write(ent.particleColorStart.g);
+        w.write(ent.particleColorStart.b); w.write(ent.particleColorStart.a);
+        w.write(ent.particleColorEnd.r); w.write(ent.particleColorEnd.g);
+        w.write(ent.particleColorEnd.b); w.write(ent.particleColorEnd.a);
+        w.write(ent.particleSizeStart);
+        w.write(ent.particleSizeEnd);
+        w.write(ent.particleDrag);
+        w.writeVec3(ent.particleGravity);
     }
 
     if (!ofs) { return std::unexpected(DlevelError::WriteError); }
@@ -358,14 +419,10 @@ std::expected<LevelPackData, DlevelError> loadDlevel(const std::filesystem::path
         return std::unexpected(DlevelError::ParseError);
     }
     if (magic   != k_MAGIC)   { return std::unexpected(DlevelError::ParseError);      }
-    if (version >  k_VERSION) { return std::unexpected(DlevelError::VersionMismatch); }
+    if (version != k_VERSION)  { return std::unexpected(DlevelError::VersionMismatch); }
 
-    // v2 adds entityCount to the header; v1 files have no such field.
     u32 entityCount = 0;
-    if (version >= 2u)
-    {
-        if (!r.read(entityCount)) { return std::unexpected(DlevelError::ParseError); }
-    }
+    if (!r.read(entityCount)) { return std::unexpected(DlevelError::ParseError); }
 
     LevelPackData pack;
 
@@ -469,14 +526,14 @@ std::expected<LevelPackData, DlevelError> loadDlevel(const std::filesystem::path
         pack.playerStart = ps;
     }
 
-    // ── Entities (v3) ──────────────────────────────────────────────────────────────────────
+    // ── Entities ─────────────────────────────────────────────────────────────
     pack.entities.resize(entityCount);
     for (u32 ei = 0; ei < entityCount; ++ei)
     {
         LevelEntity& ent = pack.entities[ei];
         u32 shapeRaw = 0, dynamicRaw = 0;
 
-        // v2 base fields
+        // base fields
         if (!r.readStr(ent.name)          ||
             !r.readVec3(ent.position)     ||
             !r.read(ent.yaw)              ||
@@ -490,7 +547,7 @@ std::expected<LevelPackData, DlevelError> loadDlevel(const std::filesystem::path
         ent.shape   = static_cast<LevelCollisionShape>(shapeRaw);
         ent.dynamic = (dynamicRaw != 0u);
 
-        // v3 script descriptor
+        // script descriptor
         if (!r.readStr(ent.scriptPath))
             return std::unexpected(DlevelError::ParseError);
 
@@ -505,7 +562,7 @@ std::expected<LevelPackData, DlevelError> loadDlevel(const std::filesystem::path
             ent.exposedVars.emplace(std::move(k), std::move(v));
         }
 
-        // v3 audio descriptor
+        // audio descriptor
         u32 loopRaw = 0, autoPlayRaw = 0;
         if (!r.readStr(ent.soundPath)         ||
             !r.read(ent.soundFalloffRadius)   ||
@@ -516,6 +573,53 @@ std::expected<LevelPackData, DlevelError> loadDlevel(const std::filesystem::path
 
         ent.soundLoop     = (loopRaw     != 0u);
         ent.soundAutoPlay = (autoPlayRaw != 0u);
+
+        // v4 visual descriptor
+        u32 visualTypeRaw = 0;
+        if (!r.read(visualTypeRaw))
+            return std::unexpected(DlevelError::ParseError);
+        ent.visualType = static_cast<LevelEntityVisualType>(visualTypeRaw);
+
+        if (!r.readStr(ent.assetPath))
+            return std::unexpected(DlevelError::ParseError);
+        if (!r.read(ent.tint.r) || !r.read(ent.tint.g) ||
+            !r.read(ent.tint.b) || !r.read(ent.tint.a))
+            return std::unexpected(DlevelError::ParseError);
+        if (!r.readVec3(ent.visualScale))
+            return std::unexpected(DlevelError::ParseError);
+        if (!r.read(ent.visualPitch) || !r.read(ent.visualRoll))
+            return std::unexpected(DlevelError::ParseError);
+        if (!r.read(ent.animFrameCount) || !r.read(ent.animCols) ||
+            !r.read(ent.animRows)       || !r.read(ent.animFrameRate))
+            return std::unexpected(DlevelError::ParseError);
+        if (!r.read(ent.rotatedSpriteDirCount))
+            return std::unexpected(DlevelError::ParseError);
+        if (!r.readStr(ent.decalNormalPath))
+            return std::unexpected(DlevelError::ParseError);
+        if (!r.read(ent.decalRoughness) || !r.read(ent.decalMetalness) ||
+            !r.read(ent.decalOpacity))
+            return std::unexpected(DlevelError::ParseError);
+        if (!r.read(ent.particleEmissionRate))
+            return std::unexpected(DlevelError::ParseError);
+        if (!r.readVec3(ent.particleEmitDir))
+            return std::unexpected(DlevelError::ParseError);
+        if (!r.read(ent.particleConeHalfAngle) ||
+            !r.read(ent.particleSpeedMin)      ||
+            !r.read(ent.particleSpeedMax)      ||
+            !r.read(ent.particleLifetimeMin)   ||
+            !r.read(ent.particleLifetimeMax))
+            return std::unexpected(DlevelError::ParseError);
+        if (!r.read(ent.particleColorStart.r) || !r.read(ent.particleColorStart.g) ||
+            !r.read(ent.particleColorStart.b) || !r.read(ent.particleColorStart.a))
+            return std::unexpected(DlevelError::ParseError);
+        if (!r.read(ent.particleColorEnd.r) || !r.read(ent.particleColorEnd.g) ||
+            !r.read(ent.particleColorEnd.b)  || !r.read(ent.particleColorEnd.a))
+            return std::unexpected(DlevelError::ParseError);
+        if (!r.read(ent.particleSizeStart) || !r.read(ent.particleSizeEnd) ||
+            !r.read(ent.particleDrag))
+            return std::unexpected(DlevelError::ParseError);
+        if (!r.readVec3(ent.particleGravity))
+            return std::unexpected(DlevelError::ParseError);
     }
 
     return pack;

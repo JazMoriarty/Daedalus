@@ -89,14 +89,15 @@ static_assert(sizeof(SpotLightGPU) == 64, "SpotLightGPU size mismatch");
 // Per-draw material scalars uploaded to the G-buffer and transparent fragment stages.
 // Matches MaterialConstants in common.h exactly.
 //
-// Layout (48 bytes):
+// Layout (64 bytes):
 //   [0]  roughness        f32
 //   [1]  metalness        f32
 //   [2]  isMirrorSurface  f32  (1.0 = mirror surface — use projective RT UV for emissive; 0.0 = standard)
 //   [3]  pad1             f32
-//   [4–7] tint      vec4  (rgba multiplier; rgb=albedo tint, a=opacity; default=1,1,1,1)
-//   [8–9] uvOffset  vec2  (UV origin of the active sprite sheet frame cell; default=0,0)
-//   [10–11] uvScale vec2  (UV size of one frame cell; default=1,1)
+//   [4–7]  tint         vec4  (rgba multiplier; rgb=albedo tint, a=opacity; default=1,1,1,1)
+//   [8–9]  uvOffset     vec2  (UV origin of the active sprite sheet frame cell; default=0,0)
+//   [10–11] uvScale     vec2  (UV size of one frame cell; default=1,1)
+//   [12–15] sectorAmbient vec4  (xyz = per-sector ambient color × intensity; w unused; default=0)
 
 struct alignas(16) MaterialConstantsGPU
 {
@@ -104,11 +105,12 @@ struct alignas(16) MaterialConstantsGPU
     f32       metalness        = 0.0f;
     f32       isMirrorSurface  = 0.0f;  ///< 1.0 = sample emissive via projective mirror UV.
     f32       pad1             = 0.0f;
-    glm::vec4 tint      = glm::vec4(1.0f);  ///< Albedo tint (rgb) + opacity override (a).
-    glm::vec2 uvOffset  = glm::vec2(0.0f);  ///< UV origin of the active frame cell.
-    glm::vec2 uvScale   = glm::vec2(1.0f);  ///< UV size of one frame cell.
+    glm::vec4 tint          = glm::vec4(1.0f);  ///< Albedo tint (rgb) + opacity override (a).
+    glm::vec2 uvOffset      = glm::vec2(0.0f);  ///< UV origin of the active frame cell.
+    glm::vec2 uvScale       = glm::vec2(1.0f);  ///< UV size of one frame cell.
+    glm::vec4 sectorAmbient = glm::vec4(0.0f);  ///< Per-sector ambient color × intensity (xyz); w unused.
 };
-static_assert(sizeof(MaterialConstantsGPU) == 48, "MaterialConstantsGPU must be 48 bytes");
+static_assert(sizeof(MaterialConstantsGPU) == 64, "MaterialConstantsGPU must be 64 bytes");
 
 // ─── DecalConstantsGPU ──────────────────────────────────────────────────────────────────────────
 // Per-decal data uploaded to vertex and fragment stages.

@@ -157,7 +157,10 @@ fragment GBufFragOut gbuffer_frag(
     {
         emissiveRGB = emissiveTex.sample(samp, uv).rgb;
     }
-    out.emissive = float4(emissiveRGB, 0.0);
+    // Bake per-sector ambient contribution (ambient color × intensity × albedo) into the
+    // emissive channel.  The lighting pass reads this additively so each sector gets its
+    // own ambient independent of the global frame.ambientColor (which is zeroed on the CPU).
+    out.emissive = float4(emissiveRGB + mat.sectorAmbient.xyz * albedo, 0.0);
 
     // ─── Motion vectors (NDC delta → UV delta) ──────────────────────────────────────
     float2 currNDC   = in.currClip.xy / in.currClip.w;

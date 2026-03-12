@@ -14,10 +14,14 @@ struct ImVec2;
 namespace daedalus::editor
 {
 
+/// Object type awaiting click-to-place in the 2D viewport.
+enum class PendingPlacement : uint8_t { None, Entity, Light };
+
 class EditMapDocument;
 class IEditorTool;
 class DrawSectorTool;
 class SelectTool;
+class VertexTool;
 
 /// 2D top-down viewport.
 /// Draws the map using ImGui DrawList and dispatches mouse input to the
@@ -36,7 +40,8 @@ public:
     void draw(EditMapDocument& doc,
               IEditorTool*     activeTool,
               DrawSectorTool*  drawTool,
-              SelectTool*      selectTool);
+              SelectTool*      selectTool,
+              VertexTool*      vertexTool);
 
     // ─── Camera state (accessed by DrawSectorTool overlay) ────────────────────
 
@@ -47,7 +52,8 @@ public:
     void setGridStep   (float step) noexcept { m_gridStep    = step; }
     void setSnapEnabled(bool  on)   noexcept { m_snapEnabled = on;   }
     void setGridVisible(bool  on)   noexcept { m_gridVisible = on;   }
-    [[nodiscard]] bool gridVisible() const noexcept { return m_gridVisible; }
+    [[nodiscard]] bool gridVisible()  const noexcept { return m_gridVisible;  }
+    [[nodiscard]] bool snapEnabled()  const noexcept { return m_snapEnabled;  }
 
     /// Last raw (unsnapped) map-space mouse position, updated every draw().
     /// Used by main.mm when placing objects via keyboard shortcut.
@@ -60,6 +66,19 @@ public:
     /// Request that the rotate-sector popup be opened for the given sector on
     /// the next draw() call.  Dispatched from main.mm on R key.
     void openRotatePopup(world::SectorId sectorId) noexcept;
+
+    /// Ghost placement mode: pressing E/L arms a pending placement that follows
+    /// the cursor and is committed on the first left-click.  ESC cancels.
+    void beginPendingPlacement(PendingPlacement type) noexcept;
+    void cancelPendingPlacement() noexcept;
+    /// Returns true (once) when the user clicked to place; fills outMapPos.
+    bool consumePendingPlacement(glm::vec2& outMapPos) noexcept;
+    [[nodiscard]] bool             hasPendingPlacement()   const noexcept { return m_pendingPlacement != PendingPlacement::None; }
+    [[nodiscard]] PendingPlacement pendingPlacementType()  const noexcept { return m_pendingPlacement; }
+
+    /// Update the 3D fly-camera state used for the 2D overlay icon.
+    /// Called from main.mm each frame before draw().
+    void updateFlyCamera(bool captured, glm::vec2 eyeXZ, float yawRad) noexcept;
 
     /// Expose rect-select state so the select tool can draw the overlay.
     [[nodiscard]] bool      isRectSelecting()   const noexcept { return m_rectSelActive; }
@@ -103,6 +122,20 @@ private:
     bool            m_rotatePopupOpen     = false;
     world::SectorId m_rotatePopupSectorId = 0;
     float           m_rotatePopupAngleDeg = 45.0f;
+
+    // Vertex snap indicator state (computed each frame from drag state).
+    world::SectorId m_vertexSnapSectorId  = world::INVALID_SECTOR_ID;
+    std::size_t     m_vertexSnapWallIndex = 0;
+
+    // Ghost placement state.
+    PendingPlacement m_pendingPlacement      = PendingPlacement::None;
+    bool             m_pendingPlacementFired = false;
+    glm::vec2        m_pendingPlacementPos   = {};
+
+    // 3D fly-camera overlay state (updated by main.mm each frame via updateFlyCamera).
+    bool      m_flyCameraActive = false;
+    glm::vec2 m_flyCameraPos    = {};
+    float     m_flyCameraYaw    = 0.0f;
 
     // Continuous validation overlay cache.
     std::vector<WallHighlight> m_wallHighlights;    ///< Last computed highlights.

@@ -112,6 +112,7 @@ void SelectTool::onMouseDown(EditMapDocument& doc,
                 m_dragOrig2     = wls[(bestWall + 1) % n].p0;
                 m_dragClickPos  = p;
                 m_dragMoved     = false;
+                m_dragFirstMove = true;
             }
             return;
         }
@@ -155,10 +156,11 @@ void SelectTool::onMouseDown(EditMapDocument& doc,
             for (const auto& wall : walls)
                 m_dragOrigAll.push_back(wall.p0);
 
-            m_dragTarget   = DragTarget::Sector;
-            m_dragSectorId = hit;
-            m_dragClickPos = p;
-            m_dragMoved    = false;
+            m_dragTarget    = DragTarget::Sector;
+            m_dragSectorId  = hit;
+            m_dragClickPos  = p;
+            m_dragMoved     = false;
+            m_dragFirstMove = true;
         }
     }
 }
@@ -173,6 +175,18 @@ void SelectTool::onMouseMove(EditMapDocument& doc,
 
     const glm::vec2 mouse{mapX, mapZ};
     auto& sectors = doc.mapData().sectors;
+
+    // Align the drag anchor to the first grid-snapped mouse position so that
+    // the delta is always computed in snapped space.  Without this, clicking
+    // off-grid would produce a non-zero delta even before the mouse moves,
+    // shifting any wall endpoints that lie at off-grid positions (e.g. after
+    // a vertex snap).
+    if (m_dragFirstMove &&
+        (m_dragTarget == DragTarget::Wall || m_dragTarget == DragTarget::Sector))
+    {
+        m_dragClickPos  = mouse;
+        m_dragFirstMove = false;
+    }
 
     switch (m_dragTarget)
     {

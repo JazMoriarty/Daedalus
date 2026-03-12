@@ -55,14 +55,17 @@
 #include "daedalus/render/particle_pool.h"
 
 #include <SDL3/SDL.h>
+#include <CoreGraphics/CoreGraphics.h>
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
+#include <glm/gtc/quaternion.hpp>
 
 #include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <memory>
 #include <unordered_map>
 
@@ -488,14 +491,53 @@ int main(int argc, char* argv[])
             DAEDALUS_ASSERT(charResult.has_value(), "[DLevel] addCharacter failed");
         }
 
-        // ── 5d. Register placed entities (physics + script + audio) ──────────────
+        // ── 5d-setup. Asset loader + shared unit quad for billboard sprites ───────
+        auto dlAssetLoader = render::makeAssetLoader();
+
+        const render::MeshData dlUnitQuadData = render::makeUnitQuadMesh();
+        std::unique_ptr<rhi::IBuffer> dlUnitQuadVBO;
+        std::unique_ptr<rhi::IBuffer> dlUnitQuadIBO;
+        {
+            rhi::BufferDescriptor d;
+            d.size      = dlUnitQuadData.vertices.size() * sizeof(render::StaticMeshVertex);
+            d.usage     = rhi::BufferUsage::Vertex;
+            d.initData  = dlUnitQuadData.vertices.data();
+            d.debugName = "DL_UnitQuadVBO";
+            dlUnitQuadVBO = device->createBuffer(d);
+        }
+        {
+            rhi::BufferDescriptor d;
+            d.size      = dlUnitQuadData.indices.size() * sizeof(u32);
+            d.usage     = rhi::BufferUsage::Index;
+            d.initData  = dlUnitQuadData.indices.data();
+            d.debugName = "DL_UnitQuadIBO";
+            dlUnitQuadIBO = device->createBuffer(d);
+        }
+
+        // GPU resource ownership for placed entity visuals.
+        // Indexed in insertion order; owned for the lifetime of the dlevel session.
+        std::vector<std::unique_ptr<rhi::ITexture>>         dlEntityTextures;
+        std::vector<std::unique_ptr<rhi::IBuffer>>          dlEntityBuffers;
+        std::vector<std::unique_ptr<render::ParticlePool>>  dlEntityPools;
+
+        // ── 5d. Register placed entities (physics + script + audio + visual) ────
         {
             u32 registered = 0u;
             for (const world::LevelEntity& ent : pack.entities)
             {
                 const EntityId entityId = dlWorld.createEntity();
+
+                // Build transform: position + yaw+pitch+roll rotation + visual scale.
+                // Yaw rotates around Y, pitch around X, roll around Z.
+                const glm::quat dlRot =
+                    glm::angleAxis(ent.yaw,         glm::vec3(0.f, 1.f, 0.f))
+                    * glm::angleAxis(ent.visualPitch, glm::vec3(1.f, 0.f, 0.f))
+                    * glm::angleAxis(ent.visualRoll,  glm::vec3(0.f, 0.f, 1.f));
+
                 dlWorld.addComponent(entityId, daedalus::TransformComponent{
-                    .position = ent.position
+                    .position = ent.position,
+                    .rotation = dlRot,
+                    .scale    = ent.visualScale
                 });
 
                 // Physics body (optional; None = decorative / script-only)
@@ -543,6 +585,200 @@ int main(int argc, char* argv[])
                         .autoPlay      = ent.soundAutoPlay,
                     });
                 }
+
+                // Visual component (optional; skip if None or asset path missing)
+                if (ent.visualType != world::LevelEntityVisualType::None)
+                {
+                    // Helper: load a texture from path, push to dlEntityTextures, return raw ptr.
+                    // Returns nullptr on failure (non-fatal).
+                    auto loadEntityTex = [&](const std::string& path, bool sRGB) -> rhi::ITexture*
+                    {
+                        if (path.empty()) { return nullptr; }
+                        auto res = dlAssetLoader->loadTexture(*device,
+                                                             std::filesystem::path(path), sRGB);
+                        if (!res.has_value())
+                        {
+                            std::fprintf(stderr,
+                                "[DLevel] Warning: failed to load texture '%s'\n", path.c_str());
+                            return nullptr;
+                        }
+                        dlEntityTextures.push_back(std::move(*res));
+                        return dlEntityTextures.back().get();
+                    };
+
+                    switch (ent.visualType)
+                    {
+                    case world::LevelEntityVisualType::BillboardCutout:
+                    case world::LevelEntityVisualType::BillboardBlended:
+                    {
+                        rhi::ITexture* tex = loadEntityTex(ent.assetPath, true);
+                        render::BillboardSpriteComponent bc;
+                        bc.texture   = tex;
+                        bc.size      = glm::vec2(ent.visualScale.x, ent.visualScale.y);
+                        bc.alphaMode = (ent.visualType == world::LevelEntityVisualType::BillboardBlended)
+                                           ? render::AlphaMode::Blended
+                                           : render::AlphaMode::Cutout;
+                        bc.tint      = ent.tint;
+                        dlWorld.addComponent(entityId, std::move(bc));
+                        break;
+                    }
+                    case world::LevelEntityVisualType::AnimatedBillboard:
+                    case world::LevelEntityVisualType::RotatedSpriteSet:
+                    {
+                        // RotatedSpriteSet uses the animated path with direction count as columns;
+                        // per-frame angle-driven column selection is a future enhancement.
+                        rhi::ITexture* tex = loadEntityTex(ent.assetPath, true);
+                        render::BillboardSpriteComponent bc;
+                        bc.texture   = tex;
+                        bc.size      = glm::vec2(ent.visualScale.x, ent.visualScale.y);
+                        bc.alphaMode = render::AlphaMode::Blended;
+                        bc.tint      = ent.tint;
+                        dlWorld.addComponent(entityId, std::move(bc));
+
+                        const u32 cols = (ent.visualType == world::LevelEntityVisualType::RotatedSpriteSet)
+                                             ? ent.rotatedSpriteDirCount
+                                             : ent.animCols;
+                        render::AnimationStateComponent asc;
+                        asc.frameCount = (cols > 0u) ? cols : 1u;
+                        asc.rowCount   = (ent.animRows > 0u) ? ent.animRows : 1u;
+                        asc.fps        = ent.animFrameRate;
+                        asc.loop       = true;
+                        dlWorld.addComponent(entityId, std::move(asc));
+                        break;
+                    }
+                    case world::LevelEntityVisualType::StaticMesh:
+                    {
+                        if (ent.assetPath.empty()) { break; }
+                        auto meshRes = dlAssetLoader->loadMesh(
+                            std::filesystem::path(ent.assetPath));
+                        if (!meshRes.has_value())
+                        {
+                            std::fprintf(stderr,
+                                "[DLevel] Warning: failed to load mesh '%s'\n",
+                                ent.assetPath.c_str());
+                            break;
+                        }
+                        const render::MeshData& md = *meshRes;
+                        rhi::BufferDescriptor vbd;
+                        vbd.size      = md.vertices.size() * sizeof(render::StaticMeshVertex);
+                        vbd.usage     = rhi::BufferUsage::Vertex;
+                        vbd.initData  = md.vertices.data();
+                        vbd.debugName = "DL_Mesh_VBO";
+                        dlEntityBuffers.push_back(device->createBuffer(vbd));
+                        rhi::IBuffer* vbo = dlEntityBuffers.back().get();
+
+                        rhi::BufferDescriptor ibd;
+                        ibd.size      = md.indices.size() * sizeof(u32);
+                        ibd.usage     = rhi::BufferUsage::Index;
+                        ibd.initData  = md.indices.data();
+                        ibd.debugName = "DL_Mesh_IBO";
+                        dlEntityBuffers.push_back(device->createBuffer(ibd));
+                        rhi::IBuffer* ibo = dlEntityBuffers.back().get();
+
+                        render::StaticMeshComponent smc;
+                        smc.vertexBuffer       = vbo;
+                        smc.indexBuffer        = ibo;
+                        smc.indexCount         = static_cast<u32>(md.indices.size());
+                        smc.material.roughness = 0.85f;
+                        smc.material.metalness = 0.0f;
+                        dlWorld.addComponent(entityId, std::move(smc));
+                        break;
+                    }
+                    case world::LevelEntityVisualType::VoxelObject:
+                    {
+                        if (ent.assetPath.empty()) { break; }
+                        auto voxRes = dlAssetLoader->loadVox(
+                            std::filesystem::path(ent.assetPath));
+                        if (!voxRes.has_value())
+                        {
+                            std::fprintf(stderr,
+                                "[DLevel] Warning: failed to load vox '%s'\n",
+                                ent.assetPath.c_str());
+                            break;
+                        }
+                        const render::MeshData& vmd = voxRes->mesh;
+
+                        rhi::TextureDescriptor ptd;
+                        ptd.width     = 256u;
+                        ptd.height    = 1u;
+                        ptd.format    = rhi::TextureFormat::RGBA8Unorm;
+                        ptd.usage     = rhi::TextureUsage::ShaderRead;
+                        ptd.initData  = voxRes->paletteRGBA.data();
+                        ptd.debugName = "DL_VoxPalette";
+                        dlEntityTextures.push_back(device->createTexture(ptd));
+                        rhi::ITexture* paletteTex = dlEntityTextures.back().get();
+
+                        rhi::BufferDescriptor vbd;
+                        vbd.size      = vmd.vertices.size() * sizeof(render::StaticMeshVertex);
+                        vbd.usage     = rhi::BufferUsage::Vertex;
+                        vbd.initData  = vmd.vertices.data();
+                        vbd.debugName = "DL_Vox_VBO";
+                        dlEntityBuffers.push_back(device->createBuffer(vbd));
+                        rhi::IBuffer* vbo = dlEntityBuffers.back().get();
+
+                        rhi::BufferDescriptor ibd;
+                        ibd.size      = vmd.indices.size() * sizeof(u32);
+                        ibd.usage     = rhi::BufferUsage::Index;
+                        ibd.initData  = vmd.indices.data();
+                        ibd.debugName = "DL_Vox_IBO";
+                        dlEntityBuffers.push_back(device->createBuffer(ibd));
+                        rhi::IBuffer* ibo = dlEntityBuffers.back().get();
+
+                        render::VoxelObjectComponent voc;
+                        voc.vertexBuffer    = vbo;
+                        voc.indexBuffer     = ibo;
+                        voc.indexCount      = static_cast<u32>(vmd.indices.size());
+                        voc.material.albedo = paletteTex;
+                        voc.material.roughness = 1.0f;
+                        voc.material.metalness = 0.0f;
+                        dlWorld.addComponent(entityId, std::move(voc));
+                        break;
+                    }
+                    case world::LevelEntityVisualType::Decal:
+                    {
+                        rhi::ITexture* albedo = loadEntityTex(ent.assetPath, false);
+                        rhi::ITexture* normal = loadEntityTex(ent.decalNormalPath, false);
+                        if (!albedo) { break; }
+
+                        render::DecalComponent dc;
+                        dc.albedoTexture = albedo;
+                        dc.normalTexture = normal;
+                        dc.roughness     = ent.decalRoughness;
+                        dc.metalness     = ent.decalMetalness;
+                        dc.opacity       = ent.decalOpacity;
+                        dlWorld.addComponent(entityId, std::move(dc));
+                        break;
+                    }
+                    case world::LevelEntityVisualType::ParticleEmitter:
+                    {
+                        rhi::ITexture* atlas = loadEntityTex(ent.assetPath, false);
+                        constexpr u32 kDefaultPoolSize = 512u;
+                        dlEntityPools.push_back(
+                            render::createParticlePool(*device, kDefaultPoolSize));
+                        render::ParticlePool* pool = dlEntityPools.back().get();
+
+                        render::ParticleEmitterComponent pec;
+                        pec.pool            = pool;
+                        pec.atlasTexture    = atlas;
+                        pec.emissionRate    = ent.particleEmissionRate;
+                        pec.emitDir         = ent.particleEmitDir;
+                        pec.coneHalfAngle   = ent.particleConeHalfAngle;
+                        pec.speedMin        = ent.particleSpeedMin;
+                        pec.speedMax        = ent.particleSpeedMax;
+                        pec.lifetimeMin     = ent.particleLifetimeMin;
+                        pec.lifetimeMax     = ent.particleLifetimeMax;
+                        pec.colorStart      = ent.particleColorStart;
+                        pec.colorEnd        = ent.particleColorEnd;
+                        pec.sizeStart       = ent.particleSizeStart;
+                        pec.sizeEnd         = ent.particleSizeEnd;
+                        pec.drag            = ent.particleDrag;
+                        pec.gravity         = ent.particleGravity;
+                        dlWorld.addComponent(entityId, std::move(pec));
+                        break;
+                    }
+                    default: break;
+                    } // switch visualType
+                } // if visualType != None
             }
             std::printf("[DLevel] Registered %u placed entity physics body/ies.\n", registered);
         }
@@ -569,9 +805,93 @@ int main(int argc, char* argv[])
         auto dlScriptEngine = script::makeScriptEngine();
         std::printf("[DLevel] Script engine initialised (Lua 5.4).\n");
 
+        // ── 5g. Load and bind scripts for all scripted entities ───────────────
+        std::vector<script::ScriptHandle> dlScriptHandles;
+        {
+            u32 bound = 0u;
+            dlWorld.each<script::ScriptComponent>(
+                [&](daedalus::EntityId eid, const script::ScriptComponent& sc)
+                {
+                    auto result = dlScriptEngine->loadScript(sc.scriptPath);
+                    if (!result.has_value())
+                    {
+                        std::fprintf(stderr,
+                            "[DLevel] Warning: failed to load script '%s': %s\n",
+                            sc.scriptPath.string().c_str(),
+                            result.error().message.c_str());
+                        return;
+                    }
+                    const script::ScriptHandle handle = *result;
+                    dlScriptEngine->bindEntity(handle, eid);
+                    for (const auto& [k, v] : sc.exposedVars)
+                        dlScriptEngine->setGlobal(handle, k, v);
+                    dlScriptHandles.push_back(handle);
+                    ++bound;
+                });
+            std::printf("[DLevel] Bound %u script(s).\n", bound);
+        }
 
-        // ── 7. Capture relative mouse for mouselook
-        SDL_SetWindowRelativeMouseMode(window, true);
+        // ── 7. Capture mouse for mouselook ────────────────────────────────
+        // dlSwapW/H are declared here so they can be referenced from event
+        // handlers; they are updated in WINDOW_RESIZED events.
+        u32 dlSwapW = WINDOW_W;
+        u32 dlSwapH = WINDOW_H;
+
+        // Strategy: bypass SDL's relative-mouse-mode entirely.
+        // SDL's Cocoa relative-mode path contains a title-bar filter in
+        // Cocoa_HandleMouseEvent (SDL_cocoamouse.m ~line 514) that drops
+        // mouse-moved events whenever the hidden cursor drifts into the
+        // window chrome.  Because CGAssociateMouseAndMouseCursorPosition(false)
+        // silently fails for NSTask-launched processes the cursor is free,
+        // hits the title bar, and mouselook stalls.
+        //
+        // Manual approach:
+        //   1. Hide cursor with SDL_HideCursor().
+        //   2. Retry CGAssociateMouseAndMouseCursorPosition(false) every frame.
+        //   3. Each frame, auto-detect which mode is active:
+        //      A. Cursor frozen → CGAssociate working → use CGGetLastMouseDelta
+        //         (raw HID input, bypasses macOS trackpad gesture recognition).
+        //      B. Cursor free → CGAssociate failed → use position delta from
+        //         SDL_GetGlobalMouseState, warp to centre when >200 px away.
+        float dlMouseDeltaX = 0.0f;  // SDL event accumulators (diagnostic only)
+        float dlMouseDeltaY = 0.0f;
+        bool  dlMouseCaptured = false;
+        bool  dlCGAssociateActive = false;  // true once CGAssociate(false) sticks
+        float dlPrevGX = 0.0f, dlPrevGY = 0.0f;  // previous global cursor pos
+
+        auto dlCaptureMouse = [&]()
+        {
+            if (dlMouseCaptured) return;
+            SDL_HideCursor();
+            int wx = 0, wy = 0;
+            SDL_GetWindowPosition(window, &wx, &wy);
+            const float cx = static_cast<float>(wx) + static_cast<float>(dlSwapW) * 0.5f;
+            const float cy = static_cast<float>(wy) + static_cast<float>(dlSwapH) * 0.5f;
+            CGWarpMouseCursorPosition(CGPointMake(cx, cy));
+            CGAssociateMouseAndMouseCursorPosition(false);
+            dlPrevGX = cx;
+            dlPrevGY = cy;
+            dlMouseCaptured = true;
+        };
+
+        auto dlReleaseMouse = [&]()
+        {
+            if (!dlMouseCaptured) return;
+            CGAssociateMouseAndMouseCursorPosition(true);
+            SDL_ShowCursor();
+            dlMouseCaptured = false;
+        };
+
+        SDL_RaiseWindow(window);
+        dlCaptureMouse();
+
+        // ── Diagnostic log ────────────────────────────────────────────────────
+        std::ofstream dlLog("/tmp/daedalus_mouselook.log", std::ios::trunc);
+        dlLog << "=== Daedalus Mouselook Diagnostic (manual capture) ===\n"
+              << "Window flags: 0x" << std::hex << SDL_GetWindowFlags(window) << std::dec
+              << "\n\n";
+        dlLog.flush();
+        u32 dlLogMouseEvents = 0;
 
         // ── 8. First-person game loop ─────────────────────────────────────────
         using FPClock = std::chrono::steady_clock;
@@ -581,14 +901,24 @@ int main(int argc, char* argv[])
         glm::mat4 fpPrevView(1.0f);
         glm::mat4 fpPrevProj(1.0f);
 
-        u32 dlSwapW = WINDOW_W;
-        u32 dlSwapH = WINDOW_H;
-
         bool fpRunning = true;
         while (fpRunning)
         {
             // ── Events ────────────────────────────────────────────────────────
+            // Retry CGAssociate + read CG delta BEFORE the event pump.
+            int32_t cgDx = 0, cgDy = 0;
+            if (dlMouseCaptured)
+            {
+                CGAssociateMouseAndMouseCursorPosition(false);
+                CGGetLastMouseDelta(&cgDx, &cgDy);
+            }
+
+            float lookDx = 0.0f, lookDy = 0.0f;
+
             SDL_Event event;
+            dlMouseDeltaX = 0.0f;
+            dlMouseDeltaY = 0.0f;
+            dlLogMouseEvents = 0;
             while (SDL_PollEvent(&event))
             {
                 if (event.type == SDL_EVENT_QUIT)
@@ -607,25 +937,130 @@ int main(int argc, char* argv[])
                     swapchain->resize(dlSwapW, dlSwapH);
                     renderer.resize(*device, dlSwapW, dlSwapH);
                 }
+                else if (event.type == SDL_EVENT_MOUSE_MOTION)
+                {
+                    dlMouseDeltaX += event.motion.xrel;
+                    dlMouseDeltaY += event.motion.yrel;
+                    ++dlLogMouseEvents;
+                    if (fpFrameIdx < 600 && dlLog.is_open())
+                    {
+                        dlLog << "  evt xrel=" << event.motion.xrel
+                              << " yrel=" << event.motion.yrel
+                              << " x=" << event.motion.x
+                              << " y=" << event.motion.y
+                              << "\n";
+                    }
+                }
+                else if (event.type == SDL_EVENT_WINDOW_FOCUS_GAINED)
+                {
+                    dlCaptureMouse();
+                    if (fpFrameIdx < 600 && dlLog.is_open())
+                        dlLog << "  FOCUS GAINED frame=" << fpFrameIdx << "\n";
+                }
+                else if (event.type == SDL_EVENT_WINDOW_FOCUS_LOST)
+                {
+                    dlReleaseMouse();
+                    if (fpFrameIdx < 600 && dlLog.is_open())
+                        dlLog << "  FOCUS LOST frame=" << fpFrameIdx << "\n";
+                }
             }
             if (!fpRunning) { break; }
 
-            // ── Timing ────────────────────────────────────────────────────────
+            // ── Mouselook delta source ────────────────────────────────────────
+            // A. CGAssociate(false) succeeded → cursor frozen → CG delta
+            //    (raw HID, bypasses trackpad gesture recognition).
+            // B. CGAssociate(false) failed → cursor free → position delta
+            //    with infrequent warp to prevent hitting screen edges.
+            if (dlMouseCaptured)
+            {
+                float gx = 0.0f, gy = 0.0f;
+                SDL_GetGlobalMouseState(&gx, &gy);
+
+                const float posDx = gx - dlPrevGX;
+                const float posDy = gy - dlPrevGY;
+                const bool cursorFrozen =
+                    (std::abs(posDx) + std::abs(posDy) < 2.0f);
+
+                if (cursorFrozen)
+                {
+                    // Mode A — cursor frozen, CGAssociate is working.
+                    if (!dlCGAssociateActive)
+                    {
+                        // Transition frame: drain stale CG delta that may
+                        // carry warp contamination from Mode B.
+                        dlCGAssociateActive = true;
+                        int32_t jx = 0, jy = 0;
+                        CGGetLastMouseDelta(&jx, &jy);
+                    }
+                    else
+                    {
+                        lookDx = static_cast<float>(cgDx);
+                        lookDy = static_cast<float>(cgDy);
+                    }
+                    // dlPrevGX/GY unchanged — cursor hasn't moved.
+                }
+                else
+                {
+                    // Mode B — cursor free, use position delta.
+                    dlCGAssociateActive = false;
+                    lookDx = posDx;
+                    lookDy = posDy;
+                    dlPrevGX = gx;
+                    dlPrevGY = gy;
+
+                    // Warp to window centre if cursor drifted too far.
+                    int wx = 0, wy = 0;
+                    SDL_GetWindowPosition(window, &wx, &wy);
+                    const float ctrX = static_cast<float>(wx)
+                                     + static_cast<float>(dlSwapW) * 0.5f;
+                    const float ctrY = static_cast<float>(wy)
+                                     + static_cast<float>(dlSwapH) * 0.5f;
+                    const float offX = gx - ctrX;
+                    const float offY = gy - ctrY;
+                    if (offX * offX + offY * offY > 200.0f * 200.0f)
+                    {
+                        CGWarpMouseCursorPosition(CGPointMake(ctrX, ctrY));
+                        dlPrevGX = ctrX;
+                        dlPrevGY = ctrY;
+                    }
+                }
+            }
+
+            // ── Timing
             const auto fpNowTP = FPClock::now();
             const float fpDt   = std::chrono::duration<float>(fpNowTP - fpPrevTP).count();
             fpPrevTP = fpNowTP;
 
-            // ── Mouselook ─────────────────────────────────────────────────────
+            // ── Mouselook ───────────────────────────────────────────────────
             {
-                float mdx = 0.0f, mdy = 0.0f;
-                SDL_GetRelativeMouseState(&mdx, &mdy);
                 constexpr float kMouseSensitivity = 0.002f;
-                fpCamYaw   += mdx * kMouseSensitivity;
-                fpCamPitch -= mdy * kMouseSensitivity;
-                // Clamp pitch: ±80 degrees
+                constexpr float kMaxDelta = 200.0f;
+                fpCamYaw   += std::clamp(lookDx, -kMaxDelta, kMaxDelta) * kMouseSensitivity;
+                fpCamPitch -= std::clamp(lookDy, -kMaxDelta, kMaxDelta) * kMouseSensitivity;
                 constexpr float kPitchMax = 1.3963f;
                 if (fpCamPitch >  kPitchMax) { fpCamPitch =  kPitchMax; }
                 if (fpCamPitch < -kPitchMax) { fpCamPitch = -kPitchMax; }
+            }
+
+            // ── Diagnostic: per-frame summary (first 600 frames) ─────────────
+            if (fpFrameIdx < 600 && dlLog.is_open())
+            {
+                if (dlLogMouseEvents > 0 || lookDx != 0.0f || lookDy != 0.0f
+                    || (fpFrameIdx % 60) == 0)
+                {
+                    dlLog << "F" << fpFrameIdx
+                          << " dt=" << (fpDt * 1000.0f) << "ms"
+                          << " evts=" << dlLogMouseEvents
+                          << " lookDx=" << lookDx
+                          << " lookDy=" << lookDy
+                          << (dlCGAssociateActive ? " [CG]" : " [POS]")
+                          << " cgDx=" << cgDx
+                          << " cgDy=" << cgDy
+                          << " gx=" << dlPrevGX
+                          << " gy=" << dlPrevGY
+                          << "\n";
+                    dlLog.flush();
+                }
             }
 
             // ── Camera direction ──────────────────────────────────────────────
@@ -635,7 +1070,7 @@ int main(int argc, char* argv[])
                 std::cos(fpCamYaw) * std::cos(fpCamPitch)
             ));
             const glm::vec3 up      = glm::vec3(0.0f, 1.0f, 0.0f);
-            const glm::vec3 right   = glm::normalize(glm::cross(camDir, up));
+            const glm::vec3 right   = glm::normalize(glm::cross(up, camDir));
 
             // ── WASD movement → physics character controller ─────────────────────
             {
@@ -789,16 +1224,44 @@ int main(int argc, char* argv[])
 
             fpScene.upscaling.mode = render::UpscalingMode::FXAA;
 
+            // ── ECS entity rendering ──────────────────────────────────────────
+            // spriteAnimationSystem advances UV offsets before billboard gather.
+            render::spriteAnimationSystem(dlWorld, fpDt);
+            render::meshRenderSystem(dlWorld, fpScene);
+            render::voxelRenderSystem(dlWorld, fpScene);
+            render::billboardRenderSystem(dlWorld, fpScene, fpView,
+                                          dlUnitQuadVBO.get(), dlUnitQuadIBO.get());
+            render::decalRenderSystem(dlWorld, fpScene);
+            render::particleRenderSystem(dlWorld, fpScene, fpDt, fpFrameIdx);
+            render::sortTransparentDraws(fpScene);
+
             // ── Render ────────────────────────────────────────────────────────
             renderer.renderFrame(*device, *queue, *swapchain, fpScene, dlSwapW, dlSwapH);
 
             fpPrevView = fpView;
             fpPrevProj = fpProj;
             ++fpFrameIdx;
+
+            // ── Frame rate cap: ~60 fps ──────────────────────────────────
+            // displaySyncEnabled = NO (metal_render_device.mm) decouples
+            // nextDrawable from vsync; we cap here to keep per-frame mouse
+            // deltas uniform and avoid over-driving the GPU.
+            {
+                using namespace std::chrono;
+                constexpr nanoseconds kTargetFrame{16'666'667LL}; // ~60 fps
+                const auto frameElapsed =
+                    duration_cast<nanoseconds>(FPClock::now() - fpNowTP);
+                if (frameElapsed < kTargetFrame)
+                    SDL_DelayPrecise(static_cast<Uint64>(
+                        (kTargetFrame - frameElapsed).count()));
+            }
         }
 
-        // ── 9. Cleanup and exit ───────────────────────────────────────────────
-        SDL_SetWindowRelativeMouseMode(window, false);
+        // ── 9. Cleanup and exit ─────────────────────────────────────────
+        for (const script::ScriptHandle h : dlScriptHandles)
+            dlScriptEngine->unloadScript(h);
+
+        dlReleaseMouse();
         swapchain.reset();
         SDL_DestroyWindow(window);
         SDL_Quit();

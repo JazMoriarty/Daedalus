@@ -7,6 +7,7 @@
 #include "daedalus/editor/i_editor_tool.h"
 #include "tools/draw_sector_tool.h"
 #include "tools/select_tool.h"
+#include "tools/vertex_tool.h"
 #include "document/commands/cmd_move_entity.h"
 #include "document/commands/cmd_move_light.h"
 #include "document/commands/cmd_set_player_start.h"
@@ -58,19 +59,26 @@ void Viewport2D::drawGrid(ImDrawList* dl,
                            glm::vec2   canvasMin,
                            glm::vec2   canvasMax) const
 {
-    constexpr float gridStepMap   = 1.0f;
-    constexpr ImU32 minorColor    = IM_COL32(60, 60, 60, 180);
-    constexpr ImU32 majorColor    = IM_COL32(90, 90, 90, 200);
-    constexpr ImU32 axisColor     = IM_COL32(120, 120, 140, 220);
+    constexpr ImU32 minorColor = IM_COL32(60, 60, 60, 180);
+    constexpr ImU32 majorColor = IM_COL32(90, 90, 90, 200);
+    constexpr ImU32 axisColor  = IM_COL32(120, 120, 140, 220);
 
-    const float step = gridStepMap * m_zoom;
-    if (step < 4.0f) return;  // Grid too dense — skip.
+    // Scale the grid step so lines are always at least 8 px apart even when
+    // zoomed far out — instead of hiding the grid, show a coarser one.
+    float displayStep = 1.0f;         // map units between lines
+    float step        = m_zoom;       // screen pixels between lines (zoom * 1.0)
+    while (step < 8.0f)
+    {
+        displayStep *= 2.0f;
+        step        *= 2.0f;
+        if (displayStep > 1e6f) return;  // safety: map is enormous
+    }
+    if (step > 8000.0f) return;  // zoomed so far in grid lines are > 8000 px apart
 
     // The map origin (0,0) in screen space.
     const float originScreenX = canvasMin.x + m_panOffset.x;
     const float originScreenY = canvasMin.y + m_panOffset.y;
 
-    // Compute first visible grid line.
     const auto firstX = static_cast<int>(std::floor((canvasMin.x - originScreenX) / step));
     const auto firstY = static_cast<int>(std::floor((canvasMin.y - originScreenY) / step));
     const auto lastX  = static_cast<int>(std::ceil ((canvasMax.x - originScreenX) / step));
@@ -78,14 +86,19 @@ void Viewport2D::drawGrid(ImDrawList* dl,
 
     for (int xi = firstX; xi <= lastX; ++xi)
     {
-        const float sx = originScreenX + xi * step;
-        const ImU32 col = (xi == 0) ? axisColor : (xi % 5 == 0) ? majorColor : minorColor;
+        const float   sx   = originScreenX + xi * step;
+        // Map coordinate in original 1-unit grid space.
+        const auto    mapX = static_cast<long long>(std::round(xi * displayStep));
+        const ImU32   col  = (mapX == 0) ? axisColor
+                           : (mapX % 5 == 0) ? majorColor : minorColor;
         dl->AddLine({sx, canvasMin.y}, {sx, canvasMax.y}, col, 1.0f);
     }
     for (int yi = firstY; yi <= lastY; ++yi)
     {
-        const float sy = originScreenY + yi * step;
-        const ImU32 col = (yi == 0) ? axisColor : (yi % 5 == 0) ? majorColor : minorColor;
+        const float   sy   = originScreenY + yi * step;
+        const auto    mapY = static_cast<long long>(std::round(yi * displayStep));
+        const ImU32   col  = (mapY == 0) ? axisColor
+                           : (mapY % 5 == 0) ? majorColor : minorColor;
         dl->AddLine({canvasMin.x, sy}, {canvasMax.x, sy}, col, 1.0f);
     }
 }
@@ -258,12 +271,44 @@ void Viewport2D::openRotatePopup(world::SectorId sectorId) noexcept
     m_rotatePopupAngleDeg = 45.0f;
 }
 
+// ─── Ghost placement helpers ──────────────────────────────────────────────────
+
+void Viewport2D::beginPendingPlacement(PendingPlacement type) noexcept
+{
+    m_pendingPlacement      = type;
+    m_pendingPlacementFired = false;
+}
+
+void Viewport2D::cancelPendingPlacement() noexcept
+{
+    m_pendingPlacement      = PendingPlacement::None;
+    m_pendingPlacementFired = false;
+}
+
+bool Viewport2D::consumePendingPlacement(glm::vec2& outMapPos) noexcept
+{
+    if (!m_pendingPlacementFired)
+        return false;
+    outMapPos               = m_pendingPlacementPos;
+    m_pendingPlacementFired = false;
+    m_pendingPlacement      = PendingPlacement::None;
+    return true;
+}
+
+void Viewport2D::updateFlyCamera(bool captured, glm::vec2 eyeXZ, float yawRad) noexcept
+{
+    m_flyCameraActive = captured;
+    m_flyCameraPos    = eyeXZ;
+    m_flyCameraYaw    = yawRad;
+}
+
 // ─── Main draw ────────────────────────────────────────────────────────────────
 
 void Viewport2D::draw(EditMapDocument& doc,
                        IEditorTool*     activeTool,
                        DrawSectorTool*  drawTool,
-                       SelectTool*      selectTool)
+                       SelectTool*      selectTool,
+                       VertexTool*      vertexTool)
 {
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
     ImGui::Begin("2D Viewport");
@@ -283,6 +328,77 @@ void Viewport2D::draw(EditMapDocument& doc,
     {
         m_panOffset = {canvasSz.x * 0.5f, canvasSz.y * 0.5f};
         m_firstFrame = false;
+    }
+
+    // ── Mouse position + snap (computed early so the snap indicator can be rendered) ──
+    const ImVec2 mousePosV      = ImGui::GetMousePos();
+    const glm::vec2 mouseMapRaw = screenToMap({mousePosV.x, mousePosV.y}, canvasMin);
+    m_lastMouseMapPos           = mouseMapRaw;
+
+    const bool shiftHeld = ImGui::GetIO().KeyShift;
+    const bool doSnap    = m_snapEnabled && !shiftHeld;
+    glm::vec2 mouseMap = doSnap
+        ? glm::vec2{snapToGrid(mouseMapRaw.x, m_gridStep),
+                    snapToGrid(mouseMapRaw.y, m_gridStep)}
+        : mouseMapRaw;
+
+    // Vertex magnetic snap: when dragging a vertex, override mouseMap to the exact
+    // position of the nearest other vertex within kSnapPx screen pixels.
+    // This lets you align sector corners precisely for portal linking.
+    {
+        // Snap radius scales with zoom so it always covers the vertex pick radius
+        // in screen space (SelectTool = 0.4 units, VertexTool = 0.5 units).
+        // At low zoom this bottoms out at 12 px for comfortable dragging.
+        const float kSnapPx   = std::max(12.0f, 0.6f * m_zoom);
+        const float kSnapPxSq = kSnapPx * kSnapPx;
+
+        m_vertexSnapSectorId = world::INVALID_SECTOR_ID;
+
+        const bool snapFromSelect = selectTool && selectTool->isDraggingVertex();
+        const bool snapFromVertex = vertexTool && vertexTool->isDragging();
+
+        if (snapFromSelect || snapFromVertex)
+        {
+            const world::SectorId excludeSid = snapFromSelect
+                ? selectTool->dragSectorId() : vertexTool->dragSectorId();
+            const std::size_t excludeWi = snapFromSelect
+                ? selectTool->dragWallIndex() : vertexTool->dragWallIndex();
+
+            float           bestSq  = kSnapPxSq;
+            world::SectorId bestSid = world::INVALID_SECTOR_ID;
+            std::size_t     bestWi  = 0;
+            glm::vec2       bestPos{};
+
+            const glm::vec2 mouseScreen{mousePosV.x, mousePosV.y};
+            const auto& sectors = doc.mapData().sectors;
+            for (std::size_t si = 0; si < sectors.size(); ++si)
+            {
+                const auto& sector = sectors[si];
+                for (std::size_t wi = 0; wi < sector.walls.size(); ++wi)
+                {
+                    if (static_cast<world::SectorId>(si) == excludeSid && wi == excludeWi)
+                        continue;
+                    const glm::vec2 sp = mapToScreen(sector.walls[wi].p0, canvasMin);
+                    const float dx = mouseScreen.x - sp.x;
+                    const float dy = mouseScreen.y - sp.y;
+                    const float sq = dx * dx + dy * dy;
+                    if (sq < bestSq)
+                    {
+                        bestSq  = sq;
+                        bestSid = static_cast<world::SectorId>(si);
+                        bestWi  = wi;
+                        bestPos = sector.walls[wi].p0;
+                    }
+                }
+            }
+
+            if (bestSid != world::INVALID_SECTOR_ID)
+            {
+                mouseMap              = bestPos;  // Exact position — overrides grid snap.
+                m_vertexSnapSectorId  = bestSid;
+                m_vertexSnapWallIndex = bestWi;
+            }
+        }
     }
 
     // Invisible interaction target.
@@ -431,20 +547,92 @@ void Viewport2D::draw(EditMapDocument& doc,
                     IM_COL32(120, 180, 255, 200), 0.0f, 0, 1.5f);
     }
 
+    // ── Vertex snap indicator ───────────────────────────────────────────────────────────────────
+    if (m_vertexSnapSectorId != world::INVALID_SECTOR_ID)
+    {
+        const auto& sectors = doc.mapData().sectors;
+        if (m_vertexSnapSectorId < sectors.size())
+        {
+            const auto& snapSector = sectors[m_vertexSnapSectorId];
+            if (m_vertexSnapWallIndex < snapSector.walls.size())
+            {
+                const glm::vec2 sp = mapToScreen(
+                    snapSector.walls[m_vertexSnapWallIndex].p0, canvasMin);
+                const ImVec2 spi{sp.x, sp.y};
+
+                // Bright green ring — outer glow + inner ring.
+                dl->AddCircle(spi, 13.0f, IM_COL32(80, 255, 120, 80),  16, 1.5f);
+                dl->AddCircle(spi,  9.0f, IM_COL32(80, 255, 120, 240), 16, 2.0f);
+
+                // Line from cursor to snap target.
+                dl->AddLine({mousePosV.x, mousePosV.y}, spi,
+                            IM_COL32(80, 255, 120, 140), 1.0f);
+            }
+        }
+    }
+
+    // ── Ghost placement overlay ─────────────────────────────────────────────
+    if (m_pendingPlacement != PendingPlacement::None)
+    {
+        const glm::vec2 sp = mapToScreen(mouseMap, canvasMin);
+        const ImVec2    spi{sp.x, sp.y};
+        constexpr float kR = 10.0f;
+        const ImU32 ghostCol = (m_pendingPlacement == PendingPlacement::Light)
+            ? IM_COL32(255, 200, 50, 200)
+            : IM_COL32(80, 200, 255, 200);
+        dl->AddCircle(spi, kR, ghostCol, 24, 1.5f);
+        dl->AddLine({sp.x - kR, sp.y}, {sp.x + kR, sp.y}, ghostCol, 1.0f);
+        dl->AddLine({sp.x, sp.y - kR}, {sp.x, sp.y + kR}, ghostCol, 1.0f);
+        const char* label = (m_pendingPlacement == PendingPlacement::Light)
+            ? "Place Light" : "Place Entity";
+        dl->AddText({sp.x + kR + 4.0f, sp.y - 6.0f}, ghostCol, label);
+    }
+
+    // ── Fly camera overlay ───────────────────────────────────────────────────
+    if (m_flyCameraActive)
+    {
+        const glm::vec2 sp = mapToScreen(m_flyCameraPos, canvasMin);
+        const ImVec2    spi{sp.x, sp.y};
+        constexpr float kIconR   = 8.0f;
+        constexpr float kConeLen = 40.0f;
+        constexpr float kHalfFov = 0.6108652f;  // ~35 degrees
+        constexpr ImU32 cyanCol  = IM_COL32(0, 220, 220, 220);
+        constexpr ImU32 cyanFill = IM_COL32(0, 220, 220, 30);
+
+        const float fwdX = std::sin(m_flyCameraYaw);
+        const float fwdY = std::cos(m_flyCameraYaw);
+        const float cosH = std::cos(kHalfFov);
+        const float sinH = std::sin(kHalfFov);
+
+        // Left cone ray (rotate fwd by +halfFov).
+        const ImVec2 coneL{sp.x + (fwdX * cosH - fwdY * sinH) * kConeLen,
+                           sp.y + (fwdX * sinH + fwdY * cosH) * kConeLen};
+        // Right cone ray (rotate fwd by -halfFov).
+        const ImVec2 coneR{sp.x + (fwdX * cosH + fwdY * sinH) * kConeLen,
+                           sp.y + (-fwdX * sinH + fwdY * cosH) * kConeLen};
+
+        dl->AddTriangleFilled(spi, coneL, coneR, cyanFill);
+        dl->AddLine(spi, coneL, cyanCol, 1.0f);
+        dl->AddLine(spi, coneR, cyanCol, 1.0f);
+
+        // Camera icon circle + direction triangle.
+        dl->AddCircle(spi, kIconR, cyanCol, 16, 1.5f);
+        const float arrowFwdX = fwdX * (kIconR + 5.0f);
+        const float arrowFwdY = fwdY * (kIconR + 5.0f);
+        const ImVec2 arrowTip{sp.x + arrowFwdX, sp.y + arrowFwdY};
+        const float  perpX   =  fwdY * 3.5f;
+        const float  perpY   = -fwdX * 3.5f;
+        dl->AddTriangleFilled(
+            arrowTip,
+            ImVec2{sp.x + fwdX * kIconR + perpX, sp.y + fwdY * kIconR + perpY},
+            ImVec2{sp.x + fwdX * kIconR - perpX, sp.y + fwdY * kIconR - perpY},
+            cyanCol);
+    }
+
     dl->PopClipRect();
 
-    // ── Mouse input
-    const ImVec2 mousePosV = ImGui::GetMousePos();
-    const glm::vec2 mouseMapRaw = screenToMap({mousePosV.x, mousePosV.y}, canvasMin);
-    m_lastMouseMapPos = mouseMapRaw;  // expose to main.mm for keyboard-triggered placement
-
-    // Apply grid snap (disabled when Shift is held).
-    const bool shiftHeld = ImGui::GetIO().KeyShift;
-    const bool doSnap    = m_snapEnabled && !shiftHeld;
-    const glm::vec2 mouseMap = doSnap
-        ? glm::vec2{snapToGrid(mouseMapRaw.x, m_gridStep),
-                    snapToGrid(mouseMapRaw.y, m_gridStep)}
-        : mouseMapRaw;
+    // ── Mouse input ──────────────────────────────────────────────────────────────────
+    // (mousePosV, mouseMapRaw, shiftHeld, doSnap, mouseMap computed at top of draw())
 
     if (hovered)
     {
@@ -460,8 +648,27 @@ void Viewport2D::draw(EditMapDocument& doc,
             m_zoom = std::clamp(m_zoom * factor, 2.0f, 400.0f);
         }
 
-        // Tool mouse events (snapped coordinates).
-        if (activeTool)
+        // Arrow-key pan: only when the 2D view is focused and 3D fly mode is off.
+        if (!m_flyCameraActive && !ImGui::GetIO().WantCaptureKeyboard)
+        {
+            const bool  fast     = ImGui::GetIO().KeyShift;
+            const float panDelta = (fast ? 5.0f : 1.0f) * 300.0f * ImGui::GetIO().DeltaTime;
+            if (ImGui::IsKeyDown(ImGuiKey_UpArrow))    m_panOffset.y += panDelta;
+            if (ImGui::IsKeyDown(ImGuiKey_DownArrow))  m_panOffset.y -= panDelta;
+            if (ImGui::IsKeyDown(ImGuiKey_LeftArrow))  m_panOffset.x += panDelta;
+            if (ImGui::IsKeyDown(ImGuiKey_RightArrow)) m_panOffset.x -= panDelta;
+        }
+
+        // Pending placement: intercept LMB while armed; suppress normal tool events.
+        if (m_pendingPlacement != PendingPlacement::None &&
+            ImGui::IsMouseClicked(ImGuiMouseButton_Left))
+        {
+            m_pendingPlacementFired = true;
+            m_pendingPlacementPos   = mouseMap;
+        }
+
+        // Tool mouse events (snapped coordinates) — suppressed while placement pending.
+        if (activeTool && m_pendingPlacement == PendingPlacement::None)
         {
             activeTool->onMouseMove(doc, mouseMap.x, mouseMap.y);
 
@@ -583,7 +790,13 @@ void Viewport2D::draw(EditMapDocument& doc,
                         }
                         if (!hitLight)
                         {
-                            activeTool->onMouseDown(doc, mouseMap.x, mouseMap.y, 0);
+                            // Use unsnapped coordinates for hit detection so that
+                            // vertices at off-grid positions (e.g. after a W-split)
+                            // remain selectable regardless of the current grid step.
+                            // DrawSectorTool is the only tool that places new vertices
+                            // on click and therefore needs the pre-snapped position.
+                            const glm::vec2 downPos = drawTool ? mouseMap : mouseMapRaw;
+                            activeTool->onMouseDown(doc, downPos.x, downPos.y, 0);
                             // Start drag-rect if select tool is active and no geometry drag started.
                             if (selectTool && !selectTool->isDragging())
                             {
@@ -618,7 +831,7 @@ void Viewport2D::draw(EditMapDocument& doc,
                     }
                 }
                 if (!handledByPs)
-                    activeTool->onMouseDown(doc, mouseMap.x, mouseMap.y, 1);
+                    activeTool->onMouseDown(doc, mouseMapRaw.x, mouseMapRaw.y, 1);
             }
             if (ImGui::IsMouseReleased(ImGuiMouseButton_Left))
             {

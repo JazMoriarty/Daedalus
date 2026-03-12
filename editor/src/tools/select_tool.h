@@ -35,6 +35,13 @@ public:
     /// True while an element (vertex, wall, or sector) is being live-dragged.
     [[nodiscard]] bool isDragging() const noexcept { return m_dragTarget != DragTarget::None; }
 
+    /// True while a vertex specifically is being dragged (for vertex snap).
+    [[nodiscard]] bool isDraggingVertex() const noexcept { return m_dragTarget == DragTarget::Vertex; }
+
+    /// Sector/wall of the vertex currently being dragged (valid only when isDraggingVertex()).
+    [[nodiscard]] world::SectorId dragSectorId()  const noexcept { return m_dragSectorId; }
+    [[nodiscard]] std::size_t     dragWallIndex()  const noexcept { return m_dragWallIndex; }
+
 private:
     // ─── Hit thresholds (map units) ───────────────────────────────────────────
     static constexpr float k_vertexRadius    = 0.4f;          ///< Vertex pick radius.
@@ -51,6 +58,8 @@ private:
     glm::vec2               m_dragClickPos{};     ///< Wall/Sector: map pos at drag start.
     std::vector<glm::vec2>  m_dragOrigAll{};      ///< Sector drag: orig p0 for every wall.
     bool                    m_dragMoved     = false; ///< True once target actually moved.
+    bool                    m_dragFirstMove = true;  ///< True until onMouseMove fires; aligns
+                                                     ///<  click anchor to grid-snapped position.
 
     // ─── Hit testing ─────────────────────────────────────────────────────────
     [[nodiscard]] world::SectorId hitTestSector(

@@ -29,6 +29,7 @@
 #include <vector>
 
 #include <glm/glm.hpp>
+#include <glm/gtc/constants.hpp>
 
 namespace daedalus::world
 {
@@ -80,7 +81,23 @@ struct LevelPlayerStart
     float     yaw      = 0.0f;  ///< Radians; 0 = looking toward +Z.
 };
 
-// ─── LevelCollisionShape ──────────────────────────────────────────────────────
+// ─── LevelEntityVisualType ───────────────────────────────────────────
+// Ordinals match editor::EntityVisualType exactly so app code may cast directly.
+
+enum class LevelEntityVisualType : u32
+{
+    BillboardCutout   = 0,  ///< Alpha-cutout billboard (G-buffer, hard discard).
+    BillboardBlended  = 1,  ///< Alpha-blended billboard (transparent forward pass).
+    AnimatedBillboard = 2,  ///< Billboard with sprite-sheet frame animation.
+    VoxelObject       = 3,  ///< MagicaVoxel .vox greedy-meshed object.
+    StaticMesh        = 4,  ///< GLTF static mesh (first primitive).
+    Decal             = 5,  ///< Projected deferred decal (OBB).
+    ParticleEmitter   = 6,  ///< GPU particle emitter.
+    RotatedSpriteSet  = 7,  ///< Directional sprite: column selected by view angle.
+    None              = 0xFFu,  ///< No visual component; entity is physics/script-only.
+};
+
+// ─── LevelCollisionShape ──────────────────────────────────────────────
 // Mirrors physics::CollisionShape (same ordinal values) without creating a
 // dependency from world/ on physics/. App code casts between them directly.
 
@@ -124,6 +141,44 @@ struct LevelEntity
     float       soundVolume        = 1.0f;   ///< Per-emitter volume multiplier [0, 1].
     bool        soundLoop          = false;  ///< Loop the sound continuously.
     bool        soundAutoPlay      = true;   ///< Start on first AudioSystem::update().
+
+    // Visual descriptor (v4+)
+    LevelEntityVisualType visualType = LevelEntityVisualType::None;
+
+    // Common visual
+    std::string assetPath;                         ///< Primary asset (texture, .vox, or .gltf).
+    glm::vec4   tint       = glm::vec4(1.0f);     ///< RGBA tint multiplier.
+    glm::vec3   visualScale = glm::vec3(1.0f);    ///< World-space scale (for mesh/decal/voxel).
+    float       visualPitch = 0.0f;               ///< X-axis rotation (radians).
+    float       visualRoll  = 0.0f;               ///< Z-axis rotation (radians).
+
+    // Animated billboard / RotatedSpriteSet
+    u32   animFrameCount  = 1;     ///< Number of columns in the atlas (frames per row).
+    u32   animCols        = 1;     ///< Atlas column count (== animFrameCount for anim types).
+    u32   animRows        = 1;     ///< Atlas row count.
+    float animFrameRate   = 8.0f;  ///< Playback speed (fps).
+    u32   rotatedSpriteDirCount = 8;  ///< View direction count for RotatedSpriteSet (8 or 16).
+
+    // Decal material params
+    std::string decalNormalPath;           ///< Optional tangent-space normal map path.
+    float       decalRoughness = 0.5f;    ///< Roughness written to G-buffer RT1.b.
+    float       decalMetalness = 0.0f;    ///< Metalness written to G-buffer RT1.a.
+    float       decalOpacity   = 1.0f;    ///< Global fade multiplier.
+
+    // Particle emitter params
+    float     particleEmissionRate  = 10.0f;
+    glm::vec3 particleEmitDir       = glm::vec3(0.0f, 1.0f, 0.0f);
+    float     particleConeHalfAngle = glm::pi<float>() / 12.0f;  ///< 15 degrees
+    float     particleSpeedMin      = 1.0f;
+    float     particleSpeedMax      = 3.0f;
+    float     particleLifetimeMin   = 1.0f;
+    float     particleLifetimeMax   = 3.0f;
+    glm::vec4 particleColorStart    = glm::vec4(1.0f);
+    glm::vec4 particleColorEnd      = glm::vec4(1.0f, 1.0f, 1.0f, 0.0f);
+    float     particleSizeStart     = 0.1f;
+    float     particleSizeEnd       = 0.05f;
+    float     particleDrag          = 0.0f;
+    glm::vec3 particleGravity       = glm::vec3(0.0f, -9.81f, 0.0f);
 };
 
 // ─── LevelTexture ─────────────────────────────────────────────────────────────

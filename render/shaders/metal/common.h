@@ -70,15 +70,16 @@ struct DecalConstants      // buffer(1) in decal vertex + fragment, 144 bytes
     float    pad;
 };
 
-struct MaterialConstants   // buffer(1) in G-buffer + transparent fragment, 48 bytes
+struct MaterialConstants   // buffer(1) in G-buffer + transparent fragment, 64 bytes
 {
     float  roughness;
     float  metalness;
     float  isMirrorSurface;  // 1.0 = sample emissive via projective mirror VP; 0.0 = standard
     float  pad1;
-    float4 tint;     ///< Albedo tint (rgb) + opacity override (a); default = (1,1,1,1).
-    float2 uvOffset; ///< UV origin of the active sprite sheet frame cell; default = (0,0).
-    float2 uvScale;  ///< UV size of one frame cell; default = (1,1).
+    float4 tint;          ///< Albedo tint (rgb) + opacity override (a); default = (1,1,1,1).
+    float2 uvOffset;      ///< UV origin of the active sprite sheet frame cell; default = (0,0).
+    float2 uvScale;       ///< UV size of one frame cell; default = (1,1).
+    float4 sectorAmbient; ///< xyz = per-sector ambient color × intensity; baked into emissive.
 };
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────

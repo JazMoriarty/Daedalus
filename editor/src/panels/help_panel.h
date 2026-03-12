@@ -31,6 +31,7 @@ private:
     void drawPlayerStart();
     void drawPortalsLayers();
     void drawPrefabs();
+    void drawAssetBrowser();
     void drawRenderSettings();
     void drawMapDoctor();
 };

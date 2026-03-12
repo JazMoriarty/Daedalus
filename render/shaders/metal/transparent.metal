@@ -110,8 +110,10 @@ fragment float4 transparent_frag(
     const float3 N        = normalize(TBN * tNormal);
     const float3 V        = normalize(frame.cameraPos.xyz - in.worldPos);
 
-    // ─── Ambient term ─────────────────────────────────────────────────────────
-    const float3 ambient = frame.ambientColor.rgb * albedo;
+    // ─── Ambient term ─────────────────────────────────────────────────────────────────────────
+    // mat.sectorAmbient carries the per-sector (or per-entity global) ambient so that
+    // every draw has correct ambient regardless of frame.ambientColor (which is zero).
+    const float3 ambient = mat.sectorAmbient.rgb * albedo;
 
     // ─── Spot lights ───────────────────────────────────────────────────────────
     // All spots contribute; only index 0 (shadow-caster) uses the shadow map.

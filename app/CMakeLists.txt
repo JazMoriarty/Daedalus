@@ -24,7 +24,10 @@ target_compile_features(DaedalusApp PRIVATE cxx_std_23)
 if(DAEDALUS_PLATFORM_MACOS)
     target_compile_definitions(DaedalusApp PRIVATE DAEDALUS_BACKEND_METAL)
 
-    # Copy the .metallib next to the executable whenever DaedalusShaders changes.
+    find_library(COREGRAPHICS_APP_FRAMEWORK CoreGraphics REQUIRED)
+    target_link_libraries(DaedalusApp PRIVATE ${COREGRAPHICS_APP_FRAMEWORK})
+
+    # Copy the .metallib
     # Use add_custom_command(OUTPUT ...) so the copy fires on every metallib update,
     # not only when DaedalusApp itself rebuilds (POST_BUILD limitation).
     set(METALLIB_APP_COPY "${CMAKE_BINARY_DIR}/app/daedalus_shaders.metallib")

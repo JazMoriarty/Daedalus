@@ -80,6 +80,7 @@ static const char* k_categories[] =
     "Player Start",
     "Portals & Layers",
     "Prefabs",
+    "Asset Browser",
     "Render Settings",
     "Map Doctor",
 };
@@ -156,8 +157,9 @@ void HelpPanel::draw()
     case  8: drawPlayerStart();     break;
     case  9: drawPortalsLayers();   break;
     case 10: drawPrefabs();         break;
-    case 11: drawRenderSettings();  break;
-    case 12: drawMapDoctor();       break;
+    case 11: drawAssetBrowser();    break;
+    case 12: drawRenderSettings();  break;
+    case 13: drawMapDoctor();       break;
     default: break;
     }
 
@@ -186,11 +188,14 @@ void HelpPanel::drawQuickStart()
     Step(1, "Open the File menu and choose New, or press");
     Key("Cmd+N");
     ImGui::Text(".");
-    Step(2, "In the dialog that appears, enter a Map Name and Author.");
+    Step(2, "In the dialog, enter a Map Name and Author.");
     Step(3, "Set the Default Floor Height (e.g. 0.0) and Default Ceiling "
             "Height (e.g. 4.0).  These become the defaults for every new "
             "sector you draw.");
-    Step(4, "Click Create.");
+    Step(4, "Optionally set Gravity (default 9.81 m/s^2), Sky Path (path to "
+            "an HDR sky texture), and Ambient Color for the initial global "
+            "fill light.");
+    Step(5, "Click Create.");
 
     // ─ Step 2: Draw your first room ──────────────────────────────────
     ImGui::Spacing();
@@ -283,10 +288,16 @@ void HelpPanel::drawQuickStart()
     Key("Cmd+S");
     ImGui::Text(".");
     Step(2, "Press");
-    Key("F5");
+    Key("\\");
     ImGui::SameLine(0, 2);
-    ImGui::Text("to save and launch DaedalusApp with your map loaded automatically.");
-    Tip("F5 saves to a temporary file if the map has not been saved yet.");
+    ImGui::Text("to compile the map to a .dlevel bundle and launch DaedalusApp.");
+    Tip("\\ always compiles the current in-memory state to a temporary "
+        ".dlevel file in the system temp directory — you do not need to "
+        "save the .dmap first.");
+    Tip("The bundle embeds: map geometry, lights, player start, all entity "
+        "visual descriptors (8 visual types), physics shapes, Lua scripts, "
+        "audio settings, and every referenced texture as RGBA8 pixel data "
+        "keyed by material UUID.");
 
     // ─ Tips ──────────────────────────────────────────────────────────
     ImGui::Spacing();
@@ -299,6 +310,9 @@ void HelpPanel::drawQuickStart()
            "you are not currently working on.");
     Bullet("Prefabs (Object Browser > Prefabs) let you stamp reusable room "
            "templates across the map in seconds.");
+    Bullet("Set an Asset Root (File > Set Asset Root\xe2\x80\xa6) to browse material "
+           "thumbnails in the Asset Browser panel and drag-assign them to "
+           "surfaces in the 3D viewport.");
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -342,13 +356,14 @@ void HelpPanel::drawKeyboard()
     ImGui::SeparatorText("Placement");
     KeyRow("E",            "Place entity at 2D cursor position");
     KeyRow("L",            "Place point light at 2D cursor position");
-    KeyRow("P",            "Place point light at 2D cursor   /   snap 3D camera to player start (when 3D viewport hovered)");
+    KeyRow("P",            "Place point light at 2D cursor  (when 3D viewport is NOT hovered)");
 
     ImGui::Spacing();
     ImGui::SeparatorText("2D Viewport");
+    KeyRow("Arrow keys",   "Pan the 2D view  (Shift = 5\xc3\x97 speed)");
     KeyRow("G",            "Toggle grid visibility");
     KeyRow("Home",         "Fit entire map to 2D view");
-    KeyRow("1 – 8",        "Set grid snap step (0.25, 0.5, 1, 2, 4, 8, 16, 32 units)");
+    KeyRow("1 \xe2\x80\x93 8",        "Set grid snap step (0.25, 0.5, 1, 2, 4, 8, 16, 32 units)");
 
     ImGui::Spacing();
     ImGui::SeparatorText("3D Viewport");
@@ -358,7 +373,7 @@ void HelpPanel::drawKeyboard()
     KeyRow("Q / E",        "Move down / up  (fly mode only)");
     KeyRow("Shift",        "Hold for 5× faster movement  (fly mode only)");
     KeyRow("F",            "Frame selected content (or whole map if nothing selected)");
-    KeyRow("P",            "Snap camera to player start position");
+    KeyRow("P",            "Snap camera to player start position and yaw  (when 3D viewport IS hovered)");
     KeyRow("Alt+LMB drag", "Orbit around pivot");
     KeyRow("Scroll",       "Dolly forward / backward");
 
@@ -371,7 +386,7 @@ void HelpPanel::drawKeyboard()
     ImGui::Spacing();
     ImGui::SeparatorText("Map Tools");
     KeyRow("Cmd+Shift+M",  "Run Map Doctor");
-    KeyRow("F5",           "Save + launch map in DaedalusApp (play test)");
+    KeyRow("\\",            "Save + launch map in DaedalusApp (play test)");
     KeyRow("F1",           "Open / close this Help window");
 }
 
@@ -390,7 +405,8 @@ void HelpPanel::draw2DViewport()
 
     ImGui::Spacing();
     ImGui::SeparatorText("Navigation");
-    Bullet("Right-click drag — pan the view.");
+    Bullet("Arrow keys — pan the view  (hold Shift for 5\xc3\x97 speed).");
+    Bullet("Middle-mouse drag — pan the view.");
     Bullet("Scroll wheel — zoom in / out centred on the cursor.");
     Bullet("Home key — fit the entire map to the viewport.");
 
@@ -719,11 +735,30 @@ void HelpPanel::drawEntities()
     Bullet("Mass — simulation mass in kg for dynamic entities.");
 
     ImGui::Spacing();
-    ImGui::SeparatorText("Script & Audio  (Properties panel, collapsible headers)");
-    Bullet("Script Path — path to the Lua/script file that drives this entity.");
-    Bullet("Sound Path — ambient / one-shot audio file path.");
-    Bullet("Falloff Radius — distance at which the sound reaches silence.");
+    ImGui::SeparatorText("Script  (Properties panel > Script header)");
+    Bullet("Script Path — path to the Lua script file bound to this entity at runtime.");
+    Bullet("Exposed Vars — a table of key/value string pairs injected as Lua globals "
+           "before the script's init() function runs.  Use these to configure the same "
+           "script template differently for each instance (e.g. patrol speed, dialog ID).");
+
+    ImGui::Spacing();
+    ImGui::SeparatorText("Audio  (Properties panel > Audio header)");
+    Bullet("Sound Path — path to the audio file for this entity's ambient / one-shot sound.");
+    Bullet("Volume — playback gain (0.0 = silent, 1.0 = full).");
+    Bullet("Falloff Radius — world-space distance at which the sound attenuates to silence.");
     Bullet("Loop — if checked, the sound plays on repeat.");
+    Bullet("Auto Play — if checked, the sound starts playing automatically when the level loads.");
+
+    ImGui::Spacing();
+    ImGui::SeparatorText("Runtime Export (\\)");
+    ImGui::TextWrapped(
+        "All entity data — visual type, asset path, transform, physics shape, "
+        "Lua script + exposed variables, and audio settings — is compiled into "
+        "the .dlevel v4 bundle when you press \\.  The runtime ECS instantiates "
+        "matching components automatically: BillboardSpriteComponent, "
+        "AnimationStateComponent, StaticMeshComponent, VoxelObjectComponent, "
+        "DecalComponent, ParticleEmitterComponent, ScriptComponent, and "
+        "AudioSourceComponent.");
 
     ImGui::Spacing();
     ImGui::SeparatorText("3D Gizmo Controls (entity selected, hover 3D viewport)");
@@ -915,10 +950,12 @@ void HelpPanel::drawPrefabs()
     ImGui::SeparatorText("PREFABS");
     ImGui::Spacing();
     ImGui::TextWrapped(
-        "Prefabs are named snapshots of one or more selected sectors.  "
+        "Prefabs are named snapshots of one or more selected sectors, including any "
+        "entities whose positions fall within the selection bounding box.  "
         "Save a prefab once, then stamp it anywhere in the map with a single click.  "
         "All wall flags, materials, heights, and portal links within the saved "
-        "selection are preserved; links to sectors outside the selection are cleared.");
+        "selection are preserved; portal links to sectors outside the selection are "
+        "cleared on placement.");
 
     ImGui::Spacing();
     ImGui::SeparatorText("Saving a Prefab");
@@ -941,9 +978,11 @@ void HelpPanel::drawPrefabs()
     ImGui::Spacing();
     ImGui::SeparatorText("Prefab Storage");
     ImGui::TextWrapped(
-        "Prefabs are stored in the map's sidecar file (*.dmap.json) alongside "
-        "the main binary map data.  They persist between sessions and are "
-        "included when the map is saved.");
+        "Prefabs are stored in the map's sidecar file (*.emap) alongside "
+        "the main binary map data (.dmap).  The .emap is a versioned UTF-8 JSON "
+        "file that also holds layers, entities, lights, scene settings, render "
+        "settings, and the asset root path.  It is written automatically "
+        "whenever the map is saved.");
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1064,9 +1103,59 @@ void HelpPanel::drawMapDoctor()
     ImGui::SeparatorText("Good Habits");
     Bullet("Run Map Doctor after any large structural edit (adding rooms, "
            "splitting walls, moving many vertices).");
-    Bullet("A clean Map Doctor run is a good sign before pressing F5 to "
+    Bullet("A clean Map Doctor run is a good sign before pressing \\ to "
            "launch the engine; unchecked errors can cause the engine to "
            "hang or produce invisible geometry.");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Asset Browser
+// ─────────────────────────────────────────────────────────────────────────────
+
+void HelpPanel::drawAssetBrowser()
+{
+    ImGui::SeparatorText("ASSET BROWSER");
+    ImGui::Spacing();
+    ImGui::TextWrapped(
+        "The Asset Browser panel (tab in the Properties column, alongside "
+        "Properties, Object Browser, and Render Settings) is a material "
+        "thumbnail browser.  It scans a folder tree you designate as the "
+        "Asset Root and displays 64x64 thumbnails of every image file found.");
+
+    ImGui::Spacing();
+    ImGui::SeparatorText("Setting the Asset Root");
+    Bullet("Open File > Set Asset Root\xe2\x80\xa6 and choose your textures folder.  "
+           "The catalog rescans automatically whenever the root changes.");
+    Bullet("The asset root is persisted in the .emap sidecar, so it is "
+           "restored automatically when you reopen the map.");
+    Tip("If the panel shows 'No asset root set', use File > Set Asset Root\xe2\x80\xa6 "
+        "to point it at your project's textures directory.");
+
+    ImGui::Spacing();
+    ImGui::SeparatorText("Browsing");
+    Bullet("Left pane — folder tree: click a subfolder name to filter the "
+           "thumbnail grid.  Click 'All' to show the complete catalog.");
+    Bullet("Right pane — thumbnail grid: 64x64 pixel previews of all "
+           "image files in the active folder filter.");
+    Bullet("Hover any thumbnail to see the full file path in a tooltip.");
+
+    ImGui::Spacing();
+    ImGui::SeparatorText("Assigning Materials by Drag-and-Drop");
+    Bullet("Drag a thumbnail from the Asset Browser into the 3D viewport "
+           "to assign that material to the surface under the cursor.");
+    Tip("The drag payload carries a 128-bit UUID derived from the file path — "
+        "the same UUID used in sector and wall material slots.");
+
+    ImGui::Spacing();
+    ImGui::SeparatorText("Picker Mode");
+    Bullet("Click a material slot button in the Properties panel "
+           "(Floor Material, Wall Front, Decal Normal, etc.) to activate "
+           "Picker mode.  The Asset Browser tab comes to the front "
+           "automatically.");
+    Bullet("A yellow 'Picking: <slot name>' banner appears at the top of "
+           "the panel.  Click any thumbnail to assign it and close the picker.");
+    Bullet("Press Escape or click Cancel in the banner to dismiss without "
+           "making a change.");
 }
 
 } // namespace daedalus::editor

@@ -30,7 +30,7 @@ class MaterialCatalog;
 class AssetBrowserPanel;
 
 /// Which surface type is currently hovered in the 3D viewport.
-enum class HoveredSurface : uint8_t { None, Wall, Floor, Ceil };
+enum class HoveredSurface : uint8_t { None, Wall, UpperWall, LowerWall, Floor, Ceil };
 
 /// Active transform gizmo mode in the 3D viewport.
 enum class GizmoMode : int
@@ -78,6 +78,14 @@ public:
     /// True if the 3D viewport panel was hovered on the previous frame.
     [[nodiscard]] bool isHovered() const noexcept { return m_isHovered; }
 
+    /// Camera state accessors (used by Viewport2D for the fly-camera overlay).
+    [[nodiscard]] glm::vec3 eye() const noexcept { return m_eye; }
+    [[nodiscard]] float     yaw() const noexcept { return m_yaw; }
+
+    /// Accumulate raw mouse delta from SDL_EVENT_MOUSE_MOTION while captured.
+    /// Called from the main event loop so all motion events within a frame are summed.
+    void addMouseDelta(float dx, float dy) noexcept { m_pendingDx += dx; m_pendingDy += dy; }
+
 private:
     std::string m_shaderLibPath;
 
@@ -106,9 +114,8 @@ private:
     bool        m_altDragging     = false;  ///< True while Alt+LMB orbit is active.
     glm::vec3   m_altFocus{};              ///< Orbit pivot point for current Alt+drag gesture.
 
-    // Warp-to-centre mouselook: no SDL relative mouse mode needed.
-    SDL_Window* m_captureWindow   = nullptr;
-    bool        m_captureWarpDone = false;  ///< False for the first frame after capture to skip the initial delta.
+    // Mouse-capture state for fly-mode mouselook (SDL relative-mouse-mode).
+    SDL_Window* m_captureWindow = nullptr;
 
     unsigned  m_frameIdx    = 0;
     glm::mat4 m_prevView{1.0f};
@@ -148,6 +155,15 @@ private:
     HoveredSurface  m_hoveredSurface   = HoveredSurface::None;
     /// Which surface was last clicked to produce a Sector selection (Floor or Ceil).
     HoveredSurface  m_selectedSurface  = HoveredSurface::Floor;
+    /// Which wall surface (Wall/UpperWall/LowerWall) produced the current Wall selection.
+    HoveredSurface  m_selectedWallSurface = HoveredSurface::Wall;
+
+    // ─── Accumulated mouse delta for mouselook (fed from event loop) ─────────────
+    float m_pendingDx = 0.0f;
+    float m_pendingDy = 0.0f;
+    /// Frames to skip after entering capture mode so the warp-generated
+    /// delta spike doesn't snap the camera on entry.
+    int   m_captureWarmupFrames = 0;
 
     // ─── UV editing state (keyboard shortcuts) ──────────────────────────────
     bool            m_uvEditing          = false;

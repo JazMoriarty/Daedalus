@@ -22,6 +22,7 @@
 #include "imgui.h"
 
 #include <SDL3/SDL.h>
+#include <CoreGraphics/CoreGraphics.h>  // CGAssociateMouseAndMouseCursorPosition, CGGetLastMouseDelta
 #include <glm/glm.hpp>
 #include <glm/gtc/constants.hpp>
 #include <glm/gtc/matrix_transform.hpp>
@@ -124,6 +125,8 @@ void Viewport3D::retessellate(rhi::IRenderDevice& device,
             draw.indexCount         = static_cast<unsigned>(mesh.indices.size());
             draw.modelMatrix        = glm::mat4(1.0f);
             draw.prevModel          = glm::mat4(1.0f);
+            draw.material.sectorAmbient = map.sectors[si].ambientColor
+                                          * map.sectors[si].ambientIntensity;
             // Albedo filled in during draw() from the MaterialCatalog.
 
             m_drawMaterialIds[si][bi] = batches[bi].materialId;
@@ -419,20 +422,27 @@ void Viewport3D::setMouseCapture(SDL_Window* window, bool capture) noexcept
     m_mouseCaptured = capture;
     if (capture)
     {
-        m_captureWindow   = window;
-        m_captureWarpDone = false;  // skip first-frame delta
+        m_captureWindow = window;
+        SDL_SetWindowMouseGrab(window, true);
         SDL_HideCursor();
-        // Warp to window centre so the first measured delta is always zero.
-        int ww = 0, wh = 0;
-        SDL_GetWindowSize(window, &ww, &wh);
-        SDL_WarpMouseInWindow(window, ww * 0.5f, wh * 0.5f);
+        // Freeze cursor without needing SDL keyboard focus, so mouselook
+        // works regardless of window activation order.  Raw movement is then
+        // polled via CGGetLastMouseDelta() in draw() each frame.
+        CGAssociateMouseAndMouseCursorPosition(false);
+        // Drain the pre-capture accumulated delta and skip warmup frames.
+        { int32_t _x = 0, _y = 0; CGGetLastMouseDelta(&_x, &_y); }
+        m_pendingDx            = 0.0f;
+        m_pendingDy            = 0.0f;
+        m_captureWarmupFrames  = 2;
     }
     else
     {
+        CGAssociateMouseAndMouseCursorPosition(true);  // unfreeze cursor
         SDL_ShowCursor();
-        m_captureWindow   = nullptr;
-        m_captureWarpDone = false;
-        m_altDragging     = false;
+        if (m_captureWindow)
+            SDL_SetWindowMouseGrab(m_captureWindow, false);
+        m_captureWindow = nullptr;
+        m_altDragging   = false;
     }
 }
 
@@ -525,7 +535,7 @@ void Viewport3D::draw(EditMapDocument&      doc,
 
     // ── Free-fly camera ───────────────────────────────────────────────────────
     const ImGuiIO& io = ImGui::GetIO();
-    const float dt = io.DeltaTime;
+    const float dt = std::min(io.DeltaTime, 0.05f);  // cap at 50 ms – prevents lurch on heavy frames (file I/O, asset loads)
 
     // Helper: build the forward unit vector from current yaw / pitch.
     auto makeFwd = [&](float yaw, float pitch) -> glm::vec3
@@ -537,12 +547,48 @@ void Viewport3D::draw(EditMapDocument&      doc,
         };
     };
 
-    glm::vec3 fwd   = makeFwd(m_yaw, m_pitch);
-    const glm::vec3 right = glm::normalize(glm::cross(glm::vec3(0.0f, 1.0f, 0.0f), fwd));
+    glm::vec3 fwd = makeFwd(m_yaw, m_pitch);
 
     if (m_mouseCaptured)
     {
-        // ── Fly mode: WASD + Q/E + mouselook ──────────────────────────────────
+        // ── Fly mode: mouselook FIRST, then WASD ──────────────────────────────
+        // Consuming rotation before movement means WASD uses the current frame's
+        // look direction, eliminating the one-frame lag that causes the "pull"
+        // sensation when turning while moving.
+
+        // Step 1 – read raw hardware delta via CGGetLastMouseDelta.
+        // Warmup frames drain any startup spike; after warmup, each call
+        // returns only movement accumulated since the previous call.
+        if (m_captureWarmupFrames > 0)
+        {
+            --m_captureWarmupFrames;
+            // Drain accumulated delta during warmup to start clean.
+            { int32_t _x = 0, _y = 0; CGGetLastMouseDelta(&_x, &_y); }
+            m_pendingDx = 0.0f;
+            m_pendingDy = 0.0f;
+        }
+        else
+        {
+            int32_t cgDx = 0, cgDy = 0;
+            CGGetLastMouseDelta(&cgDx, &cgDy);
+            m_pendingDx = 0.0f;
+            m_pendingDy = 0.0f;
+            constexpr float kMaxDelta = 200.0f;
+            constexpr float kSens = 0.003f;
+            m_yaw   += std::clamp(static_cast<float>(cgDx), -kMaxDelta, kMaxDelta) * kSens;
+            m_pitch -= std::clamp(static_cast<float>(cgDy), -kMaxDelta, kMaxDelta) * kSens;
+            m_pitch  = std::clamp(m_pitch,
+                                   -glm::pi<float>() * 0.45f,
+                                    glm::pi<float>() * 0.45f);
+            fwd = makeFwd(m_yaw, m_pitch);
+        }
+
+        // Step 2 – derive right from the now-current fwd so A/D strafes in the
+        // correct direction even on frames where the player turned sharply.
+        const glm::vec3 right = glm::normalize(
+            glm::cross(glm::vec3(0.0f, 1.0f, 0.0f), fwd));
+
+        // Step 3 – apply WASD / Q / E movement.
         const bool* keys = SDL_GetKeyboardState(nullptr);
         const bool  fast = keys[SDL_SCANCODE_LSHIFT] || keys[SDL_SCANCODE_RSHIFT];
         const float spd  = (fast ? 5.0f : 1.0f) * 8.0f * dt;
@@ -553,34 +599,6 @@ void Viewport3D::draw(EditMapDocument&      doc,
         if (keys[SDL_SCANCODE_D]) m_eye += right                        * spd;
         if (keys[SDL_SCANCODE_Q]) m_eye -= glm::vec3(0.0f, 1.0f, 0.0f) * spd;
         if (keys[SDL_SCANCODE_E]) m_eye += glm::vec3(0.0f, 1.0f, 0.0f) * spd;
-
-        // Mouselook: warp-to-centre approach — works on all SDL3/macOS setups
-        // without needing SDL_SetWindowRelativeMouseMode (which is unreliable
-        // on macOS because the ImGui backend tracks absolute x/y, not xrel/yrel).
-        if (m_captureWindow)
-        {
-            float mx = 0.0f, my = 0.0f;
-            SDL_GetMouseState(&mx, &my);
-            int ww = 0, wh = 0;
-            SDL_GetWindowSize(m_captureWindow, &ww, &wh);
-            const float cx = ww * 0.5f;
-            const float cy = wh * 0.5f;
-
-            if (m_captureWarpDone)
-            {
-                constexpr float kSens = 0.003f;
-                m_yaw   += (mx - cx) * kSens;
-                m_pitch -= (my - cy) * kSens;
-                m_pitch  = std::clamp(m_pitch,
-                                       -glm::pi<float>() * 0.45f,
-                                        glm::pi<float>() * 0.45f);
-            }
-            m_captureWarpDone = true;
-            SDL_WarpMouseInWindow(m_captureWindow, cx, cy);
-
-            // Recompute fwd after angle changes.
-            fwd = makeFwd(m_yaw, m_pitch);
-        }
     }
     else
     {
@@ -607,8 +625,10 @@ void Viewport3D::draw(EditMapDocument&      doc,
         if (m_altDragging)
         {
             const float dist = std::max(0.1f, glm::length(m_eye - m_altFocus));
-            m_yaw   += io.MouseDelta.x * 0.008f;
-            m_pitch -= io.MouseDelta.y * 0.008f;
+            // Clamp per-frame delta to prevent orbit from jumping on heavy frames.
+            constexpr float kMaxOrbitDelta = 50.0f;  // px
+            m_yaw   += std::clamp(io.MouseDelta.x, -kMaxOrbitDelta, kMaxOrbitDelta) * 0.008f;
+            m_pitch -= std::clamp(io.MouseDelta.y, -kMaxOrbitDelta, kMaxOrbitDelta) * 0.008f;
             m_pitch  = std::clamp(m_pitch,
                                    -glm::pi<float>() * 0.45f,
                                     glm::pi<float>() * 0.45f);
@@ -714,8 +734,9 @@ void Viewport3D::draw(EditMapDocument&      doc,
     scene.sunDirection  = ss.sunDirection;
     scene.sunColor      = ss.sunColor;
     scene.sunIntensity  = ss.sunIntensity;
-    scene.ambientColor  = doc.mapData().globalAmbientColor
-                          * doc.mapData().globalAmbientIntensity;
+    // Per-sector ambient is baked into each draw's material.sectorAmbient;
+    // zero the global ambient to avoid double-counting.
+    scene.ambientColor  = glm::vec3(0.0f);
 
     // Fill point light centred above the map for overall visibility.
     scene.pointLights.push_back({
@@ -1008,8 +1029,19 @@ void Viewport3D::draw(EditMapDocument&      doc,
         }
     }
 
-    // Entities.
-    m_entityCache.populateSceneView(scene, doc.entities(), view);
+    // Entities: populate then backfill global ambient so entity draws receive
+    // correct ambient lighting (they have no sector, so use the map global value).
+    {
+        const glm::vec3 globalAmb = doc.mapData().globalAmbientColor
+                                    * doc.mapData().globalAmbientIntensity;
+        const std::size_t meshBefore  = scene.meshDraws.size();
+        const std::size_t transBefore = scene.transparentDraws.size();
+        m_entityCache.populateSceneView(scene, doc.entities(), view);
+        for (std::size_t i = meshBefore; i < scene.meshDraws.size(); ++i)
+            scene.meshDraws[i].material.sectorAmbient = globalAmb;
+        for (std::size_t i = transBefore; i < scene.transparentDraws.size(); ++i)
+            scene.transparentDraws[i].material.sectorAmbient = globalAmb;
+    }
     render::sortTransparentDraws(scene);
 
     // ── Render ────────────────────────────────────────────────────────────────
@@ -1035,6 +1067,14 @@ void Viewport3D::draw(EditMapDocument&      doc,
                     doc.pushCommand(std::make_unique<CmdSetWallMaterial>(
                         doc, m_hoveredSectorId, m_hoveredWallIdx,
                         WallSurface::Front, droppedUuid));
+                else if (m_hoveredSurface == HoveredSurface::UpperWall)
+                    doc.pushCommand(std::make_unique<CmdSetWallMaterial>(
+                        doc, m_hoveredSectorId, m_hoveredWallIdx,
+                        WallSurface::Upper, droppedUuid));
+                else if (m_hoveredSurface == HoveredSurface::LowerWall)
+                    doc.pushCommand(std::make_unique<CmdSetWallMaterial>(
+                        doc, m_hoveredSectorId, m_hoveredWallIdx,
+                        WallSurface::Lower, droppedUuid));
                 else if (m_hoveredSurface == HoveredSurface::Floor)
                     doc.pushCommand(std::make_unique<CmdSetSectorMaterial>(
                         doc, m_hoveredSectorId, SectorSurface::Floor, droppedUuid));
@@ -1055,7 +1095,7 @@ void Viewport3D::draw(EditMapDocument&      doc,
     else
     {
         ImGui::SetCursorPos(ImVec2(8.0f, 8.0f));
-        ImGui::TextDisabled("[Tab] capture   Alt+drag = orbit   Scroll = dolly   F = frame   P = player   M = pick front material");
+        ImGui::TextDisabled("[Tab] capture   Alt+drag = orbit   Scroll = dolly   F = frame   P = player   M = pick surface material");
     }
 
     // ── Wall / floor / ceiling hover ray + click selection ─────────────────────
@@ -1081,7 +1121,7 @@ void Viewport3D::draw(EditMapDocument&      doc,
             std::size_t     hitWall    = 0;
             HoveredSurface  hitSurface = HoveredSurface::None;
 
-            // ── Solid wall triangles ────────────────────────────────────────────
+            // ── Wall triangles: solid walls + portal upper/lower strips ──────────
             for (std::size_t si = 0; si < sectors.size(); ++si)
             {
                 const world::Sector& sec = sectors[si];
@@ -1089,20 +1129,38 @@ void Viewport3D::draw(EditMapDocument&      doc,
                 for (std::size_t wi = 0; wi < ns; ++wi)
                 {
                     const world::Wall& wall = sec.walls[wi];
-                    if (wall.portalSectorId != world::INVALID_SECTOR_ID) continue;
-
                     const glm::vec2 p0 = wall.p0;
                     const glm::vec2 p1 = sec.walls[(wi + 1) % ns].p0;
-                    const glm::vec3 bl = {p0.x, sec.floorHeight, p0.y};
-                    const glm::vec3 br = {p1.x, sec.floorHeight, p1.y};
-                    const glm::vec3 tr = {p1.x, sec.ceilHeight,  p1.y};
-                    const glm::vec3 tl = {p0.x, sec.ceilHeight,  p0.y};
 
-                    float t;
-                    if (rayTriangleIntersect(m_eye, rayDir, bl, tr, br, t) && t < closestT)
-                    { closestT = t; hitSector = static_cast<world::SectorId>(si); hitWall = wi; hitSurface = HoveredSurface::Wall; }
-                    if (rayTriangleIntersect(m_eye, rayDir, bl, tl, tr, t) && t < closestT)
-                    { closestT = t; hitSector = static_cast<world::SectorId>(si); hitWall = wi; hitSurface = HoveredSurface::Wall; }
+                    // Test two triangles of a wall quad spanning [yBottom, yTop].
+                    auto testStrip = [&](float yBottom, float yTop, HoveredSurface surf)
+                    {
+                        if (yBottom >= yTop) return;
+                        const glm::vec3 bl = {p0.x, yBottom, p0.y};
+                        const glm::vec3 br = {p1.x, yBottom, p1.y};
+                        const glm::vec3 tr = {p1.x, yTop,    p1.y};
+                        const glm::vec3 tl = {p0.x, yTop,    p0.y};
+                        float t;
+                        if (rayTriangleIntersect(m_eye, rayDir, bl, tr, br, t) && t < closestT)
+                        { closestT = t; hitSector = static_cast<world::SectorId>(si); hitWall = wi; hitSurface = surf; }
+                        if (rayTriangleIntersect(m_eye, rayDir, bl, tl, tr, t) && t < closestT)
+                        { closestT = t; hitSector = static_cast<world::SectorId>(si); hitWall = wi; hitSurface = surf; }
+                    };
+
+                    if (wall.portalSectorId == world::INVALID_SECTOR_ID)
+                    {
+                        testStrip(sec.floorHeight, sec.ceilHeight, HoveredSurface::Wall);
+                    }
+                    else
+                    {
+                        const auto adjId = static_cast<std::size_t>(wall.portalSectorId);
+                        if (adjId >= sectors.size()) continue;
+                        const world::Sector& adj = sectors[adjId];
+                        if (adj.ceilHeight < sec.ceilHeight)    // upper strip
+                            testStrip(adj.ceilHeight, sec.ceilHeight, HoveredSurface::UpperWall);
+                        if (adj.floorHeight > sec.floorHeight)  // lower strip
+                            testStrip(sec.floorHeight, adj.floorHeight, HoveredSurface::LowerWall);
+                    }
                 }
             }
 
@@ -1162,7 +1220,9 @@ void Viewport3D::draw(EditMapDocument&      doc,
                 SelectionState& sel = doc.selection();
                 if (hitSector != world::INVALID_SECTOR_ID)
                 {
-                    if (hitSurface == HoveredSurface::Wall)
+                    if (hitSurface == HoveredSurface::Wall ||
+                        hitSurface == HoveredSurface::UpperWall ||
+                        hitSurface == HoveredSurface::LowerWall)
                     {
                         // Toggle: clicking the same wall deselects it.
                         if (sel.type == SelectionType::Wall &&
@@ -1170,9 +1230,10 @@ void Viewport3D::draw(EditMapDocument&      doc,
                             sel.clear();
                         else
                         {
-                            sel.type         = SelectionType::Wall;
-                            sel.wallSectorId = hitSector;
-                            sel.wallIndex    = hitWall;
+                            sel.type              = SelectionType::Wall;
+                            sel.wallSectorId      = hitSector;
+                            sel.wallIndex         = hitWall;
+                            m_selectedWallSurface = hitSurface;
                         }
                     }
                     else
@@ -1263,7 +1324,9 @@ void Viewport3D::draw(EditMapDocument&      doc,
         // Draw a wall quad outline using Sutherland-Hodgman near-plane clipping.
         // Clips all 4 corners as a polygon so the near-plane "cap" edge is always
         // drawn even when multiple corners are behind the camera.
+        // yBottom/yTop define the vertical extent of the quad (strip support).
         auto drawWallOutline = [&](world::SectorId sid, std::size_t wi,
+                                   float yBottom, float yTop,
                                    ImU32 fillCol, ImU32 lineCol)
         {
             if (sid >= static_cast<world::SectorId>(sectors.size())) return;
@@ -1275,10 +1338,10 @@ void Viewport3D::draw(EditMapDocument&      doc,
 
             // Clip-space corners: bl, br, tr, tl (CCW order).
             const glm::vec4 in[4] = {
-                VP * glm::vec4(p0.x, sec.floorHeight, p0.y, 1.0f),
-                VP * glm::vec4(p1.x, sec.floorHeight, p1.y, 1.0f),
-                VP * glm::vec4(p1.x, sec.ceilHeight,  p1.y, 1.0f),
-                VP * glm::vec4(p0.x, sec.ceilHeight,  p0.y, 1.0f),
+                VP * glm::vec4(p0.x, yBottom, p0.y, 1.0f),
+                VP * glm::vec4(p1.x, yBottom, p1.y, 1.0f),
+                VP * glm::vec4(p1.x, yTop,    p1.y, 1.0f),
+                VP * glm::vec4(p0.x, yTop,    p0.y, 1.0f),
             };
 
             // Sutherland-Hodgman clip against w > kNearEps (near plane).
@@ -1314,19 +1377,47 @@ void Viewport3D::draw(EditMapDocument&      doc,
                                          projClip(poly[i + 1]), fillCol);
         };
 
+        // Helper: get strip y-range for a hovered/selected portal wall surface.
+        // Returns false if the adjacent sector is not available.
+        auto getStripY = [&](world::SectorId sid, std::size_t wi,
+                             HoveredSurface surf,
+                             float& yBot, float& yTop) -> bool
+        {
+            if (sid >= static_cast<world::SectorId>(sectors.size())) return false;
+            const world::Sector& sec = sectors[sid];
+            if (wi >= sec.walls.size()) return false;
+            const world::SectorId adjSid = sec.walls[wi].portalSectorId;
+            if (adjSid == world::INVALID_SECTOR_ID ||
+                static_cast<std::size_t>(adjSid) >= sectors.size()) return false;
+            const world::Sector& adj = sectors[adjSid];
+            yBot = (surf == HoveredSurface::LowerWall) ? sec.floorHeight : adj.ceilHeight;
+            yTop = (surf == HoveredSurface::LowerWall) ? adj.floorHeight : sec.ceilHeight;
+            return yBot < yTop;
+        };
+
         // Hover outlines.
         if (m_hoveredSectorId != world::INVALID_SECTOR_ID)
         {
+            const world::Sector& hovSec = sectors[m_hoveredSectorId];
             if (m_hoveredSurface == HoveredSurface::Wall)
                 drawWallOutline(m_hoveredSectorId, m_hoveredWallIdx,
+                                hovSec.floorHeight, hovSec.ceilHeight,
                                 0, IM_COL32(255, 255, 255, 200));
+            else if (m_hoveredSurface == HoveredSurface::UpperWall ||
+                     m_hoveredSurface == HoveredSurface::LowerWall)
+            {
+                float yBot = hovSec.floorHeight, yTop = hovSec.ceilHeight;
+                if (getStripY(m_hoveredSectorId, m_hoveredWallIdx, m_hoveredSurface, yBot, yTop))
+                    drawWallOutline(m_hoveredSectorId, m_hoveredWallIdx,
+                                    yBot, yTop, 0, IM_COL32(255, 255, 255, 200));
+            }
             else if (m_hoveredSurface == HoveredSurface::Floor)
                 drawSectorOutline(m_hoveredSectorId,
-                                  sectors[m_hoveredSectorId].floorHeight,
+                                  hovSec.floorHeight,
                                   IM_COL32(255, 255, 255, 200));
             else if (m_hoveredSurface == HoveredSurface::Ceil)
                 drawSectorOutline(m_hoveredSectorId,
-                                  sectors[m_hoveredSectorId].ceilHeight,
+                                  hovSec.ceilHeight,
                                   IM_COL32(255, 255, 255, 200));
         }
 
@@ -1335,9 +1426,21 @@ void Viewport3D::draw(EditMapDocument&      doc,
         if (sel2.type == SelectionType::Wall &&
             sel2.wallSectorId != world::INVALID_SECTOR_ID)
         {
-            drawWallOutline(sel2.wallSectorId, sel2.wallIndex,
-                            0,                          // no fill — preserve texture visibility
-                            IM_COL32(255, 200, 0, 220));
+            const world::SectorId wSid = sel2.wallSectorId;
+            const std::size_t     wWi  = sel2.wallIndex;
+            float yBot = 0.0f, yTop = 0.0f;
+            bool  useStrip = false;
+            if (wSid < static_cast<world::SectorId>(sectors.size()) && wWi < sectors[wSid].walls.size())
+            {
+                const world::Sector& wSec = sectors[wSid];
+                if (m_selectedWallSurface == HoveredSurface::UpperWall ||
+                    m_selectedWallSurface == HoveredSurface::LowerWall)
+                    useStrip = getStripY(wSid, wWi, m_selectedWallSurface, yBot, yTop);
+                if (!useStrip)
+                { yBot = wSec.floorHeight; yTop = wSec.ceilHeight; }
+            }
+            drawWallOutline(wSid, wWi, yBot, yTop,
+                            0, IM_COL32(255, 200, 0, 220));
         }
         else if (sel2.type == SelectionType::Sector && !sel2.sectors.empty())
         {
@@ -1359,17 +1462,26 @@ void Viewport3D::draw(EditMapDocument&      doc,
         if (ImGui::IsKeyPressed(ImGuiKey_M, /*repeat=*/false) &&
             selM.type == SelectionType::Wall)
         {
-            // Capture the selected wall at open-time so the callback is stable.
-            // In the 3D view you always see the Front face, so we assign Front.
-            const world::SectorId capSid = selM.wallSectorId;
-            const std::size_t     capWi  = selM.wallIndex;
+            // Use the hovered surface to pick the right material slot so hovering
+            // an upper/lower strip and pressing M assigns to that slot.
+            const world::SectorId capSid  = selM.wallSectorId;
+            const std::size_t     capWi   = selM.wallIndex;
+            WallSurface           capSurf = WallSurface::Front;
+            const char*           capLbl  = "Wall Front";
+            if (m_hoveredSectorId == capSid && m_hoveredWallIdx == capWi)
+            {
+                if      (m_hoveredSurface == HoveredSurface::UpperWall)
+                { capSurf = WallSurface::Upper; capLbl = "Wall Upper"; }
+                else if (m_hoveredSurface == HoveredSurface::LowerWall)
+                { capSurf = WallSurface::Lower; capLbl = "Wall Lower"; }
+            }
             assetBrowser.openPicker(
-                [&doc, capSid, capWi](const UUID& uuid)
+                [&doc, capSid, capWi, capSurf](const UUID& uuid)
                 {
                     doc.pushCommand(std::make_unique<CmdSetWallMaterial>(
-                        doc, capSid, capWi, WallSurface::Front, uuid));
+                        doc, capSid, capWi, capSurf, uuid));
                 },
-                "Wall Front");
+                capLbl);
         }
     }
 

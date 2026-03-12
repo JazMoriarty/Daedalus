@@ -1357,7 +1357,8 @@ void FrameRenderer::renderFrame(IRenderDevice& device,
                                                      draw.material.isMirrorSurface ? 1.0f : 0.0f, 0.0f,
                                                      draw.material.tint,
                                                      draw.material.uvOffset,
-                                                     draw.material.uvScale };
+                                                     draw.material.uvScale,
+                                                     glm::vec4(draw.material.sectorAmbient, 0.0f) };
                 enc->setFragmentBytes(&matConst, sizeof(MaterialConstantsGPU), 1);
                 // Fragment stage: material textures (fallback if nullptr)
                 enc->setFragmentTexture(
@@ -1616,7 +1617,8 @@ void FrameRenderer::renderFrame(IRenderDevice& device,
                                                      draw.material.isMirrorSurface ? 1.0f : 0.0f, 0.0f,
                                                      draw.material.tint,
                                                      draw.material.uvOffset,
-                                                     draw.material.uvScale };
+                                                     draw.material.uvScale,
+                                                     glm::vec4(draw.material.sectorAmbient, 0.0f) };
                 enc->setFragmentBytes(&matConst, sizeof(MaterialConstantsGPU), 1);
                 // Fragment stage: spot lights
                 enc->setFragmentBuffer(spotBuf,  0, 3);  // spotCount
@@ -2272,7 +2274,8 @@ void FrameRenderer::renderMirrorPrepass(IRenderDevice& device,
                     const MaterialConstantsGPU matConst{
                         draw.material.roughness, draw.material.metalness,
                         0.0f, 0.0f,
-                        draw.material.tint, draw.material.uvOffset, draw.material.uvScale
+                        draw.material.tint, draw.material.uvOffset, draw.material.uvScale,
+                        glm::vec4(draw.material.sectorAmbient, 0.0f)
                     };
                     enc->setFragmentBytes(&matConst, sizeof(MaterialConstantsGPU), 1);
                     enc->setFragmentTexture(

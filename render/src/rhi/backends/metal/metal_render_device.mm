@@ -911,11 +911,21 @@ public:
         CAMetalLayer* layer = (__bridge CAMetalLayer*)SDL_Metal_GetLayer(view);
         DAEDALUS_ASSERT(layer != nil, "createSwapchain: CAMetalLayer is nil");
 
-        layer.device          = m_device;
-        layer.pixelFormat     = MTLPixelFormatBGRA8Unorm;
-        layer.framebufferOnly = NO;  // allow shader reads from swapchain texture
-        layer.drawableSize    = CGSizeMake(static_cast<CGFloat>(width),
-                                           static_cast<CGFloat>(height));
+        layer.device                = m_device;
+        layer.pixelFormat           = MTLPixelFormatBGRA8Unorm;
+        layer.framebufferOnly       = NO;  // allow shader reads from swapchain texture
+        layer.drawableSize          = CGSizeMake(static_cast<CGFloat>(width),
+                                                  static_cast<CGFloat>(height));
+        // displaySyncEnabled = NO: prevents [CAMetalLayer nextDrawable] from blocking
+        // on vsync.  With the default of YES the Window Server's cursor-compositing
+        // work (active when the cursor is over the Metal window) can push frame time
+        // past the vsync boundary, stalling nextDrawable for 16-32 ms.  During that
+        // stall, mouse-motion events accumulate and fire all at once on the following
+        // frame, producing the "stutter-when-cursor-is-over-the-window" artefact.
+        // Decoupling from vsync releases drawables as soon as the GPU finishes;
+        // the caller applies its own ~60 fps cap via SDL_DelayPrecise.
+        layer.maximumDrawableCount  = 2;
+        layer.displaySyncEnabled    = NO;
 
         return std::make_unique<MetalSwapchain>(layer, view, width, height);
     }

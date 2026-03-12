@@ -420,8 +420,17 @@ int main(int /*argc*/, char* /*argv*/[])
     id<MTLCommandQueue> mtlQueue =
         (__bridge id<MTLCommandQueue>)queue->nativeHandle();
 
-    metalLayer.device      = mtlDevice;
-    metalLayer.pixelFormat = MTLPixelFormatBGRA8Unorm;
+    metalLayer.device               = mtlDevice;
+    metalLayer.pixelFormat          = MTLPixelFormatBGRA8Unorm;
+    // displaySyncEnabled = NO: prevents [CAMetalLayer nextDrawable] from blocking on
+    // vsync.  With the default of YES the Window Server's cursor-compositing work
+    // (active when the cursor is over the Metal window) pushes frame time past the
+    // vsync boundary, stalling nextDrawable 16-32 ms.  During that stall mouse-motion
+    // events accumulate and land all at once on the next frame → stutter.  With sync
+    // disabled, drawables are released as soon as the GPU finishes; the main loop
+    // applies its own ~60 fps cap via SDL_DelayNS to avoid over-driving the GPU.
+    metalLayer.maximumDrawableCount = 2;
+    metalLayer.displaySyncEnabled   = NO;
 
     // ── ImGui ─────────────────────────────────────────────────────────────────
     IMGUI_CHECKVERSION();
@@ -510,10 +519,22 @@ int main(int /*argc*/, char* /*argv*/[])
     bool running = true;
     while (running)
     {
-        // ── Event processing ─────────────────────────────────────────────────
+        // ── Frame timing: record start so we can cap at ~60 fps later ─────
+        const Uint64 frameStartNs = SDL_GetTicksNS();
+
+        // ── Event processing ─────────────────────────────────────────────
         SDL_Event event;
         while (SDL_PollEvent(&event))
         {
+            // During fly mode, handle mouse motion ourselves and skip ImGui so it
+            // doesn't accumulate the relative-mouse absolute position into io.MousePos
+            // (which would cause spurious hover state changes and io.MouseDelta spikes).
+            if (vp3d.isMouseCaptured() && event.type == SDL_EVENT_MOUSE_MOTION)
+            {
+                vp3d.addMouseDelta(event.motion.xrel, event.motion.yrel);
+                continue;  // do NOT pass to ImGui
+            }
+
             ImGui_ImplSDL3_ProcessEvent(&event);
 
             switch (event.type)
@@ -531,19 +552,26 @@ int main(int /*argc*/, char* /*argv*/[])
             {
                 const SDL_Scancode sc = event.key.scancode;
 
-                // Shortcuts (only when ImGui is not capturing keyboard input).
+                // Tab: toggle mouselook — always fires, even when ImGui has focus.
+                if (sc == SDL_SCANCODE_TAB)
+                    vp3d.setMouseCapture(window, !vp3d.isMouseCaptured());
+
+                // Escape: release mouselook — always fires while captured.
+                if (sc == SDL_SCANCODE_ESCAPE && vp3d.isMouseCaptured())
+                    vp3d.setMouseCapture(window, false);
+
+                // Remaining shortcuts suppressed when ImGui wants keyboard input.
                 if (!io.WantCaptureKeyboard)
                 {
-                    // Tab: toggle 3D viewport mouselook — always processed.
                     if (sc == SDL_SCANCODE_TAB)
                     {
-                        vp3d.setMouseCapture(window, !vp3d.isMouseCaptured());
+                        // Handled above.
                     }
-                    // Escape: release mouselook first; otherwise cancel draw / deselect.
+                    // Escape without mouselook: cancel pending placement, draw, or deselect.
                     else if (sc == SDL_SCANCODE_ESCAPE)
                     {
-                        if (vp3d.isMouseCaptured())
-                            vp3d.setMouseCapture(window, false);
+                        if (vp2d.hasPendingPlacement())
+                            vp2d.cancelPendingPlacement();
                         else if (activeToolId == ActiveTool::DrawSector)
                             drawSectorTool.cancel();
                         else
@@ -637,19 +665,13 @@ int main(int /*argc*/, char* /*argv*/[])
                         }
                         else if (sc == SDL_SCANCODE_L)
                         {
-                            // L — Place a point light at the last 2D-viewport cursor position.
-                            const glm::vec2 mp = vp2d.lastMouseMapPos();
-                            LightDef ld;
-                            ld.position = {mp.x, 2.0f, mp.y};
-                            doc.pushCommand(std::make_unique<CmdPlaceLight>(doc, ld));
+                            // L — arm ghost-placement mode for a point light.
+                            vp2d.beginPendingPlacement(PendingPlacement::Light);
                         }
                         else if (sc == SDL_SCANCODE_E)
                         {
-                            // Place a default entity at the last 2D-viewport cursor position.
-                            const glm::vec2 mp = vp2d.lastMouseMapPos();
-                            EntityDef ed;
-                            ed.position = {mp.x, 0.5f, mp.y};
-                            doc.pushCommand(std::make_unique<CmdPlaceEntity>(doc, ed));
+                            // E — arm ghost-placement mode for an entity.
+                            vp2d.beginPendingPlacement(PendingPlacement::Entity);
                         }
                         else if (sc == SDL_SCANCODE_T)
                         {
@@ -689,7 +711,7 @@ int main(int /*argc*/, char* /*argv*/[])
                                 doc.log("R — Rotate: select an entity (3D) or sector (2D).");
                             }
                         }
-                        else if (sc == SDL_SCANCODE_F5)
+                        else if (sc == SDL_SCANCODE_BACKSLASH)
                         {
                             // Compile the current editor document to a .dlevel bundle
                             // and launch DaedalusApp with it.  All textures referenced
@@ -811,12 +833,49 @@ int main(int /*argc*/, char* /*argv*/[])
                                 ent.scriptPath  = ed.script.scriptPath;
                                 ent.exposedVars = ed.script.exposedVars;
 
-                                // Audio descriptor (v3)
+                                // Audio descriptor
                                 ent.soundPath          = ed.audio.soundPath;
                                 ent.soundFalloffRadius = ed.audio.falloffRadius;
                                 ent.soundVolume        = ed.audio.volume;
                                 ent.soundLoop          = ed.audio.loop;
                                 ent.soundAutoPlay      = ed.audio.autoPlay;
+
+                                // Visual descriptor (v4)
+                                ent.visualType = static_cast<world::LevelEntityVisualType>(
+                                    static_cast<uint32_t>(ed.visualType));
+                                ent.assetPath   = ed.assetPath;
+                                ent.tint        = ed.tint;
+                                ent.visualScale = ed.scale;
+                                ent.visualPitch = ed.pitch;
+                                ent.visualRoll  = ed.roll;
+
+                                // Animated billboard / RotatedSpriteSet
+                                ent.animFrameCount       = ed.anim.frameCount;
+                                ent.animCols             = ed.anim.cols;
+                                ent.animRows             = ed.anim.rows;
+                                ent.animFrameRate        = ed.anim.frameRate;
+                                ent.rotatedSpriteDirCount = ed.rotatedSprite.directionCount;
+
+                                // Decal
+                                ent.decalNormalPath = ed.decalMat.normalPath;
+                                ent.decalRoughness  = ed.decalMat.roughness;
+                                ent.decalMetalness  = ed.decalMat.metalness;
+                                ent.decalOpacity    = ed.decalMat.opacity;
+
+                                // Particle emitter
+                                ent.particleEmissionRate  = ed.particle.emissionRate;
+                                ent.particleEmitDir       = ed.particle.emitDir;
+                                ent.particleConeHalfAngle = ed.particle.coneHalfAngle;
+                                ent.particleSpeedMin      = ed.particle.speedMin;
+                                ent.particleSpeedMax      = ed.particle.speedMax;
+                                ent.particleLifetimeMin   = ed.particle.lifetimeMin;
+                                ent.particleLifetimeMax   = ed.particle.lifetimeMax;
+                                ent.particleColorStart    = ed.particle.colorStart;
+                                ent.particleColorEnd      = ed.particle.colorEnd;
+                                ent.particleSizeStart     = ed.particle.sizeStart;
+                                ent.particleSizeEnd       = ed.particle.sizeEnd;
+                                ent.particleDrag          = ed.particle.drag;
+                                ent.particleGravity       = ed.particle.gravity;
 
                                 pack.entities.push_back(std::move(ent));
                             }
@@ -826,7 +885,7 @@ int main(int /*argc*/, char* /*argv*/[])
                                 world::saveDlevel(pack, dlevelPath);
                             if (!saveResult.has_value())
                             {
-                                doc.log("F5 — Test Map: .dlevel save failed.");
+                                doc.log("\\ — Test Map: .dlevel save failed.");
                             }
                             else
                             {
@@ -839,8 +898,8 @@ int main(int /*argc*/, char* /*argv*/[])
 
                                 if (!std::filesystem::exists(appPath))
                                 {
-                                    doc.log(std::format(
-                                        "F5 — Test Map: DaedalusApp not found at '{}'.",
+                                        doc.log(std::format(
+                                            "\\ — Test Map: DaedalusApp not found at '{}'.",
                                         appPath.string()));
                                 }
                                 else
@@ -858,8 +917,37 @@ int main(int /*argc*/, char* /*argv*/[])
                                     NSError* launchErr = nil;
                                     if ([task launchAndReturnError:&launchErr])
                                     {
+                                        // On macOS 14+, a process launched via NSTask
+                                        // cannot steal focus using
+                                        // activateIgnoringOtherApps: — the system
+                                        // silently ignores the call unless the calling
+                                        // process is already front.  SDL tries this at
+                                        // DaedalusApp startup and it fails.
+                                        //
+                                        // Fix: activate the child FROM HERE (the editor
+                                        // currently has focus), with a short delay so
+                                        // DaedalusApp's NSApplication finishes
+                                        // initialising before the request is sent.
+                                        pid_t childPid = task.processIdentifier;
+                                        dispatch_after(
+                                            dispatch_time(DISPATCH_TIME_NOW,
+                                                (int64_t)(0.4 * NSEC_PER_SEC)),
+                                            dispatch_get_main_queue(),
+                                            ^{
+                                                NSRunningApplication* child =
+                                                    [NSRunningApplication
+                                                        runningApplicationWithProcessIdentifier:
+                                                            childPid];
+                                                if (child) {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+                                                    [child activateWithOptions:
+                                                        NSApplicationActivateIgnoringOtherApps];
+#pragma clang diagnostic pop
+                                                }
+                                            });
                                         doc.log(std::format(
-                                            "F5 — Test Map launched: '{}'.",
+                                            "\\ — Test Map launched: '{}'.",
                                             dlevelPath.string()));
                                     }
                                     else
@@ -868,7 +956,7 @@ int main(int /*argc*/, char* /*argv*/[])
                                             ? launchErr.localizedDescription.UTF8String
                                             : "unknown error";
                                         doc.log(std::format(
-                                            "F5 — Test Map launch failed: {}.", why));
+                                            "\\ — Test Map launch failed: {}.", why));
                                     }
                                 }
                             }
@@ -928,6 +1016,11 @@ int main(int /*argc*/, char* /*argv*/[])
                         else if (sc == SDL_SCANCODE_G)
                         {
                             vp2d.setGridVisible(!vp2d.gridVisible());
+                        }
+                        else if (sc == SDL_SCANCODE_X)
+                        {
+                            // X — toggle grid snap on/off.
+                            vp2d.setSnapEnabled(!vp2d.snapEnabled());
                         }
                         else if (sc == SDL_SCANCODE_HOME)
                         {
@@ -1053,6 +1146,11 @@ int main(int /*argc*/, char* /*argv*/[])
         ImGui_ImplSDL3_NewFrame();
         ImGui::NewFrame();
 
+        // While mouselook is captured, hide the cursor from ImGui so panel hover
+        // states don't change and UI widgets don't interfere with fly-mode input.
+        if (vp3d.isMouseCaptured())
+            ImGui::GetIO().MousePos = ImVec2(-FLT_MAX, -FLT_MAX);
+
         // ── Full-screen dockspace ─────────────────────────────────────────────
         {
             const ImGuiViewport* vp = ImGui::GetMainViewport();
@@ -1127,8 +1225,35 @@ int main(int /*argc*/, char* /*argv*/[])
             (activeToolId == ActiveTool::DrawSector) ? &drawSectorTool : nullptr;
         SelectTool* selectToolPtr =
             (activeToolId == ActiveTool::Select) ? &selectTool : nullptr;
+        VertexTool* vertexToolPtr =
+            (activeToolId == ActiveTool::Vertex) ? &vertexTool : nullptr;
 
-        vp2d.draw(doc, activeTool, drawToolPtr, selectToolPtr);
+        vp2d.updateFlyCamera(vp3d.isMouseCaptured(),
+                              {vp3d.eye().x, vp3d.eye().z},
+                              vp3d.yaw());
+        vp2d.draw(doc, activeTool, drawToolPtr, selectToolPtr, vertexToolPtr);
+
+        // Consume a pending placement committed by a click in the 2D viewport.
+        {
+            const PendingPlacement pendingType = vp2d.pendingPlacementType();
+            glm::vec2 placedPos;
+            if (vp2d.consumePendingPlacement(placedPos))
+            {
+                if (pendingType == PendingPlacement::Entity)
+                {
+                    EntityDef ed;
+                    ed.position = {placedPos.x, 0.5f, placedPos.y};
+                    doc.pushCommand(std::make_unique<CmdPlaceEntity>(doc, ed));
+                }
+                else if (pendingType == PendingPlacement::Light)
+                {
+                    LightDef ld;
+                    ld.position = {placedPos.x, 2.0f, placedPos.y};
+                    doc.pushCommand(std::make_unique<CmdPlaceLight>(doc, ld));
+                }
+            }
+        }
+
         vp3d.draw(doc, *assetLoader, *device, *queue, catalog, assetBrowser);
         inspector.draw(doc, catalog, *device, *assetLoader, assetBrowser);
         assetBrowser.draw(catalog, *device, *assetLoader);
@@ -1209,6 +1334,14 @@ int main(int /*argc*/, char* /*argv*/[])
         [enc endEncoding];
         [cmdBuf presentDrawable:drawable];
         [cmdBuf commit];
+
+        // ── Frame rate cap: ~60 fps ───────────────────────────────────────
+        // displaySyncEnabled = NO means nextDrawable never blocks on vsync.
+        // Sleep for any remaining budget to avoid over-driving the GPU.
+        constexpr Uint64 kTargetFrameNs = 16'666'667ULL;
+        const Uint64 elapsed = SDL_GetTicksNS() - frameStartNs;
+        if (elapsed < kTargetFrameNs)
+            SDL_DelayNS(kTargetFrameNs - elapsed);
     }
 
     // ── Cleanup ───────────────────────────────────────────────────────────────
