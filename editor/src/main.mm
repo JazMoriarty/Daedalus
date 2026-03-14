@@ -912,7 +912,13 @@ int main(int /*argc*/, char* /*argv*/[])
                                     NSTask* task = [[NSTask alloc] init];
                                     task.executableURL =
                                         [NSURL fileURLWithPath:appNS];
-                                    task.arguments = @[levelNS];
+                                    // Pass --rt if the editor is currently in RT mode
+                                    // so the app starts with the same render mode.
+                                    const bool editorRTEnabled =
+                                        doc.renderSettings().rt.enabled;
+                                    task.arguments = editorRTEnabled
+                                        ? @[levelNS, @"--rt"]
+                                        : @[levelNS];
 
                                     NSError* launchErr = nil;
                                     if ([task launchAndReturnError:&launchErr])

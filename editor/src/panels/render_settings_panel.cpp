@@ -201,6 +201,26 @@ void RenderSettingsPanel::draw(EditMapDocument& doc)
         ImGui::Checkbox("FXAA", &rs.upscaling.fxaaEnabled);
     }
 
+    // ── Ray Tracing ───────────────────────────────────────────────────────────
+    if (ImGui::CollapsingHeader("Ray Tracing"))
+    {
+        RTData& rt = rs.rt;
+        ImGui::Checkbox("Enabled##rt", &rt.enabled);
+        ImGui::BeginDisabled(!rt.enabled);
+
+        int bounces = static_cast<int>(rt.maxBounces);
+        if (ImGui::SliderInt("Max Bounces##rt", &bounces, 1, 8))
+            rt.maxBounces = static_cast<uint32_t>(bounces);
+
+        int spp = static_cast<int>(rt.samplesPerPixel);
+        if (ImGui::SliderInt("Samples/Pixel##rt", &spp, 1, 4))
+            rt.samplesPerPixel = static_cast<uint32_t>(spp);
+
+        ImGui::Checkbox("SVGF Denoise##rt", &rt.denoise);
+
+        ImGui::EndDisabled();
+    }
+
     ImGui::End();
 }
 

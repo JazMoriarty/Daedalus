@@ -127,6 +127,8 @@ void Viewport3D::retessellate(rhi::IRenderDevice& device,
             draw.prevModel          = glm::mat4(1.0f);
             draw.material.sectorAmbient = map.sectors[si].ambientColor
                                           * map.sectors[si].ambientIntensity;
+            draw.material.isOutdoor = world::hasFlag(map.sectors[si].flags,
+                                                     world::SectorFlags::Outdoors);
             // Albedo filled in during draw() from the MaterialCatalog.
 
             m_drawMaterialIds[si][bi] = batches[bi].materialId;
@@ -738,13 +740,18 @@ void Viewport3D::draw(EditMapDocument&      doc,
     // zero the global ambient to avoid double-counting.
     scene.ambientColor  = glm::vec3(0.0f);
 
-    // Fill point light centred above the map for overall visibility.
-    scene.pointLights.push_back({
-        glm::vec3(fillX, 8.0f, fillZ),
-        20.0f,
-        glm::vec3(1.0f, 0.94f, 0.82f),
-        2.5f
-    });
+    // Editor fill light: only injected when the scene has no user-placed lights,
+    // so a new/empty scene stays visible.  Suppressed once the user adds their
+    // own lights so the editor preview matches the actual game lighting.
+    if (doc.lights().empty())
+    {
+        scene.pointLights.push_back({
+            glm::vec3(fillX, 8.0f, fillZ),
+            20.0f,
+            glm::vec3(1.0f, 0.94f, 0.82f),
+            2.5f
+        });
+    }
 
     // Editor-placed lights from the document.
     for (const auto& ld : doc.lights())
@@ -825,6 +832,14 @@ void Viewport3D::draw(EditMapDocument&      doc,
         scene.upscaling.mode = r.upscaling.fxaaEnabled
             ? render::UpscalingMode::FXAA
             : render::UpscalingMode::None;
+
+        // Ray tracing
+        scene.renderMode           = r.rt.enabled
+            ? render::RenderMode::RayTraced
+            : render::RenderMode::Rasterized;
+        scene.rt.maxBounces        = r.rt.maxBounces;
+        scene.rt.samplesPerPixel   = r.rt.samplesPerPixel;
+        scene.rt.denoise           = r.rt.denoise;
     }
 
     // ── Refresh material albedo textures from catalog (lazy, each frame) ───────

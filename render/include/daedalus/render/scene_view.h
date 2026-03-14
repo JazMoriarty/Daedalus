@@ -53,6 +53,12 @@ struct Material
     /// ambient color independent of the global frame ambient.
     /// Entities use globalAmbientColor * globalAmbientIntensity set from the CPU.
     glm::vec3 sectorAmbient = glm::vec3(0.0f);
+
+    /// True when this draw belongs to a sector with SectorFlags::Outdoors.
+    /// Encoded into MaterialConstantsGPU::sectorAmbient.w and passed through
+    /// the G-buffer emissive alpha so the deferred lighting pass can gate
+    /// directional sun contribution on indoor vs. outdoor surfaces.
+    bool isOutdoor = false;
 };
 
 // ─── MeshDraw ─────────────────────────────────────────────────────────────────
@@ -219,6 +225,25 @@ struct UpscalingParams
     UpscalingMode mode = UpscalingMode::FXAA;  ///< Default: FXAA enabled.
 };
 
+// ─── RenderMode ───────────────────────────────────────────────────────────────
+
+enum class RenderMode : u32
+{
+    Rasterized = 0,  ///< Default deferred PBR pipeline.
+    RayTraced  = 1,  ///< GPU path tracing with SVGF denoiser.
+};
+
+// ─── RTParams ─────────────────────────────────────────────────────────────────
+// Per-frame ray tracing parameters.  Only consumed when
+// SceneView::renderMode == RenderMode::RayTraced.
+
+struct RTParams
+{
+    u32  maxBounces      = 2;     ///< GI bounce count (1 = direct + 1 indirect).
+    u32  samplesPerPixel = 1;     ///< Rays per pixel per frame (accumulation via TAA).
+    bool denoise         = true;  ///< Enable SVGF temporal denoiser.
+};
+
 // ─── MirrorDraw ────────────────────────────────────────────────────────────────────────────────────────────────
 // Describes a single planar mirror surface for the mirror pre-pass.
 //
@@ -362,6 +387,14 @@ struct SSRParams
     // mode == UpscalingMode::None skips the FXAA pass (zero GPU cost).
 
     UpscalingParams upscaling;
+
+    // ─── Render mode
+    // Selects between rasterised deferred PBR (default) and GPU path tracing.
+    // RT mode replaces shadow → G-buffer → SSAO → lighting → skybox passes with
+    // a compute path tracer + SVGF denoiser.  Post-processing runs identically.
+
+    RenderMode renderMode = RenderMode::Rasterized;
+    RTParams   rt;  ///< RT-specific parameters (only used when renderMode == RayTraced).
 
     // ─── Mirror draws
     // Populated by the application each frame.  FrameRenderer renders each mirror's
