@@ -292,9 +292,10 @@ kernel void path_trace_main(
     // Emissive contribution.
     radiance += surf.emissive;
 
-    // Sun direct + shadow.
+    // Sun direct + shadow (outdoor sectors only — mirrors deferred lighting.metal).
+    const bool primaryIsOutdoor = surf.sectorAmbient.w > 0.5f;
     float NdotSun = max(dot(N, sunDir), 0.0f);
-    if (NdotSun > 0.0f)
+    if (primaryIsOutdoor && NdotSun > 0.0f)
     {
         ray shadowRay;
         shadowRay.origin       = surf.position + surf.geoNormal * 0.001f;
@@ -458,9 +459,10 @@ kernel void path_trace_main(
             throughput /= p;
         }
 
-        // Direct lighting at the bounce hit.
+        // Direct lighting at the bounce hit (outdoor only).
+        const bool bounceIsOutdoor = bounceSurf.sectorAmbient.w > 0.5f;
         float sunNdotL = max(dot(newN, sunDir), 0.0f);
-        if (sunNdotL > 0.0f)
+        if (bounceIsOutdoor && sunNdotL > 0.0f)
         {
             ray shadowRay;
             shadowRay.origin       = bounceSurf.position + bounceSurf.geoNormal * 0.001f;
