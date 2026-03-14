@@ -70,6 +70,11 @@ public:
     /// Recreate resolution-dependent resources (TAA history, etc.).
     void resize(rhi::IRenderDevice& device, u32 width, u32 height);
 
+    /// Notify the renderer that scene geometry has changed (e.g. after
+    /// retessellating the map).  Clears the RT BLAS cache so stale
+    /// acceleration structures are not reused for the new geometry.
+    void notifyGeometryChanged() noexcept;
+
     // ─── Per-frame entry point ────────────────────────────────────────────────
 
     /// Record and submit one full frame.

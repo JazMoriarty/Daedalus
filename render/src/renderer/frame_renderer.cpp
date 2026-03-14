@@ -782,7 +782,13 @@ void FrameRenderer::recreateTAAHistory(IRenderDevice& device, u32 w, u32 h)
 
 // ─── resize ──────────────────────────────────────────────────────────────────
 
-void FrameRenderer::resize(IRenderDevice& device, u32 width, u32 height)
+void FrameRenderer::notifyGeometryChanged() noexcept
+{
+    if (m_rtSceneManager)
+        m_rtSceneManager->clearBLASCache();
+}
+
+void FrameRenderer::resize(rhi::IRenderDevice& device, u32 width, u32 height)
 {
     if (m_width == width && m_height == height)
         return;

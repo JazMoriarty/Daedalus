@@ -40,6 +40,11 @@ public:
                 std::span<const MeshDraw> opaqueDraws,
                 std::span<const MeshDraw> transparentDraws);
 
+    /// Invalidate the BLAS cache.  Must be called when scene geometry changes
+    /// (e.g. after retessellating the map) so stale pointer keys from freed
+    /// IBuffer objects cannot alias newly-allocated ones.
+    void clearBLASCache() noexcept { m_blasCache.clear(); }
+
     // ─── Accessors ────────────────────────────────────────────────────────────
 
     /// Top-level AS for binding to the path trace shader.  nullptr if no geometry.

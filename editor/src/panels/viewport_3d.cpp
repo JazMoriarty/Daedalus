@@ -525,6 +525,10 @@ void Viewport3D::draw(EditMapDocument&      doc,
     {
         retessellate(device, doc.mapData());
         doc.clearGeometryDirty();
+        // Old IBuffer pointers were freed; new ones may reuse those addresses.
+        // Clear the RT BLAS cache so stale acceleration structures cannot be
+        // matched against the new buffers by coincident pointer values.
+        m_renderer.notifyGeometryChanged();
     }
 
     // Rebuild entity GPU cache if entities changed.
