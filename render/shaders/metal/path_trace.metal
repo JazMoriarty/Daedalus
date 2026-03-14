@@ -326,7 +326,7 @@ kernel void path_trace_main(
 
         float3 toLight = lPos - surf.position;
         float  dist    = length(toLight);
-        if (dist > lRad) continue;
+        if (dist > lRad || dist < 0.0001f) continue;  // skip degenerate / inside-light
 
         float3 L     = toLight / dist;
         float  NdotL = max(dot(N, L), 0.0f);
@@ -369,7 +369,7 @@ kernel void path_trace_main(
 
         float3 toLight = sPos - surf.position;
         float  dist    = length(toLight);
-        if (dist >= sRange) continue;
+        if (dist >= sRange || dist < 0.0001f) continue;  // skip degenerate / inside-light
 
         float3 L = toLight / dist;
 
@@ -492,10 +492,16 @@ kernel void path_trace_main(
     // ─── Write demodulated irradiance + albedo ────────────────────────────────────
     // Divide out primary-hit albedo so the SVGF denoiser operates on lighting
     // only.  A post-denoiser remodulation pass multiplies albedo back in.
-    // This preserves texture detail that would otherwise be blurred by the
-    // à-trous spatial filter.
+    //
+    // Use a floor of 0.1 (not 0.001) so dark-albedo pixels are amplified at
+    // most 10× before denoising.  With 0.001 the amplification reaches 1000×,
+    // making the SVGF variance estimate blow up and producing extremely bright
+    // patches and over-smoothed "stretched" textures.
+    //
+    // Write safeAlbedo to outAlbedo so the remodulation pass cancels exactly
+    // the same divisor (irradiance * safeAlbedo = radiance).
 
-    float3 safeAlbedo = max(albedo, float3(0.001f));
+    float3 safeAlbedo = max(albedo, float3(0.1f));
     outHDR.write(float4(radiance / safeAlbedo, 1.0f), gid);
-    outAlbedo.write(float4(albedo, 1.0f), gid);
+    outAlbedo.write(float4(safeAlbedo, 1.0f), gid);
 }
