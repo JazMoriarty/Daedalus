@@ -193,9 +193,16 @@ rhi::IAccelerationStructure* RTSceneManager::getOrCreateBLAS(
 {
     if (!draw.vertexBuffer) return nullptr;
 
+    // Key by the GPU-resource native handle (e.g. MTLBuffer*) rather than the
+    // IBuffer C++ wrapper pointer.  The native handle is stable for the
+    // lifetime of the underlying GPU resource — the BLAS holds a strong
+    // backend reference, so the address is never reused for a different buffer
+    // while the old BLAS survives.  This prevents stale-BLAS aliasing when
+    // retessellate() frees and reallocates IBuffer wrappers at the same C++
+    // heap addresses.
     BLASKey key{
-        static_cast<void*>(draw.vertexBuffer),
-        static_cast<void*>(draw.indexBuffer)
+        draw.vertexBuffer->nativeHandle(),
+        draw.indexBuffer  ? draw.indexBuffer->nativeHandle() : nullptr
     };
 
     auto it = m_blasCache.find(key);
@@ -248,12 +255,14 @@ u32 RTSceneManager::buildPrimitiveData(
     if (!draw.vertexBuffer || !draw.indexBuffer || draw.indexCount == 0)
         return 0;
 
+    // Check dedup cache.
+    // Same native-handle keying as getOrCreateBLAS — dedup by GPU resource,
+    // not by C++ wrapper pointer.
     BLASKey key{
-        static_cast<void*>(draw.vertexBuffer),
-        static_cast<void*>(draw.indexBuffer)
+        draw.vertexBuffer->nativeHandle(),
+        draw.indexBuffer  ? draw.indexBuffer->nativeHandle() : nullptr
     };
 
-    // Check dedup cache.
     auto it = m_primDataOffsetCache.find(key);
     if (it != m_primDataOffsetCache.end())
         return it->second;

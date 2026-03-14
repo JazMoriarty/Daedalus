@@ -244,8 +244,12 @@ public:
 
     ~MetalBuffer() override = default;
 
-    [[nodiscard]] usize       size()  const noexcept override { return m_size;  }
+    [[nodiscard]] usize size() const noexcept override { return m_size; }
     [[nodiscard]] BufferUsage usage() const noexcept override { return m_usage; }
+    [[nodiscard]] void* nativeHandle() const noexcept override
+    {
+        return (__bridge void*)m_buffer;
+    }
 
     [[nodiscard]] void* map()          override { return m_buffer.contents; }
     void                unmap() noexcept override { /* Metal mapping is persistent */ }

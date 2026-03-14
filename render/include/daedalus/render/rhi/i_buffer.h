@@ -17,8 +17,12 @@ public:
     IBuffer(const IBuffer&)            = delete;
     IBuffer& operator=(const IBuffer&) = delete;
 
-    [[nodiscard]] virtual usize       size()  const noexcept = 0;
-    [[nodiscard]] virtual BufferUsage usage() const noexcept = 0;
+    [[nodiscard]] virtual usize       size()         const noexcept = 0;
+    [[nodiscard]] virtual BufferUsage usage()        const noexcept = 0;
+    /// Backend-specific GPU buffer handle (e.g. MTLBuffer* on Metal).
+    /// Stable for the lifetime of the buffer's GPU resource, even after the
+    /// IBuffer C++ wrapper is destroyed (the backend retains the resource).
+    [[nodiscard]] virtual void*       nativeHandle() const noexcept = 0;
 
     /// Map the buffer for CPU write access.  Returns a pointer into the
     /// buffer's backing memory.  Only valid for Staging or Uniform buffers.
