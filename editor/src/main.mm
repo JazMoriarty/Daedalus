@@ -75,28 +75,7 @@ static std::string executableDir()
     return base ? base : ".";
 }
 
-// Spin the Cocoa run-loop in NSRunLoopCommonModes until *done is set.
-//
-// Two problems were causing all panels to appear but be completely unresponsive:
-//
-//  1. [panel runModal] / direct beginWithCompletionHandler: both open the panel
-//     while SDL3 is mid-way through its sendEvent: override.  SDL3's Cocoa
-//     backend intercepts NSApplication sendEvent: for all SDL windows; calling
-//     the panel synchronously here means the panel's own events pass back
-//     through that same override and can be swallowed or misrouted.
-//     Fix: wrap beginWithCompletionHandler: in dispatch_async so the panel only
-//     opens on the *next* run-loop tick, after SDL3's sendEvent: has returned.
-//
-//  2. The previous spin used NSDefaultRunLoopMode, which misses
-//     NSEventTrackingRunLoopMode events (scroll, mouse tracking inside the
-//     panel file list).  Fix: use NSRunLoopCommonModes which covers both.
-static void spinUntilDone(const volatile bool& done)
-{
-    while (!done)
-        [[NSRunLoop currentRunLoop] runMode:NSDefaultRunLoopMode
-                                 beforeDate:[NSDate dateWithTimeIntervalSinceNow:0.01]];
-}
-
+// Synchronously show an NSOpenPanel and return the chosen path (empty = cancel).
 static std::filesystem::path showOpenPanel()
 {
     NSOpenPanel* panel            = [NSOpenPanel openPanel];
@@ -104,20 +83,15 @@ static std::filesystem::path showOpenPanel()
     panel.canChooseDirectories    = NO;
     panel.allowsMultipleSelection = NO;
     panel.title                   = @"Open Map";
+    // No content-type filter: allow all files so .dmap is always selectable
+    // regardless of whether macOS has a registered UTType for the extension.
 
-    __block std::filesystem::path result;
-    __block volatile bool          done = false;
-    dispatch_async(dispatch_get_main_queue(), ^{
-        [panel beginWithCompletionHandler:^(NSInteger r) {
-            if (r == NSModalResponseOK && panel.URL)
-                result = std::filesystem::path([[panel.URL path] UTF8String]);
-            done = true;
-        }];
-    });
-    spinUntilDone(done);
-    return result;
+    if ([panel runModal] == NSModalResponseOK)
+        return std::filesystem::path([[panel.URL path] UTF8String]);
+    return {};
 }
 
+// Synchronously show an NSOpenPanel filtered to image files.
 static std::filesystem::path showOpenPanelForImage()
 {
     NSOpenPanel* panel            = [NSOpenPanel openPanel];
@@ -130,19 +104,12 @@ static std::filesystem::path showOpenPanelForImage()
         [UTType typeWithIdentifier:@"public.jpeg"],
     ];
 
-    __block std::filesystem::path result;
-    __block volatile bool          done = false;
-    dispatch_async(dispatch_get_main_queue(), ^{
-        [panel beginWithCompletionHandler:^(NSInteger r) {
-            if (r == NSModalResponseOK && panel.URL)
-                result = std::filesystem::path([[panel.URL path] UTF8String]);
-            done = true;
-        }];
-    });
-    spinUntilDone(done);
-    return result;
+    if ([panel runModal] == NSModalResponseOK)
+        return std::filesystem::path([[panel.URL path] UTF8String]);
+    return {};
 }
 
+// Synchronously show an NSOpenPanel for a directory.
 static std::filesystem::path showOpenPanelForDirectory()
 {
     NSOpenPanel* panel            = [NSOpenPanel openPanel];
@@ -151,40 +118,26 @@ static std::filesystem::path showOpenPanelForDirectory()
     panel.allowsMultipleSelection = NO;
     panel.title                   = @"Choose Asset Root";
 
-    __block std::filesystem::path result;
-    __block volatile bool          done = false;
-    dispatch_async(dispatch_get_main_queue(), ^{
-        [panel beginWithCompletionHandler:^(NSInteger r) {
-            if (r == NSModalResponseOK && panel.URL)
-                result = std::filesystem::path([[panel.URL path] UTF8String]);
-            done = true;
-        }];
-    });
-    spinUntilDone(done);
-    return result;
+    if ([panel runModal] == NSModalResponseOK)
+        return std::filesystem::path([[panel.URL path] UTF8String]);
+    return {};
 }
 
+// Synchronously show an NSSavePanel and return the chosen path (empty = cancel).
 static std::filesystem::path showSavePanel(const std::string& defaultName)
 {
-    NSSavePanel* panel = [NSSavePanel savePanel];
-    panel.title                = @"Save Map";
-    panel.nameFieldStringValue = [NSString stringWithUTF8String:defaultName.c_str()];
+    NSSavePanel* panel             = [NSSavePanel savePanel];
+    panel.title                    = @"Save Map";
+    panel.nameFieldStringValue     = [NSString stringWithUTF8String:defaultName.c_str()];
+    // Enforce .dmap extension so macOS appends it automatically if omitted.
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
     panel.allowedFileTypes = @[@"dmap"];
 #pragma clang diagnostic pop
 
-    __block std::filesystem::path result;
-    __block volatile bool          done = false;
-    dispatch_async(dispatch_get_main_queue(), ^{
-        [panel beginWithCompletionHandler:^(NSInteger r) {
-            if (r == NSModalResponseOK && panel.URL)
-                result = std::filesystem::path([[panel.URL path] UTF8String]);
-            done = true;
-        }];
-    });
-    spinUntilDone(done);
-    return result;
+    if ([panel runModal] == NSModalResponseOK)
+        return std::filesystem::path([[panel.URL path] UTF8String]);
+    return {};
 }
 
 // ─── Initial docking layout ───────────────────────────────────────────────────
@@ -245,11 +198,11 @@ static void drawMenuBar(EditMapDocument& doc,
             if (ImGui::MenuItem("New", "Cmd+N"))
                 openNewMapDlg = true;
 
-            if (ImGui::MenuItem("Open…", "Cmd+O"))
+            if (ImGui::MenuItem("Open\xe2\x80\xa6", "Cmd+O"))
             {
                 const auto path = showOpenPanel();
                 if (!path.empty())
-                    (void)doc.loadFromFile(path);  // failure already logged to OutputLog
+                    (void)doc.loadFromFile(path);
             }
 
             ImGui::Separator();
@@ -259,8 +212,6 @@ static void drawMenuBar(EditMapDocument& doc,
                 const auto path = showOpenPanelForDirectory();
                 if (!path.empty())
                     doc.setAssetRoot(path.string());
-                    // The main loop detects the change via lastKnownAssetRoot,
-                    // rescans the catalog, and persists the root to the INI.
             }
 
             ImGui::Separator();
@@ -268,14 +219,14 @@ static void drawMenuBar(EditMapDocument& doc,
             if (ImGui::MenuItem("Save", "Cmd+S", false, hasSavePath && doc.isDirty()))
                 (void)doc.saveToCurrentPath();  // failure already logged to OutputLog
 
-            if (ImGui::MenuItem("Save As…", "Cmd+Shift+S"))
+            if (ImGui::MenuItem("Save As\xe2\x80\xa6", "Cmd+Shift+S"))
             {
                 const std::string defaultName = doc.filePath().empty()
                     ? "untitled.dmap"
                     : doc.filePath().filename().string();
                 const auto path = showSavePanel(defaultName);
                 if (!path.empty())
-                    (void)doc.saveToFile(path);  // failure already logged to OutputLog
+                    (void)doc.saveToFile(path);
             }
 
             ImGui::Separator();
@@ -435,15 +386,6 @@ struct NewMapDialogState
 
 int main(int /*argc*/, char* /*argv*/[])
 {
-    // ── Precondition: healthy macOS XPC open/save panel service ───────────────
-    // NSOpenPanel communicates with com.apple.appkit.xpc.openAndSavePanelService
-    // via XPC.  When that service is stuck (common with Finder extensions such
-    // as cloud-sync or NAS tools installed), the panel appears but is completely
-    // unresponsive to all input.  Killing it here forces macOS to restart it
-    // fresh before we ever show a dialog.  pkill exits non-zero if the process
-    // isn't running; 2>/dev/null suppresses that noise.
-    system("pkill -x openAndSavePanelService 2>/dev/null");
-
     // ── SDL3 initialisation ───────────────────────────────────────────────────
     if (!SDL_Init(SDL_INIT_VIDEO))
     {
@@ -1197,7 +1139,7 @@ int main(int /*argc*/, char* /*argv*/[])
 
         if (!running) break;
 
-        // ── Acquire next drawable from the Metal layer ────────────────────────
+        // ── Acquire next drawable from the Metal layer
         id<CAMetalDrawable> drawable = [metalLayer nextDrawable];
         if (!drawable) continue;
 
