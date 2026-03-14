@@ -338,6 +338,15 @@ int main(int argc, char* argv[])
     const bool isDlevel = (argc >= 2 && argv[1] != nullptr &&
         std::filesystem::path(argv[1]).extension() == ".dlevel");
 
+    // --rt flag: start DaedalusApp in ray-traced mode (passed by the editor
+    // when its render settings have RT enabled at launch time).
+    bool startInRTMode = false;
+    for (int i = 2; i < argc; ++i)
+    {
+        if (argv[i] && std::string_view(argv[i]) == "--rt")
+            startInRTMode = true;
+    }
+
     if (isDlevel)
     {
         // ── 1. Load .dlevel ───────────────────────────────────────────────────
@@ -426,6 +435,16 @@ int main(int argc, char* argv[])
                 draw.prevModel     = glm::mat4(1.0f);
                 draw.material.roughness = 0.85f;
                 draw.material.metalness = 0.0f;
+
+                // Bake per-sector ambient (matches editor viewport_3d retessellate).
+                // Global scene ambientColor is zeroed below to avoid double-counting.
+                if (si < pack.map.sectors.size())
+                {
+                    const auto& sec = pack.map.sectors[si];
+                    draw.material.sectorAmbient = sec.ambientColor * sec.ambientIntensity;
+                    draw.material.isOutdoor =
+                        world::hasFlag(sec.flags, world::SectorFlags::Outdoors);
+                }
 
                 // Look up albedo texture for this material UUID.
                 const auto it = packTextures.find(batch.materialId);
@@ -902,6 +921,7 @@ int main(int argc, char* argv[])
         glm::mat4 fpPrevProj(1.0f);
 
         bool fpRunning = true;
+        bool fpRTMode  = startInRTMode;  // --rt flag sets initial mode; F6 toggles
         while (fpRunning)
         {
             // ── Events ────────────────────────────────────────────────────────
@@ -929,6 +949,13 @@ int main(int argc, char* argv[])
                          event.key.scancode == SDL_SCANCODE_ESCAPE)
                 {
                     fpRunning = false;
+                }
+                else if (event.type == SDL_EVENT_KEY_DOWN &&
+                         event.key.scancode == SDL_SCANCODE_F6)
+                {
+                    fpRTMode = !fpRTMode;
+                    std::printf("[RT] Render mode: %s\n",
+                                fpRTMode ? "RayTraced" : "Rasterized");
                 }
                 else if (event.type == SDL_EVENT_WINDOW_RESIZED)
                 {
@@ -1193,7 +1220,9 @@ int main(int argc, char* argv[])
             fpScene.sunDirection = pack.sun.direction;
             fpScene.sunColor     = pack.sun.color;
             fpScene.sunIntensity = pack.sun.intensity;
-            fpScene.ambientColor = dlWorldMap->data().globalAmbientColor;
+            // Per-sector ambient is baked into draw.material.sectorAmbient above;
+            // zero the global ambient to avoid double-counting (mirrors editor).
+            fpScene.ambientColor = glm::vec3(0.0f);
 
             // ── Camera ────────────────────────────────────────────────────────
             fpScene.view      = fpView;
@@ -1224,7 +1253,12 @@ int main(int argc, char* argv[])
 
             fpScene.upscaling.mode = render::UpscalingMode::FXAA;
 
-            // ── ECS entity rendering ──────────────────────────────────────────
+            // RT mode (F6 toggle)
+            fpScene.renderMode = fpRTMode
+                ? render::RenderMode::RayTraced
+                : render::RenderMode::Rasterized;
+
+            // ── ECS entity rendering
             // spriteAnimationSystem advances UV offsets before billboard gather.
             render::spriteAnimationSystem(dlWorld, fpDt);
             render::meshRenderSystem(dlWorld, fpScene);
