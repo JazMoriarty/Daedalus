@@ -292,10 +292,10 @@ kernel void path_trace_main(
     // Emissive contribution.
     radiance += surf.emissive;
 
-    // Sun direct + shadow (outdoor sectors only — mirrors deferred lighting.metal).
-    const bool primaryIsOutdoor = surf.sectorAmbient.w > 0.5f;
+    // Sun direct + shadow — shadow ray handles occlusion (ceiling/walls block sun
+    // indoors automatically; no need for an explicit outdoor flag gate in RT mode).
     float NdotSun = max(dot(N, sunDir), 0.0f);
-    if (primaryIsOutdoor && NdotSun > 0.0f)
+    if (NdotSun > 0.0f)
     {
         ray shadowRay;
         shadowRay.origin       = surf.position + surf.geoNormal * 0.001f;
@@ -459,10 +459,9 @@ kernel void path_trace_main(
             throughput /= p;
         }
 
-        // Direct lighting at the bounce hit (outdoor only).
-        const bool bounceIsOutdoor = bounceSurf.sectorAmbient.w > 0.5f;
+        // Direct lighting at the bounce hit — shadow ray handles indoor occlusion.
         float sunNdotL = max(dot(newN, sunDir), 0.0f);
-        if (bounceIsOutdoor && sunNdotL > 0.0f)
+        if (sunNdotL > 0.0f)
         {
             ray shadowRay;
             shadowRay.origin       = bounceSurf.position + bounceSurf.geoNormal * 0.001f;
