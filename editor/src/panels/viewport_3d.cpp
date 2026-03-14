@@ -730,6 +730,8 @@ void Viewport3D::draw(EditMapDocument&      doc,
     scene.cameraDir  = fwd;
     scene.frameIndex = m_frameIdx;
     scene.deltaTime  = dt;
+    m_accTime        += dt;
+    scene.time        = m_accTime;
 
     // Lighting from document SceneSettings.
     const auto& ss      = doc.sceneSettings();
@@ -1111,6 +1113,25 @@ void Viewport3D::draw(EditMapDocument&      doc,
     {
         ImGui::SetCursorPos(ImVec2(8.0f, 8.0f));
         ImGui::TextDisabled("[Tab] capture   Alt+drag = orbit   Scroll = dolly   F = frame   P = player   M = pick surface material");
+    }
+
+    // RT mode badge — top-right corner.  Gives instant confirmation of which
+    // render path is active: green = RT, red = RT requested but no HW, grey = rasterized.
+    {
+        const bool  rtEnabled = doc.renderSettings().rt.enabled;
+        const bool  rtActive  = rtEnabled && device.supportsRayTracing();
+        const char* label     = rtActive  ? "RT"
+                              : rtEnabled ? "RT (no HW support)"
+                              :             "RAST";
+        const ImVec2 textSz = ImGui::CalcTextSize(label);
+        const float  winW   = ImGui::GetWindowWidth();
+        ImGui::SetCursorPos(ImVec2(winW - textSz.x - 8.0f, 8.0f));
+        if (rtActive)
+            ImGui::TextColored(ImVec4(0.3f, 1.0f, 0.4f, 1.0f), "%s", label);
+        else if (rtEnabled)
+            ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.3f, 1.0f), "%s", label);
+        else
+            ImGui::TextDisabled("%s", label);
     }
 
     // ── Wall / floor / ceiling hover ray + click selection ─────────────────────

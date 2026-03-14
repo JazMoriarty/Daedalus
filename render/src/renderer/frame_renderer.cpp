@@ -821,6 +821,9 @@ void FrameRenderer::renderFrame(IRenderDevice& device,
     // the same path that GPU-clears the TAA history textures below.
     if (scene.renderMode != m_prevRenderMode)
     {
+        std::printf("[RT] render mode changed: %s -> %s (frameIndex reset to 0)\n",
+            m_prevRenderMode == RenderMode::RayTraced ? "RayTraced" : "Rasterized",
+            scene.renderMode  == RenderMode::RayTraced ? "RayTraced" : "Rasterized");
         m_frameIndex      = 0;
         m_prevRenderMode  = scene.renderMode;
     }
@@ -1336,6 +1339,31 @@ void FrameRenderer::renderFrame(IRenderDevice& device,
     const bool rtMode = (scene.renderMode == RenderMode::RayTraced)
                      && device.supportsRayTracing();
 
+    // Log rtMode state on the first frame it changes (use a static to avoid spam).
+    {
+        static bool s_lastRtMode = false;
+        if (rtMode != s_lastRtMode)
+        {
+            std::printf("[RT] rtMode is now: %s  (renderMode=%s, supportsRayTracing=%s)\n",
+                rtMode ? "ON" : "OFF",
+                scene.renderMode == RenderMode::RayTraced ? "RayTraced" : "Rasterized",
+                device.supportsRayTracing() ? "YES" : "NO");
+            s_lastRtMode = rtMode;
+        }
+    }
+
+    // Unconditional periodic status (every 60 frames) — helps diagnose when
+    // the mode-change log never fires (e.g. supportsRayTracing=NO, or the UI
+    // toggle is not reaching renderFrame).
+    if (m_frameIndex % 60 == 0)
+    {
+        std::printf("[RT_STATUS] frame=%u  renderMode=%s  rtMode=%s  supportsRT=%s\n",
+            m_frameIndex,
+            scene.renderMode == RenderMode::RayTraced ? "RayTraced" : "Rasterized",
+            rtMode ? "ON" : "OFF",
+            device.supportsRayTracing() ? "YES" : "NO");
+    }
+
     // ═══════════════════════════════════════════════════════════════════════════
     // RT PATH — replaces Passes 1-6.6 with path trace + SVGF denoiser.
     // Writes to hdrTex, gNormalTex, gDepthCopyTex, gMotionTex so the
@@ -1349,6 +1377,15 @@ void FrameRenderer::renderFrame(IRenderDevice& device,
         m_rtSceneManager->update(device, scene.meshDraws, scene.transparentDraws);
 
         // Only dispatch if there is geometry to trace.
+        {
+            static bool s_tlasLogged = false;
+            bool hasTlas = m_rtSceneManager->tlas() != nullptr;
+            if (!s_tlasLogged || !hasTlas)
+            {
+                std::printf("[RT] TLAS: %s\n", hasTlas ? "built (dispatching path tracer)" : "NULL (no geometry — skipping)");
+                s_tlasLogged = hasTlas;
+            }
+        }
         if (m_rtSceneManager->tlas())
         {
             // ── Build RTConstantsGPU ──────────────────────────────────────────
@@ -1434,6 +1471,14 @@ void FrameRenderer::renderFrame(IRenderDevice& device,
                     enc->setTexture(rtAlbedoTex,   4);           // outAlbedo          texture(4)
                     enc->setTextures(rtTextures,   5);           // textures[]         texture(5+)
                     enc->setSampler(repeatSamp, 0);              // texSampler         sampler(0)
+
+                    // Diagnostic: confirm the dispatch actually fires.
+                    static u32 s_ptDispatches = 0;
+                    if (s_ptDispatches < 10)
+                        std::printf("[RT] PathTrace DISPATCH #%u  %ux%u  BLAS=%zu bufs=%zu\n",
+                            ++s_ptDispatches, swapW, swapH,
+                            rtUniqueBLAS.size(), rtUniqueBuffers.size());
+
                     enc->dispatch(swapW, swapH, 1);
                 };
                 m_graph.addComputePass(std::move(p));
@@ -1510,6 +1555,7 @@ void FrameRenderer::renderFrame(IRenderDevice& device,
                         enc->setTexture(gNormalTex,    1);  // inNormal
                         enc->setTexture(gDepthCopyTex, 2);  // inDepth
                         enc->setTexture(ssaoTex,       3);  // outVar (reuse R32Float)
+                        enc->setTexture(rtAlbedoTex,   4);  // inAlbedo
                         enc->dispatch(swapW, swapH, 1);
                     };
                     m_graph.addComputePass(std::move(p));
@@ -1541,6 +1587,7 @@ void FrameRenderer::renderFrame(IRenderDevice& device,
                         enc->setTexture(gDepthCopyTex, 2);  // inDepth
                         enc->setTexture(ssaoTex,       3);  // inVar
                         enc->setTexture(writeTex,      4);  // outColor
+                        enc->setTexture(rtAlbedoTex,   5);  // inAlbedo
                         enc->dispatch(swapW, swapH, 1);
                     };
                     m_graph.addComputePass(std::move(p));
@@ -1574,6 +1621,7 @@ void FrameRenderer::renderFrame(IRenderDevice& device,
                         enc->setTexture(gDepthCopyTex, 2);  // inDepth
                         enc->setTexture(ssaoTex,       3);  // inVar
                         enc->setTexture(svgfCurrTex,   4);  // outColor (save as history)
+                        enc->setTexture(rtAlbedoTex,   5);  // inAlbedo (stepWidth=0 → all samples same pixel, aw=1)
                         enc->dispatch(swapW, swapH, 1);
                     };
                     m_graph.addComputePass(std::move(p));
@@ -1603,6 +1651,7 @@ void FrameRenderer::renderFrame(IRenderDevice& device,
                         enc->setTexture(gDepthCopyTex, 2);  // inDepth
                         enc->setTexture(ssaoTex,       3);  // inVar
                         enc->setTexture(svgfCurrTex,   4);  // outColor
+                        enc->setTexture(rtAlbedoTex,   5);  // inAlbedo (stepWidth=0 → all samples same pixel, aw=1)
                         enc->dispatch(swapW, swapH, 1);
                     };
                     m_graph.addComputePass(std::move(p));
@@ -2213,7 +2262,11 @@ void FrameRenderer::renderFrame(IRenderDevice& device,
 
     // ──────────────────────────────────────────────────────────────────────────────
     // Pass 7 — TAA
+    // Skipped in RT mode: SVGF already provides temporal accumulation.
+    // Running TAA on top would apply a second bilinear-sampled history blend to
+    // the fully-textured remodulated output, destroying fine texture detail.
     // ─────────────────────────────────────────────────────────────────────────
+    if (!rtMode)
     {
         RGRenderPassDesc p;
         p.name             = "TAA";
@@ -2234,10 +2287,14 @@ void FrameRenderer::renderFrame(IRenderDevice& device,
         m_graph.addRenderPass(std::move(p));
     }
 
+    // In RT mode skip TAA — route downstream passes directly through hdrTex
+    // (the fully denoised + remodulated output from the RT path).
+    ITexture* postAATex = rtMode ? hdrTex : taaOutTex;
+
     // ───────────────────────────────────────────────────────────────────────────
     // Pass 7.5 — Screen-Space Reflections (compute)  [only if ssr.enabled]
-    // Reads gNormal, gDepthCopy, taaOut; writes composited result to ssrOut.
-    // postTaaColorTex points to ssrOut when enabled, taaOut when disabled.
+    // Reads gNormal, gDepthCopy, post-AA scene colour; writes composited result to ssrOut.
+    // postTaaColorTex points to ssrOut when enabled, postAATex when disabled.
     // BloomExtract and Tonemap always read postTaaColorTex (zero GPU cost when off).
     // ───────────────────────────────────────────────────────────────────────────
     if (scene.ssr.enabled)
@@ -2249,7 +2306,7 @@ void FrameRenderer::renderFrame(IRenderDevice& device,
             enc->setComputePipeline(pSSR);
             enc->setTexture(gNormalTex,    0);               // gNormal     (read)
             enc->setTexture(gDepthCopyTex, 1);               // gDepthCopy  (read)
-            enc->setTexture(taaOutTex,     2);               // sceneColor  (sample)
+            enc->setTexture(postAATex,     2);               // sceneColor  (sample)
             enc->setTexture(ssrOutTex,     3);               // ssrOut      (write)
             enc->setBuffer (frameBuf,      0, 0);            // FrameConstants  buffer(0)
             enc->setBytes  (&ssrConst, sizeof(ssrConst), 1); // SSRConstants    buffer(1)
@@ -2260,11 +2317,11 @@ void FrameRenderer::renderFrame(IRenderDevice& device,
     }
 
     // Routing pointers — zero-cost bypass chain:
-    //   postTaaColorTex  = SSR out (or TAA out when SSR disabled)             [existing]
-    //   postDofTex       = DoF composite out (or postTaaColorTex when off)    [new]
-    //   preTonemapTex    = MB out (or postDofTex when MB disabled)            [new]
+    //   postTaaColorTex  = SSR out (or postAATex when SSR disabled)
+    //   postDofTex       = DoF composite out (or postTaaColorTex when off)
+    //   preTonemapTex    = MB out (or postDofTex when MB disabled)
     // Tonemap reads preTonemapTex; Color Grade (if enabled) reads tonemapOut.
-    ITexture* postTaaColorTex = scene.ssr.enabled        ? ssrOutTex  : taaOutTex;
+    ITexture* postTaaColorTex = scene.ssr.enabled        ? ssrOutTex  : postAATex;
     ITexture* postDofTex      = scene.dof.enabled        ? dofOutTex  : postTaaColorTex;
     ITexture* preTonemapTex   = scene.motionBlur.enabled ? mbOutTex   : postDofTex;
 

@@ -118,6 +118,7 @@ private:
     SDL_Window* m_captureWindow = nullptr;
 
     unsigned  m_frameIdx    = 0;
+    float     m_accTime     = 0.0f;  ///< Accumulated time in seconds (passed to SceneView::time).
     glm::mat4 m_prevView{1.0f};
     glm::mat4 m_prevProj{1.0f};
 

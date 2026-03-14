@@ -8,6 +8,7 @@
 
 #include <glm/glm.hpp>
 #include <cstring>
+#include <cstdio>
 #include <unordered_set>
 
 namespace daedalus::render
@@ -110,6 +111,22 @@ void RTSceneManager::update(
         processDraw(draw, instanceId++);
 
     m_instanceCount = static_cast<u32>(instanceDescs.size());
+
+    // ── Diagnostic: print instance/BLAS counts when they change or every 60 frames
+    {
+        static u32 s_lastCount = ~0u;
+        static u32 s_tick      = 0;
+        if (m_instanceCount != s_lastCount || (++s_tick % 60) == 0)
+        {
+            std::printf("[RT] RTSceneManager: %u instances (%zu BLAS)  opaque=%zu trans=%zu\n",
+                m_instanceCount,
+                m_uniqueBLAS.size(),
+                opaqueDraws.size(),
+                transparentDraws.size());
+            s_lastCount = m_instanceCount;
+        }
+    }
+
     if (m_instanceCount == 0)
     {
         m_tlas.reset();

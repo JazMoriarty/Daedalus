@@ -44,8 +44,8 @@ kernel void svgf_temporal_main(
         if (depthDiff > 0.1f) valid = false;
 
         // Normal consistency check.
-        float3 curN  = decode_normal(inNormal.read(gid).xy);
-        float3 prevN = decode_normal(inPrevNormal.read(pp).xy);
+        float3 curN  = decode_normal_from_tex(inNormal.read(gid).xy);
+        float3 prevN = decode_normal_from_tex(inPrevNormal.read(pp).xy);
         if (dot(curN, prevN) < 0.8f) valid = false;
     }
 

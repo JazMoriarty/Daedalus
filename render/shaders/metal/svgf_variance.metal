@@ -12,13 +12,15 @@ kernel void svgf_variance_main(
     texture2d<float, access::read>  inNormal  [[texture(1)]],  // current normal (encoded)
     texture2d<float, access::read>  inDepth   [[texture(2)]],  // current linear depth
     texture2d<float, access::write> outVar    [[texture(3)]],  // per-pixel variance estimate
+    texture2d<float, access::read>  inAlbedo  [[texture(4)]],  // primary-hit albedo (for edge-stopping)
     uint2 gid [[thread_position_in_grid]])
 {
     const uint2 screenSize = uint2(frame.screenSize.xy);
     if (gid.x >= screenSize.x || gid.y >= screenSize.y) return;
 
-    float  centerDepth  = inDepth.read(gid).r;
-    float3 centerNormal = decode_normal(inNormal.read(gid).xy);
+    float  centerDepth     = inDepth.read(gid).r;
+    float3 centerNormal    = decode_normal_from_tex(inNormal.read(gid).xy);
+    float  centerAlbedoLum = luminance(inAlbedo.read(gid).rgb);
 
     float sumMean  = 0.0f;
     float sumMean2 = 0.0f;
@@ -41,10 +43,15 @@ kernel void svgf_variance_main(
             float dw = exp(-abs(centerDepth - d) / max(svgf.phiDepth * centerDepth, 1e-6f));
 
             // Normal weight.
-            float3 n = decode_normal(inNormal.read(up).xy);
+            float3 n = decode_normal_from_tex(inNormal.read(up).xy);
             float nw = pow(max(dot(centerNormal, n), 0.0f), svgf.phiNormal);
 
-            float w = dw * nw;
+            // Albedo weight — prevents moments from bleeding across texture boundaries.
+            float neighborAlbedoLum = luminance(inAlbedo.read(up).rgb);
+            float aw = exp(-abs(centerAlbedoLum - neighborAlbedoLum)
+                          / max(svgf.phiAlbedo, 1e-6f));
+
+            float w = dw * nw * aw;
             float2 moments = inMoments.read(up).xy;
             sumMean  += moments.x * w;
             sumMean2 += moments.y * w;

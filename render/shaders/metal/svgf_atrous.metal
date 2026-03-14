@@ -17,6 +17,7 @@ kernel void svgf_atrous_main(
     texture2d<float, access::read>  inDepth   [[texture(2)]],  // linear depth
     texture2d<float, access::read>  inVar     [[texture(3)]],  // variance estimate
     texture2d<float, access::write> outColor  [[texture(4)]],  // filtered colour
+    texture2d<float, access::read>  inAlbedo  [[texture(5)]],  // primary-hit albedo (for edge-stopping)
     uint2 gid [[thread_position_in_grid]])
 {
     const uint2 screenSize = uint2(frame.screenSize.xy);
@@ -24,11 +25,12 @@ kernel void svgf_atrous_main(
 
     const int step = int(svgf.stepWidth);
 
-    float4 centerColor  = inColor.read(gid);
-    float  centerLum    = luminance(centerColor.rgb);
-    float  centerDepth  = inDepth.read(gid).r;
-    float3 centerNormal = decode_normal(inNormal.read(gid).xy);
-    float  variance     = inVar.read(gid).r;
+    float4 centerColor     = inColor.read(gid);
+    float  centerLum       = luminance(centerColor.rgb);
+    float  centerDepth     = inDepth.read(gid).r;
+    float3 centerNormal    = decode_normal_from_tex(inNormal.read(gid).xy);
+    float  variance        = inVar.read(gid).r;
+    float  centerAlbedoLum = luminance(inAlbedo.read(gid).rgb);
 
     // Luminance edge-stopping sigma driven by local variance.
     float phiL = svgf.phiColor * sqrt(max(variance, 1e-6f));
@@ -57,7 +59,7 @@ kernel void svgf_atrous_main(
             float dw = exp(-abs(centerDepth - d) / max(svgf.phiDepth * centerDepth, 1e-6f));
 
             // Normal weight.
-            float3 n = decode_normal(inNormal.read(up).xy);
+            float3 n = decode_normal_from_tex(inNormal.read(up).xy);
             float nw = pow(max(dot(centerNormal, n), 0.0f), svgf.phiNormal);
 
             // Luminance weight.
@@ -65,7 +67,14 @@ kernel void svgf_atrous_main(
             float  l  = luminance(c.rgb);
             float lw = exp(-abs(centerLum - l) / max(phiL, 1e-6f));
 
-            float w = kw * dw * nw * lw;
+            // Albedo weight — prevents blurring across texture boundaries.
+            // Compares the primary-hit albedo of the center vs neighbor pixel;
+            // pixels from different texture regions receive a lower weight.
+            float neighborAlbedoLum = luminance(inAlbedo.read(up).rgb);
+            float aw = exp(-abs(centerAlbedoLum - neighborAlbedoLum)
+                          / max(svgf.phiAlbedo, 1e-6f));
+
+            float w = kw * dw * nw * lw * aw;
             sumColor  += c.rgb * w;
             weightSum += w;
         }

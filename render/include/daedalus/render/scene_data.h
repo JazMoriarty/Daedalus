@@ -465,17 +465,20 @@ static_assert(sizeof(RTMaterialGPU) == 80, "RTMaterialGPU must be 80 bytes");
 //   [3]  phiNormal      f32   normal edge-stopping sigma
 //   [4]  phiDepth       f32   depth edge-stopping sigma
 //   [5]  stepWidth      u32   à-trous step size (1, 2, 4, …)
-//   [6-7] pad           f32×2
+//   [6]  phiAlbedo      f32   albedo edge-stopping sigma
+//   [7]  pad1           f32
 
 struct alignas(16) SVGFConstantsGPU
 {
     f32 alpha        = 0.05f;  ///< Temporal blend (lower = more history).
     f32 momentsAlpha = 0.2f;   ///< Moments temporal blend.
-    f32 phiColor     = 4.0f;   ///< Colour edge-stopping sigma (lower = tighter shadow boundaries).
+    f32 phiColor     = 4.0f;   ///< Colour edge-stopping sigma.
     f32 phiNormal    = 128.0f; ///< Normal edge-stopping sigma.
     f32 phiDepth     = 1.0f;   ///< Depth edge-stopping sigma.
     u32 stepWidth    = 1;      ///< à-trous step size.
-    f32 pad0 = 0.0f;
+    f32 phiAlbedo    = 0.05f;  ///< Albedo edge-stopping sigma — prevents spatial blur across texture boundaries.
+                                ///< Dark-surface albedo differences are in the 0.01–0.06 lum range; 0.1 was too
+                                ///< permissive to matter on near-black floors/walls.
     f32 pad1 = 0.0f;
 };
 static_assert(sizeof(SVGFConstantsGPU) == 32, "SVGFConstantsGPU must be 32 bytes");

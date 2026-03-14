@@ -107,6 +107,13 @@ inline float3 decode_normal(float2 e)
     return normalize(v);
 }
 
+/// Decode an octahedral normal stored in [0,1] range in an RGBA8Unorm texture
+/// (i.e. written as encode_normal(n) * 0.5 + 0.5 to avoid clamping negatives).
+inline float3 decode_normal_from_tex(float2 e01)
+{
+    return decode_normal(e01 * 2.0f - 1.0f);
+}
+
 /// UV → NDC (Metal: y flipped)
 inline float2 uv_to_ndc(float2 uv)
 {
@@ -446,7 +453,7 @@ struct SVGFConstants   // buffer(1) in svgf_temporal / svgf_variance / svgf_atro
     float phiNormal;     // normal edge-stopping sigma
     float phiDepth;      // depth edge-stopping sigma
     uint  stepWidth;     // à-trous step size (1, 2, 4, …)
-    float pad0;
+    float phiAlbedo;     // albedo edge-stopping sigma
     float pad1;
 };
 

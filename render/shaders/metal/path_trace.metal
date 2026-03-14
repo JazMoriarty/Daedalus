@@ -270,9 +270,10 @@ kernel void path_trace_main(
     float linearDepth = length(surf.position - frame.cameraPos.xyz);
     outDepth.write(float4(linearDepth, 0.0f, 0.0f, 0.0f), gid);
 
-    // Encode normal (world-space → octahedral).
+    // Encode normal (world-space → octahedral), remapped to [0,1] for RGBA8Unorm
+    // storage (matching the G-buffer convention in gbuffer.metal).
     float2 encN = encode_normal(N);
-    outNormal.write(float4(encN, 0.0f, 0.0f), gid);
+    outNormal.write(float4(encN * 0.5f + 0.5f, 0.0f, 0.0f), gid);
 
     // Camera-only motion vectors.
     float4 clipCurr = frame.viewProj     * float4(surf.position, 1.0f);
@@ -493,15 +494,29 @@ kernel void path_trace_main(
     // Divide out primary-hit albedo so the SVGF denoiser operates on lighting
     // only.  A post-denoiser remodulation pass multiplies albedo back in.
     //
-    // Use a floor of 0.1 (not 0.001) so dark-albedo pixels are amplified at
-    // most 10× before denoising.  With 0.001 the amplification reaches 1000×,
-    // making the SVGF variance estimate blow up and producing extremely bright
-    // patches and over-smoothed "stretched" textures.
+    // WHY 0.01 and not 0.1:
+    // The floor value is the threshold below which an albedo channel is clamped.
+    // The floor in BOTH demodulation and remodulation must be identical so they
+    // cancel: irradiance = radiance / safeAlbedo,  final = irradiance * safeAlbedo.
     //
-    // Write safeAlbedo to outAlbedo so the remodulation pass cancels exactly
-    // the same divisor (irradiance * safeAlbedo = radiance).
+    // With floor=0.1, any surface darker than albedo≈0.1 (e.g. the floor at ~0.02–
+    // 0.05) had ALL its channels clamped to the same flat 0.1.  Two adjacent dark
+    // pixels with different actual albedos (brick vs mortar) both got safeAlbedo=0.1
+    // → their demodulated irradiance differed (0.02L/0.1 ≠ 0.05L/0.1), causing false
+    // irradiance edges that SVGF couldn't preserve.  After remodulation by the same
+    // flat 0.1 the edge collapsed to a uniform value → texture destroyed.
+    //
+    // With floor=0.01, the floor texture (albedo ~0.02–0.05) is NOT clamped at all:
+    // safeAlbedo = actual albedo.  Demodulation then becomes proper per-channel
+    // cancellation (0.02L / 0.02 = L, 0.05L / 0.05 = L) → the demodulated irradiance
+    // is UNIFORM across uniformly-lit floor regions regardless of texture variation.
+    // SVGF can blur freely without creating artefacts; remodulation with the stored
+    // safeAlbedo (= actual albedo) restores the texture automatically.
+    //
+    // 0.01 caps the maximum per-channel noise amplification at 100× (vs 1000× for
+    // 0.001, which caused blow-out on near-zero colour channels of saturated darks).
 
-    float3 safeAlbedo = max(albedo, float3(0.1f));
+    float3 safeAlbedo = max(albedo, float3(0.01f));
     outHDR.write(float4(radiance / safeAlbedo, 1.0f), gid);
     outAlbedo.write(float4(safeAlbedo, 1.0f), gid);
 }
