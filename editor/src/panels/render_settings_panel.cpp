@@ -12,9 +12,18 @@ namespace daedalus::editor
 {
 
 RenderSettingsPanel::RenderSettingsPanel(
-    std::function<std::filesystem::path()> browseForFile)
-    : m_browseForFile(std::move(browseForFile))
+    std::function<void()> onBrowseRequested)
+    : m_onBrowseRequested(std::move(onBrowseRequested))
 {}
+
+void RenderSettingsPanel::deliverPath(const std::filesystem::path& path)
+{
+    if (!path.empty())
+    {
+        m_pendingLutPath = path;
+        m_hasLutPath     = true;
+    }
+}
 
 // Helper: clamp a float value and return true if changed.
 static inline bool DragClamped(const char* label, float* v,
@@ -28,6 +37,14 @@ static inline bool DragClamped(const char* label, float* v,
 
 void RenderSettingsPanel::draw(EditMapDocument& doc)
 {
+    // Apply any LUT path delivered from the async file dialog.
+    if (m_hasLutPath)
+    {
+        doc.renderSettings().colorGrading.lutPath = m_pendingLutPath.string();
+        m_pendingLutPath.clear();
+        m_hasLutPath = false;
+    }
+
     ImGui::Begin("Render Settings");
 
     SceneSettings&       ss  = doc.sceneSettings();
@@ -156,19 +173,15 @@ void RenderSettingsPanel::draw(EditMapDocument& doc)
             const std::size_t  cpLen = std::min(cur.size(), buf.size() - 1u);
             std::copy_n(cur.c_str(), cpLen, buf.data());
 
-            ImGui::SetNextItemWidth(m_browseForFile ? -70.0f : -1.0f);
+            ImGui::SetNextItemWidth(m_onBrowseRequested ? -70.0f : -1.0f);
             if (ImGui::InputText("##lut", buf.data(), buf.size()))
                 cg.lutPath = buf.data();
 
-            if (m_browseForFile)
+            if (m_onBrowseRequested)
             {
                 ImGui::SameLine();
                 if (ImGui::Button("Browse##lut"))
-                {
-                    const auto chosen = m_browseForFile();
-                    if (!chosen.empty())
-                        cg.lutPath = chosen.string();
-                }
+                    m_onBrowseRequested();  // async — result delivered via deliverPath()
             }
             ImGui::TextDisabled("1024x32 RGBA8 PNG strip (32x32x32 LUT)");
         }

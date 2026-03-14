@@ -13,18 +13,27 @@ class EditMapDocument;
 class RenderSettingsPanel
 {
 public:
-    /// @param browseForFile  Callback invoked when the user clicks "Browse…" for
-    ///                       an asset path field.  Returns the chosen path, or
-    ///                       an empty path if the user cancelled.  May be null;
-    ///                       when null the Browse button is hidden.
+    /// @param onBrowseRequested  Zero-argument callback invoked when the user
+    ///                           clicks "Browse…" for the LUT path field.  The
+    ///                           caller is responsible for opening the file
+    ///                           dialog asynchronously and delivering the chosen
+    ///                           path via deliverPath().  May be null; the
+    ///                           Browse button is hidden when null.
     explicit RenderSettingsPanel(
-        std::function<std::filesystem::path()> browseForFile = nullptr);
+        std::function<void()> onBrowseRequested = nullptr);
     ~RenderSettingsPanel() = default;
+
+    /// Deliver the path chosen by the async file dialog opened via the
+    /// onBrowseRequested callback.  An empty path means the user cancelled;
+    /// the LUT setting is left unchanged in that case.
+    void deliverPath(const std::filesystem::path& path);
 
     void draw(EditMapDocument& doc);
 
 private:
-    std::function<std::filesystem::path()> m_browseForFile;
+    std::function<void()>  m_onBrowseRequested;
+    std::filesystem::path  m_pendingLutPath;  ///< Set by deliverPath(), consumed by draw().
+    bool                   m_hasLutPath = false;
 };
 
 } // namespace daedalus::editor

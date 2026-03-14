@@ -6,10 +6,9 @@
 // directly for ImGui — no RHI ISwapchain is created for the editor window.
 // The RHI device/queue are used only for the 3D viewport offscreen swapchain.
 
+#import <Cocoa/Cocoa.h>
 #import <Metal/Metal.h>
 #import <QuartzCore/CAMetalLayer.h>
-#import <Cocoa/Cocoa.h>
-#import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 
 #include "imgui.h"
 #include "imgui_internal.h"
@@ -56,6 +55,7 @@
 #include <SDL3/SDL_metal.h>
 
 #include <algorithm>
+#include <atomic>
 #include <filesystem>
 #include <format>
 #include <functional>
@@ -75,69 +75,44 @@ static std::string executableDir()
     return base ? base : ".";
 }
 
-// Synchronously show an NSOpenPanel and return the chosen path (empty = cancel).
-static std::filesystem::path showOpenPanel()
+// ─── File dialog ─────────────────────────────────────────────────────────────
+// SDL3's SDL_ShowOpenFileDialog / SDL_ShowSaveFileDialog / SDL_ShowOpenFolderDialog
+// are used instead of NSOpenPanel because SDL3's Cocoa event handling intercepts
+// mouseDown events at the NSApplication level, which prevents NSOpenPanel's file
+// list from receiving them during a runModal session (scroll events and button
+// mouse-up still work, but single-clicking a file item does not).
+// The SDL3 API opens the dialog asynchronously and delivers the result via a
+// callback.  The callback documentation notes it may fire from a different thread,
+// so the ready flag is std::atomic with release/acquire ordering to synchronise
+// the result string write before the flag store.
+
+enum class FileDialogPurpose
 {
-    NSOpenPanel* panel            = [NSOpenPanel openPanel];
-    panel.canChooseFiles          = YES;
-    panel.canChooseDirectories    = NO;
-    panel.allowsMultipleSelection = NO;
-    panel.title                   = @"Open Map";
-    // No content-type filter: allow all files so .dmap is always selectable
-    // regardless of whether macOS has a registered UTType for the extension.
+    None,
+    OpenMap,
+    SaveMap,
+    OpenLUT,
+    OpenAssetRoot,
+};
 
-    if ([panel runModal] == NSModalResponseOK)
-        return std::filesystem::path([[panel.URL path] UTF8String]);
-    return {};
-}
-
-// Synchronously show an NSOpenPanel filtered to image files.
-static std::filesystem::path showOpenPanelForImage()
+struct FileDialogState
 {
-    NSOpenPanel* panel            = [NSOpenPanel openPanel];
-    panel.canChooseFiles          = YES;
-    panel.canChooseDirectories    = NO;
-    panel.allowsMultipleSelection = NO;
-    panel.title                   = @"Choose LUT Image";
-    panel.allowedContentTypes     = @[
-        [UTType typeWithIdentifier:@"public.png"],
-        [UTType typeWithIdentifier:@"public.jpeg"],
-    ];
+    FileDialogPurpose purpose = FileDialogPurpose::None;
+    std::string       result;          ///< Written before ready is set.
+    std::atomic<bool> ready{false};
+};
 
-    if ([panel runModal] == NSModalResponseOK)
-        return std::filesystem::path([[panel.URL path] UTF8String]);
-    return {};
-}
-
-// Synchronously show an NSOpenPanel for a directory.
-static std::filesystem::path showOpenPanelForDirectory()
+/// SDL3 file-dialog callback.  May be called from a thread other than the main
+/// thread.  Stores the chosen path (or empty string if cancelled / error) then
+/// sets the ready flag with release ordering so the main loop can safely read
+/// result with acquire ordering.
+static void fileDialogCb(void* userdata,
+                         const char* const* filelist,
+                         int /*filter*/)
 {
-    NSOpenPanel* panel            = [NSOpenPanel openPanel];
-    panel.canChooseFiles          = NO;
-    panel.canChooseDirectories    = YES;
-    panel.allowsMultipleSelection = NO;
-    panel.title                   = @"Choose Asset Root";
-
-    if ([panel runModal] == NSModalResponseOK)
-        return std::filesystem::path([[panel.URL path] UTF8String]);
-    return {};
-}
-
-// Synchronously show an NSSavePanel and return the chosen path (empty = cancel).
-static std::filesystem::path showSavePanel(const std::string& defaultName)
-{
-    NSSavePanel* panel             = [NSSavePanel savePanel];
-    panel.title                    = @"Save Map";
-    panel.nameFieldStringValue     = [NSString stringWithUTF8String:defaultName.c_str()];
-    // Enforce .dmap extension so macOS appends it automatically if omitted.
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wdeprecated-declarations"
-    panel.allowedFileTypes = @[@"dmap"];
-#pragma clang diagnostic pop
-
-    if ([panel runModal] == NSModalResponseOK)
-        return std::filesystem::path([[panel.URL path] UTF8String]);
-    return {};
+    auto* s   = static_cast<FileDialogState*>(userdata);
+    s->result = (filelist && filelist[0]) ? filelist[0] : std::string{};
+    s->ready.store(true, std::memory_order_release);
 }
 
 // ─── Initial docking layout ───────────────────────────────────────────────────
@@ -188,7 +163,9 @@ static void drawMenuBar(EditMapDocument& doc,
                          float             gridStep,
                          glm::vec2         lastMouseMapPos,
                          bool&             openNewMapDlg,
-                         HelpPanel&        helpPanel)
+                         HelpPanel&        helpPanel,
+                         FileDialogState&  dlgState,
+                         SDL_Window*       window)
 {
     if (ImGui::BeginMainMenuBar())
     {
@@ -200,18 +177,18 @@ static void drawMenuBar(EditMapDocument& doc,
 
             if (ImGui::MenuItem("Open\xe2\x80\xa6", "Cmd+O"))
             {
-                const auto path = showOpenPanel();
-                if (!path.empty())
-                    (void)doc.loadFromFile(path);
+                SDL_ShowOpenFileDialog(fileDialogCb, &dlgState, window,
+                                       nullptr, 0, nullptr, false);
+                dlgState.purpose = FileDialogPurpose::OpenMap;
             }
 
             ImGui::Separator();
 
             if (ImGui::MenuItem("Set Asset Root\xe2\x80\xa6"))
             {
-                const auto path = showOpenPanelForDirectory();
-                if (!path.empty())
-                    doc.setAssetRoot(path.string());
+                SDL_ShowOpenFolderDialog(fileDialogCb, &dlgState, window,
+                                        nullptr, false);
+                dlgState.purpose = FileDialogPurpose::OpenAssetRoot;
             }
 
             ImGui::Separator();
@@ -221,12 +198,17 @@ static void drawMenuBar(EditMapDocument& doc,
 
             if (ImGui::MenuItem("Save As\xe2\x80\xa6", "Cmd+Shift+S"))
             {
-                const std::string defaultName = doc.filePath().empty()
+                // Pass the full existing path (or just the leaf name) as a hint
+                // so the save dialog pre-fills the file name field.
+                const std::string defaultLoc = doc.filePath().empty()
                     ? "untitled.dmap"
-                    : doc.filePath().filename().string();
-                const auto path = showSavePanel(defaultName);
-                if (!path.empty())
-                    (void)doc.saveToFile(path);
+                    : doc.filePath().string();
+                static const SDL_DialogFileFilter k_dmapFilter[] = {
+                    {"Daedalus Map", "dmap"},
+                };
+                SDL_ShowSaveFileDialog(fileDialogCb, &dlgState, window,
+                                       k_dmapFilter, 1, defaultLoc.c_str());
+                dlgState.purpose = FileDialogPurpose::SaveMap;
             }
 
             ImGui::Separator();
@@ -500,9 +482,16 @@ int main(int /*argc*/, char* /*argv*/[])
     Viewport3D        vp3d(shaderLibPath);
     PropertyInspector inspector;
     OutputLog         outputLog;
-    RenderSettingsPanel renderPanel([]() -> std::filesystem::path
+    FileDialogState   dlgState;
+    static const SDL_DialogFileFilter k_imageFilter[] = {
+        {"PNG Image",  "png"},
+        {"JPEG Image", "jpg;jpeg"},
+    };
+    RenderSettingsPanel renderPanel([&dlgState, window]()
     {
-        return showOpenPanelForImage();
+        SDL_ShowOpenFileDialog(fileDialogCb, &dlgState, window,
+                               k_imageFilter, 2, nullptr, false);
+        dlgState.purpose = FileDialogPurpose::OpenLUT;
     });
     ObjectBrowserPanel  objBrowser;
     LayersPanel         layersPanel;
@@ -1226,9 +1215,37 @@ int main(int /*argc*/, char* /*argv*/[])
             }
         }
 
+        // ── File dialog results ───────────────────────────────────────────────
+        if (dlgState.ready.load(std::memory_order_acquire))
+        {
+            dlgState.ready.store(false, std::memory_order_relaxed);
+            const std::string dlgPath = std::exchange(dlgState.result, {});
+            switch (dlgState.purpose)
+            {
+            case FileDialogPurpose::OpenMap:
+                if (!dlgPath.empty())
+                    (void)doc.loadFromFile(dlgPath);
+                break;
+            case FileDialogPurpose::SaveMap:
+                if (!dlgPath.empty())
+                    (void)doc.saveToFile(dlgPath);
+                break;
+            case FileDialogPurpose::OpenLUT:
+                renderPanel.deliverPath(dlgPath);
+                break;
+            case FileDialogPurpose::OpenAssetRoot:
+                if (!dlgPath.empty())
+                    doc.setAssetRoot(dlgPath);
+                break;
+            default: break;
+            }
+            dlgState.purpose = FileDialogPurpose::None;
+        }
+
         // ── Menu bar ──────────────────────────────────────────────────────────
         drawMenuBar(doc, activeToolId, selectTool, drawSectorTool, vertexTool, activeTool,
-                    vp2d.gridStep(), vp2d.lastMouseMapPos(), nmDlg.open, helpPanel);
+                    vp2d.gridStep(), vp2d.lastMouseMapPos(), nmDlg.open, helpPanel,
+                    dlgState, window);
 
         // ── Panels ────────────────────────────────────────────────────────────
         DrawSectorTool* drawToolPtr =
