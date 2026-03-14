@@ -69,6 +69,17 @@ inline BufferUsage operator|(BufferUsage a, BufferUsage b) noexcept
     return static_cast<BufferUsage>(static_cast<u32>(a) | static_cast<u32>(b));
 }
 
+// ─── ResourceUsage ────────────────────────────────────────────────────────────
+// Describes how a resource is accessed by the GPU.  Used by useResource() to
+// inform the driver about residency requirements.
+
+enum class ResourceUsage : u32
+{
+    Read      = 1 << 0,
+    Write     = 1 << 1,
+    ReadWrite = Read | Write,
+};
+
 // ─── Primitive types ──────────────────────────────────────────────────────────
 
 enum class PrimitiveType : u32
@@ -281,6 +292,38 @@ struct ScissorRect
     i32 y      = 0;
     u32 width  = 0;
     u32 height = 0;
+};
+
+// ─── Acceleration structure descriptors ───────────────────────────────────────
+
+/// Build mode for acceleration structures.
+enum class AccelStructBuildMode : u32
+{
+    Build,   ///< Full BVH construction (slower, optimal quality).
+    Refit,   ///< In-place refit of existing BVH (faster, lower quality).
+};
+
+class IBuffer;               // forward — avoid circular include
+class IAccelerationStructure; // forward — avoid circular include
+
+/// Describes one geometry entry for a primitive (BLAS) acceleration structure.
+/// Each entry references a contiguous vertex/index range from a single mesh.
+struct AccelStructGeometryDesc
+{
+    IBuffer* vertexBuffer = nullptr;  ///< Buffer containing position data.
+    u32      vertexCount  = 0;        ///< Number of vertices.
+    u32      vertexStride = 0;        ///< Bytes per vertex (offset to position is 0).
+    IBuffer* indexBuffer  = nullptr;  ///< Buffer containing u32 indices. nullptr = non-indexed.
+    u32      indexCount   = 0;        ///< Number of indices. 0 when non-indexed.
+};
+
+/// Describes one instance entry for an instance (TLAS) acceleration structure.
+struct AccelStructInstanceDesc
+{
+    IAccelerationStructure* blas = nullptr;  ///< Primitive AS for this instance.
+    float    transform[16] = {};             ///< 4×4 column-major world transform.
+    u32      instanceId    = 0;              ///< User-defined ID returned on intersection.
+    u32      mask          = 0xFF;           ///< Visibility mask for ray intersection.
 };
 
 } // namespace daedalus::rhi

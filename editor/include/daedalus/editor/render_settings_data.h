@@ -84,7 +84,17 @@ struct OptionalFxData
     float grainAmount       = 0.04f;   ///< Film grain amplitude (0 = off).
 };
 
-// ─── UpscalingData ────────────────────────────────────────────────────────────
+// ─── RTData ───────────────────────────────────────────────────────────────
+
+struct RTData
+{
+    bool     enabled         = false;  ///< true = RayTraced, false = Rasterized.
+    uint32_t maxBounces      = 2u;     ///< GI bounce count (1 = direct + 1 indirect).
+    uint32_t samplesPerPixel = 1u;     ///< Rays per pixel per frame.
+    bool     denoise         = true;   ///< Enable SVGF temporal denoiser.
+};
+
+// ─── UpscalingData ────────────────────────────────────────────────────────
 
 struct UpscalingData
 {
@@ -104,6 +114,7 @@ struct RenderSettingsData
     ColorGradingData  colorGrading;
     OptionalFxData    optionalFx;
     UpscalingData     upscaling;
+    RTData            rt;
 };
 
 } // namespace daedalus::editor

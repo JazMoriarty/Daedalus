@@ -36,6 +36,7 @@
 #include "daedalus/render/rhi/i_command_queue.h"
 #include "daedalus/render/rhi/i_swapchain.h"
 #include "daedalus/render/render_graph/render_graph.h"
+#include "daedalus/render/rt_scene_manager.h"
 #include "daedalus/render/scene_view.h"
 #include "daedalus/core/types.h"
 
@@ -68,6 +69,11 @@ public:
 
     /// Recreate resolution-dependent resources (TAA history, etc.).
     void resize(rhi::IRenderDevice& device, u32 width, u32 height);
+
+    /// Notify the renderer that scene geometry has changed (e.g. after
+    /// retessellating the map).  Clears the RT BLAS cache so stale
+    /// acceleration structures are not reused for the new geometry.
+    void notifyGeometryChanged() noexcept;
 
     // ─── Per-frame entry point ────────────────────────────────────────────────
 
@@ -209,11 +215,31 @@ private:
     RenderGraph m_graph;         ///< Main per-frame render graph.
     RenderGraph m_mirrorGraph;   ///< Dedicated graph for the mirror pre-pass (reset per mirror).
 
+    // ── Ray tracing mode (Phase 1E) ────────────────────────────────────────
+
+    std::unique_ptr<RTSceneManager>  m_rtSceneManager;
+    std::unique_ptr<rhi::IPipeline>  m_pathTracePSO;
+    std::unique_ptr<rhi::IPipeline>  m_svgfTemporalPSO;
+    std::unique_ptr<rhi::IPipeline>  m_svgfVariancePSO;
+    std::unique_ptr<rhi::IPipeline>  m_svgfAtrousPSO;
+    std::unique_ptr<rhi::IPipeline>  m_rtRemodPSO;      ///< Post-denoiser albedo remodulation.
+    std::unique_ptr<rhi::IPipeline>  m_fogScatterRTPSO; ///< RT volumetric fog scatter (shadow rays via TLAS).
+    std::unique_ptr<rhi::ITexture>   m_svgfHistory[2];  ///< Denoised colour ping-pong.
+    std::unique_ptr<rhi::ITexture>   m_svgfMoments;     ///< Luminance moments for variance.
+    std::unique_ptr<rhi::ITexture>   m_rtAlbedo;        ///< Primary-hit albedo for demodulation.
+    bool m_rtInitialized = false;
+
     // ─── Frame state ──────────────────────────────────────────────────────────
+
+    /// Per-frame CPU/GPU sync fence.  Signalled when the main frame command buffer
+    /// completes; waited on at the start of the next frame before any CPU writes
+    /// to single-buffered GPU resources (light bufs, frame constants, material table).
+    std::unique_ptr<rhi::IFence> m_frameFence;
 
     u32 m_width      = 0;
     u32 m_height     = 0;
     u32 m_frameIndex = 0;
+    std::string m_shaderLibPath;  ///< Cached for lazy RT PSO creation.
 
     // ─── Internal helpers ─────────────────────────────────────────────────────
 
@@ -228,6 +254,9 @@ private:
                               rhi::ICommandQueue& queue,
                               const SceneView&    scene,
                               const FrameGPU&     mainFrame);
+
+    /// Lazy-create RT PSOs and persistent SVGF textures on first RT frame.
+    void lazyInitRT(rhi::IRenderDevice& device);
 
     static glm::vec2 haltonJitter(u32 frameIndex) noexcept;
 };

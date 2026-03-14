@@ -8,6 +8,7 @@ add_executable(RenderTests
     test_volumetric_fog.cpp
     test_ssr.cpp
     test_post_fx.cpp
+    test_rt_scene_manager.cpp
 )
 
 target_link_libraries(RenderTests

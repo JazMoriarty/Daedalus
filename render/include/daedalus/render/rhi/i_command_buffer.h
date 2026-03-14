@@ -69,6 +69,11 @@ public:
     /// No further recording is allowed after commit().
     virtual void commit() = 0;
 
+    /// Associate `fence` with this command buffer so that `fence->waitUntilCompleted()`
+    /// blocks until this command buffer has finished executing on the GPU.
+    /// Must be called before commit().
+    virtual void signalOnCompletion(IFence* fence) = 0;
+
     // ─── Debugging ────────────────────────────────────────────────────────────
 
     virtual void pushDebugGroup(std::string_view label) = 0;

@@ -79,7 +79,7 @@ struct MaterialConstants   // buffer(1) in G-buffer + transparent fragment, 64 b
     float4 tint;          ///< Albedo tint (rgb) + opacity override (a); default = (1,1,1,1).
     float2 uvOffset;      ///< UV origin of the active sprite sheet frame cell; default = (0,0).
     float2 uvScale;       ///< UV size of one frame cell; default = (1,1).
-    float4 sectorAmbient; ///< xyz = per-sector ambient color × intensity; baked into emissive.
+    float4 sectorAmbient; ///< xyz = per-sector ambient color × intensity; w = 1.0 if outdoor sector.
 };
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -383,6 +383,71 @@ struct OptionalFxConstants   // buffer(1) in optional_fx_frag, 32 bytes
     float pad0;
     float pad1;
     float pad2;
+};
+
+// ─── RT constants ───────────────────────────────────────────────────────────
+// Must match daedalus/render/scene_data.h RTConstantsGPU exactly.
+
+struct RTConstants   // buffer(1) in path_trace_main, 16 bytes
+{
+    uint  maxBounces;       // GI bounce count (1 = direct + 1 indirect)
+    uint  samplesPerPixel;  // rays per pixel per frame
+    uint  pad0;
+    uint  pad1;
+};
+
+// ─── RT primitive data ──────────────────────────────────────────────────────
+// Must match daedalus/render/scene_data.h RTPrimitiveDataGPU exactly.
+// Per-triangle vertex attributes for barycentric interpolation in the path tracer.
+// Indexed by (RTMaterialGPU::primitiveDataOffset + primitive_id).
+
+struct RTPrimitiveData   // buffer(6) in path_trace_main, 112 bytes per entry
+{
+    packed_float2 uv0;
+    packed_float2 uv1;
+    packed_float2 uv2;
+    packed_float3 normal0;
+    packed_float3 normal1;
+    packed_float3 normal2;
+    packed_float4 tangent0;
+    packed_float4 tangent1;
+    packed_float4 tangent2;
+    float pad;
+};
+
+// ─── RT material ────────────────────────────────────────────────────────────
+// Must match daedalus/render/scene_data.h RTMaterialGPU exactly.
+// Per-instance material entry in the flat material table, indexed by instanceId.
+
+struct RTMaterialGPU   // buffer(2) in path_trace_main, 80 bytes per entry
+{
+    uint   albedoTextureIndex;
+    uint   normalTextureIndex;
+    uint   emissiveTextureIndex;
+    float  roughness;
+    float  metalness;
+    uint   primitiveDataOffset;
+    float  pad1;
+    float  pad2;
+    float4 tint;
+    float2 uvOffset;
+    float2 uvScale;
+    float4 sectorAmbient;
+};
+
+// ─── SVGF denoiser constants ────────────────────────────────────────────────
+// Must match daedalus/render/scene_data.h SVGFConstantsGPU exactly.
+
+struct SVGFConstants   // buffer(1) in svgf_temporal / svgf_variance / svgf_atrous, 32 bytes
+{
+    float alpha;         // temporal blend weight (lower = more history)
+    float momentsAlpha;  // moments temporal blend weight
+    float phiColor;      // colour edge-stopping sigma
+    float phiNormal;     // normal edge-stopping sigma
+    float phiDepth;      // depth edge-stopping sigma
+    uint  stepWidth;     // à-trous step size (1, 2, 4, …)
+    float pad0;
+    float pad1;
 };
 
 // ─── Luminance / colour utilities ───────────────────────────────────────────────────────────────────────────────
