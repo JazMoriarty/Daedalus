@@ -83,6 +83,11 @@ static std::filesystem::path showOpenPanel()
     panel.canChooseDirectories    = NO;
     panel.allowsMultipleSelection = NO;
     panel.title                   = @"Open Map";
+    // .dmap is a custom extension with no system-registered UTType.  Without an
+    // explicit allowedContentTypes, macOS 12+ greys out unrecognised extensions.
+    panel.allowedContentTypes     = @[
+        [UTType typeWithFilenameExtension:@"dmap"]
+    ];
 
     if ([panel runModal] == NSModalResponseOK)
         return std::filesystem::path([[panel.URL path] UTF8String]);
@@ -128,6 +133,10 @@ static std::filesystem::path showSavePanel(const std::string& defaultName)
     NSSavePanel* panel = [NSSavePanel savePanel];
     panel.title = @"Save Map";
     panel.nameFieldStringValue = [NSString stringWithUTF8String:defaultName.c_str()];
+    // Enforce .dmap extension so macOS appends it automatically if omitted.
+    panel.allowedContentTypes  = @[
+        [UTType typeWithFilenameExtension:@"dmap"]
+    ];
 
     if ([panel runModal] == NSModalResponseOK)
         return std::filesystem::path([[panel.URL path] UTF8String]);
