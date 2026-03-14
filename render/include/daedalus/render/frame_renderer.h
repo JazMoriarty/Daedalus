@@ -222,11 +222,14 @@ private:
     std::unique_ptr<rhi::IPipeline>  m_svgfTemporalPSO;
     std::unique_ptr<rhi::IPipeline>  m_svgfVariancePSO;
     std::unique_ptr<rhi::IPipeline>  m_svgfAtrousPSO;
-    std::unique_ptr<rhi::IPipeline>  m_rtRemodPSO;      ///< Post-denoiser albedo remodulation.
-    std::unique_ptr<rhi::IPipeline>  m_fogScatterRTPSO; ///< RT volumetric fog scatter (shadow rays via TLAS).
-    std::unique_ptr<rhi::ITexture>   m_svgfHistory[2];  ///< Denoised colour ping-pong.
-    std::unique_ptr<rhi::ITexture>   m_svgfMoments;     ///< Luminance moments for variance.
-    std::unique_ptr<rhi::ITexture>   m_rtAlbedo;        ///< Primary-hit albedo for demodulation.
+    std::unique_ptr<rhi::IPipeline>  m_rtRemodPSO;        ///< Post-denoiser albedo remodulation.
+    std::unique_ptr<rhi::IPipeline>  m_fogScatterRTPSO;   ///< RT volumetric fog scatter (shadow rays via TLAS).
+    std::unique_ptr<rhi::IPipeline>  m_svgfPrevCopyPSO;   ///< Generic texture copy — saves depth+normal history.
+    std::unique_ptr<rhi::ITexture>   m_svgfHistory[2];    ///< Denoised colour ping-pong.
+    std::unique_ptr<rhi::ITexture>   m_svgfMoments;       ///< Luminance moments for variance.
+    std::unique_ptr<rhi::ITexture>   m_rtAlbedo;          ///< Primary-hit albedo for demodulation.
+    std::unique_ptr<rhi::ITexture>   m_svgfPrevDepthTex;  ///< Previous-frame linear depth for SVGF disocclusion.
+    std::unique_ptr<rhi::ITexture>   m_svgfPrevNormalTex; ///< Previous-frame encoded normal for SVGF disocclusion.
     bool m_rtInitialized = false;
 
     // ─── Frame state ──────────────────────────────────────────────────────────
@@ -236,9 +239,10 @@ private:
     /// to single-buffered GPU resources (light bufs, frame constants, material table).
     std::unique_ptr<rhi::IFence> m_frameFence;
 
-    u32 m_width      = 0;
-    u32 m_height     = 0;
-    u32 m_frameIndex = 0;
+    u32        m_width      = 0;
+    u32        m_height     = 0;
+    u32        m_frameIndex = 0;
+    RenderMode m_prevRenderMode = RenderMode::Rasterized;  ///< Detects mode switches to flush TAA+SVGF history.
     std::string m_shaderLibPath;  ///< Cached for lazy RT PSO creation.
 
     // ─── Internal helpers ─────────────────────────────────────────────────────

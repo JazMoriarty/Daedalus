@@ -44,7 +44,7 @@ if(DAEDALUS_PLATFORM_MACOS)
     # ─── Metal shader compilation ────────────────────────────────────────────
     find_program(XCRUN_EXE xcrun REQUIRED)
 
-    file(GLOB METAL_SOURCES
+    file(GLOB METAL_SOURCES CONFIGURE_DEPENDS
         "${CMAKE_CURRENT_SOURCE_DIR}/shaders/metal/*.metal")
     set(METAL_COMMON_H
         "${CMAKE_CURRENT_SOURCE_DIR}/shaders/metal/common.h")

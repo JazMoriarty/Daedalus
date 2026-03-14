@@ -471,7 +471,7 @@ struct alignas(16) SVGFConstantsGPU
 {
     f32 alpha        = 0.05f;  ///< Temporal blend (lower = more history).
     f32 momentsAlpha = 0.2f;   ///< Moments temporal blend.
-    f32 phiColor     = 10.0f;  ///< Colour edge-stopping sigma.
+    f32 phiColor     = 4.0f;   ///< Colour edge-stopping sigma (lower = tighter shadow boundaries).
     f32 phiNormal    = 128.0f; ///< Normal edge-stopping sigma.
     f32 phiDepth     = 1.0f;   ///< Depth edge-stopping sigma.
     u32 stepWidth    = 1;      ///< à-trous step size.

@@ -811,6 +811,20 @@ void FrameRenderer::renderFrame(IRenderDevice& device,
     if (swapW != m_width || swapH != m_height)
         resize(device, swapW, swapH);
 
+    // ── Render-mode change: flush accumulated history ─────────────────────────
+    // Switching between Rasterized ↔ RayTraced leaves the TAA history (and the
+    // SVGF history, if going to RT) populated with data from the old pipeline.
+    // TAA blends 90% history / 10% current, so the stale content dominates for
+    // many frames and the scene appears unchanged after the switch.
+    // Resetting m_frameIndex to 0 re-triggers the existing bootstrap guard in
+    // taa.metal (frameIndex < 8.5 → bypass history for the first 8 frames) and
+    // the same path that GPU-clears the TAA history textures below.
+    if (scene.renderMode != m_prevRenderMode)
+    {
+        m_frameIndex      = 0;
+        m_prevRenderMode  = scene.renderMode;
+    }
+
     // ── TAA ping-pong ──────────────────────────────────────────────────────────
     const u32 currHist = m_frameIndex & 1u;
     const u32 prevHist = 1u - currHist;
@@ -1022,7 +1036,8 @@ void FrameRenderer::renderFrame(IRenderDevice& device,
     // the same queue, guaranteeing the clears complete before any TAA read.
     if (m_frameIndex == 0)
     {
-        auto clearCmd = queue.createCommandBuffer("ClearTAAHistory");
+        auto clearCmd = queue.createCommandBuffer("ClearHistoryOnModeSwitch");
+        // ── TAA history ──────────────────────────────────────────────────────
         for (int i = 0; i < 2; ++i)
         {
             RenderPassDescriptor rpd;
@@ -1034,6 +1049,27 @@ void FrameRenderer::renderFrame(IRenderDevice& device,
             rpd.colorAttachments[0].clearColor   = { 0.0f, 0.0f, 0.0f, 0.0f };
             IRenderPassEncoder* enc = clearCmd->beginRenderPass(rpd);
             enc->end();
+        }
+        // ── SVGF history ─────────────────────────────────────────────────────
+        // Also clear the SVGF colour history ping-pong textures (if the RT
+        // pipeline has already been initialised).  Without this, switching back
+        // to RT mode would blend stale data from the previous RT session into
+        // the very first denoised frame, causing a one-to-several-frame flash
+        // of the old scene.
+        if (m_rtInitialized && m_svgfHistory[0] && m_svgfHistory[1])
+        {
+            for (int i = 0; i < 2; ++i)
+            {
+                RenderPassDescriptor rpd;
+                rpd.debugLabel                       = (i == 0) ? "ClearSVGFHistory0" : "ClearSVGFHistory1";
+                rpd.colorAttachmentCount             = 1;
+                rpd.colorAttachments[0].texture      = m_svgfHistory[i].get();
+                rpd.colorAttachments[0].loadAction   = LoadAction::Clear;
+                rpd.colorAttachments[0].storeAction  = StoreAction::Store;
+                rpd.colorAttachments[0].clearColor   = { 0.0f, 0.0f, 0.0f, 0.0f };
+                IRenderPassEncoder* enc = clearCmd->beginRenderPass(rpd);
+                enc->end();
+            }
         }
         clearCmd->commit();
     }
@@ -1330,7 +1366,10 @@ void FrameRenderer::renderFrame(IRenderDevice& device,
             IAccelerationStructure* tlas          = m_rtSceneManager->tlas();
             IBuffer*                matTable      = m_rtSceneManager->materialTable();
             IBuffer*                primDataBuf   = m_rtSceneManager->primitiveDataBuffer();
-            ITexture*               rtAlbedoTex   = m_rtAlbedo.get();
+            ITexture*               rtAlbedoTex       = m_rtAlbedo.get();
+            IPipeline*              pSvgfPrevCopy     = m_svgfPrevCopyPSO.get();
+            ITexture*               svgfPrevDepthTex  = m_svgfPrevDepthTex.get();
+            ITexture*               svgfPrevNormalTex = m_svgfPrevNormalTex.get();
 
             // Unique VB/IB buffers for useResource residency declarations.
             auto uniqueBufs = m_rtSceneManager->uniqueBuffers();
@@ -1414,15 +1453,45 @@ void FrameRenderer::renderFrame(IRenderDevice& device,
                         enc->setComputePipeline(pSvgfTemporal);
                         enc->setBuffer(frameBuf, 0, 0);                    // FrameConstants  buffer(0)
                         enc->setBytes(&svgfConst, sizeof(svgfConst), 1);   // SVGFConstants   buffer(1)
-                        enc->setTexture(hdrTex,         0);  // inColor     (current noisy)
-                        enc->setTexture(svgfPrevTex,    1);  // inHistory   (previous denoised)
-                        enc->setTexture(gMotionTex,     2);  // inMotion
-                        enc->setTexture(gDepthCopyTex,  3);  // inDepth     (current)
-                        enc->setTexture(gDepthCopyTex,  4);  // inPrevDepth (approx)
-                        enc->setTexture(gNormalTex,     5);  // inNormal    (current)
-                        enc->setTexture(gNormalTex,     6);  // inPrevNormal (approx)
-                        enc->setTexture(svgfCurrTex,    7);  // outColor
-                        enc->setTexture(momentsTex,     8);  // outMoments
+                        enc->setTexture(hdrTex,            0);  // inColor      (current noisy)
+                        enc->setTexture(svgfPrevTex,        1);  // inHistory    (previous denoised)
+                        enc->setTexture(gMotionTex,         2);  // inMotion
+                        enc->setTexture(gDepthCopyTex,      3);  // inDepth      (current)
+                        enc->setTexture(svgfPrevDepthTex,   4);  // inPrevDepth  (actual previous frame)
+                        enc->setTexture(gNormalTex,         5);  // inNormal     (current)
+                        enc->setTexture(svgfPrevNormalTex,  6);  // inPrevNormal (actual previous frame)
+                        enc->setTexture(svgfCurrTex,        7);  // outColor
+                        enc->setTexture(momentsTex,         8);  // outMoments
+                        enc->dispatch(swapW, swapH, 1);
+                    };
+                    m_graph.addComputePass(std::move(p));
+                }
+
+                // ── Passes RT.2b/2c — Save current depth+normal as prev-frame history ──
+                // These persistent textures are read by the temporal pass on the NEXT
+                // frame as inPrevDepth / inPrevNormal.  Copying them after the temporal
+                // pass has already consumed the previous values ensures no read-after-
+                // write hazard within the same frame.
+                {
+                    RGComputePassDesc p;
+                    p.name    = "SVGFSavePrevDepth";
+                    p.execute = [=](IComputePassEncoder* enc)
+                    {
+                        enc->setComputePipeline(pSvgfPrevCopy);
+                        enc->setTexture(gDepthCopyTex,   0);  // src: current linear depth
+                        enc->setTexture(svgfPrevDepthTex,1);  // dst: prev-frame depth history
+                        enc->dispatch(swapW, swapH, 1);
+                    };
+                    m_graph.addComputePass(std::move(p));
+                }
+                {
+                    RGComputePassDesc p;
+                    p.name    = "SVGFSavePrevNormal";
+                    p.execute = [=](IComputePassEncoder* enc)
+                    {
+                        enc->setComputePipeline(pSvgfPrevCopy);
+                        enc->setTexture(gNormalTex,        0);  // src: current encoded normal
+                        enc->setTexture(svgfPrevNormalTex, 1);  // dst: prev-frame normal history
                         enc->dispatch(swapW, swapH, 1);
                     };
                     m_graph.addComputePass(std::move(p));
@@ -2564,7 +2633,11 @@ void FrameRenderer::lazyInitRT(IRenderDevice& device)
     texDesc.width  = m_width;
     texDesc.height = m_height;
     texDesc.format = TextureFormat::RGBA16Float;
-    texDesc.usage  = TextureUsage::ShaderRead | TextureUsage::ShaderWrite;
+    // RenderTarget is added so the history textures can be GPU-cleared
+    // (LoadAction::Clear in a 0-draw render pass) when the render mode
+    // changes and the accumulated history would contain stale data.
+    texDesc.usage  = TextureUsage::ShaderRead | TextureUsage::ShaderWrite
+                   | TextureUsage::RenderTarget;
 
     texDesc.debugName  = "SVGFHistory0";
     m_svgfHistory[0]   = device.createTexture(texDesc);
@@ -2579,6 +2652,27 @@ void FrameRenderer::lazyInitRT(IRenderDevice& device)
     texDesc.format     = TextureFormat::RGBA8Unorm;
     texDesc.debugName  = "RTAlbedo";
     m_rtAlbedo         = device.createTexture(texDesc);
+
+    // Previous-frame depth and normal for SVGF disocclusion detection.
+    // Without these, slots 4 and 6 in the temporal pass were bound to the
+    // *current* frame's textures, breaking the depth/normal consistency check
+    // for any camera motion (the check would read the current surface at the
+    // reprojected position rather than the previous frame's surface there).
+    {
+        auto cs = loadCS("rt_prev_copy_main");
+        ComputePipelineDescriptor d;
+        d.computeShader   = cs.get();
+        d.debugName       = "SVGFPrevCopy";
+        m_svgfPrevCopyPSO = device.createComputePipeline(d);
+    }
+
+    texDesc.format     = TextureFormat::R32Float;
+    texDesc.debugName  = "SVGFPrevDepth";
+    m_svgfPrevDepthTex = device.createTexture(texDesc);
+
+    texDesc.format      = TextureFormat::RGBA8Unorm;
+    texDesc.debugName   = "SVGFPrevNormal";
+    m_svgfPrevNormalTex = device.createTexture(texDesc);
 
     // RT scene manager.
     m_rtSceneManager = std::make_unique<RTSceneManager>();

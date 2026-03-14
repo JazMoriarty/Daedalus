@@ -49,12 +49,39 @@ kernel void svgf_temporal_main(
         if (dot(curN, prevN) < 0.8f) valid = false;
     }
 
+    // ─── 3×3 neighbourhood colour clamp ──────────────────────────────────────
+    // Compute the luminance extent of the current frame's local neighbourhood.
+    // Clamping the history to this range eliminates stale shadow-boundary ghosts:
+    // a history pixel that was lit last frame but is now shadowed (or vice-versa)
+    // is immediately pulled inside the current neighbourhood, so the slow
+    // 95%/5% EMA blend never smears the sharp spot-light cone edge.
+    float3 nMin = float3(1e10f);
+    float3 nMax = float3(-1e10f);
+    {
+        const int2 sMax = int2(screenSize) - int2(1);
+        for (int dy = -1; dy <= 1; ++dy)
+        {
+            for (int dx = -1; dx <= 1; ++dx)
+            {
+                uint2 np = uint2(clamp(int2(gid) + int2(dx, dy), int2(0), sMax));
+                float3 c = inColor.read(np).rgb;
+                nMin = min(nMin, c);
+                nMax = max(nMax, c);
+            }
+        }
+    }
+
     float alpha = svgf.alpha;
 
     if (valid)
     {
         uint2 pp = uint2(prevPx);
         float4 history = inHistory.read(pp);
+
+        // Clamp history to the current-frame neighbourhood before blending.
+        // This directly attacks the root cause of smudgy spot-light boundaries:
+        // stale lit/dark values can no longer ghost across the shadow edge.
+        history = float4(clamp(history.rgb, nMin, nMax), history.a);
 
         // Exponential moving average.
         float3 accumulated = mix(history.rgb, color.rgb, alpha);
