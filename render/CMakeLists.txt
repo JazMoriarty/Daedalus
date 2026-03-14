@@ -13,6 +13,7 @@ target_compile_features(DaedalusRender PUBLIC cxx_std_23)
 target_sources(DaedalusRender PRIVATE
     src/render_graph/render_graph.cpp
     src/renderer/frame_renderer.cpp
+    src/renderer/rt_scene_manager.cpp
     src/loader/asset_loader.cpp
 )
 

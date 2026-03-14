@@ -24,9 +24,11 @@
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_metal.h>
 
+#include <span>
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <vector>
 
 namespace daedalus::rhi
 {
@@ -365,6 +367,36 @@ private:
     bool                 m_completed;
 };
 
+// ─── MetalAccelerationStructure ─────────────────────────────────────────────
+
+class MetalAccelerationStructure final : public IAccelerationStructure
+{
+public:
+    explicit MetalAccelerationStructure(id<MTLAccelerationStructure> as)
+        : m_accelStruct(as) {}
+
+    ~MetalAccelerationStructure() override = default;
+
+    [[nodiscard]] void* nativeHandle() const noexcept override
+    {
+        return (__bridge void*)m_accelStruct;
+    }
+
+    [[nodiscard]] id<MTLAccelerationStructure> mtlAccelStruct() const noexcept
+    {
+        return m_accelStruct;
+    }
+
+    /// Swap the underlying Metal AS handle (used by rebuildAccelStruct).
+    void replaceNative(id<MTLAccelerationStructure> as) noexcept
+    {
+        m_accelStruct = as;
+    }
+
+private:
+    id<MTLAccelerationStructure> m_accelStruct;
+};
+
 // ─── MetalComputePassEncoder ──────────────────────────────────────────────────────────
 
 class MetalComputePassEncoder final : public IComputePassEncoder
@@ -395,6 +427,24 @@ public:
     {
         [m_encoder setTexture:static_cast<MetalTexture*>(texture)->mtlTexture()
                       atIndex:index];
+    }
+
+    void setTextures(std::span<ITexture* const> textures, u32 baseIndex) override
+    {
+        const NSUInteger count = static_cast<NSUInteger>(textures.size());
+        if (count == 0) return;
+
+        // Build a temporary C array of id<MTLTexture> for setTextures:withRange:.
+        std::vector<id<MTLTexture>> mtlTextures(count);
+        for (NSUInteger i = 0; i < count; ++i)
+        {
+            mtlTextures[i] = textures[i]
+                ? static_cast<MetalTexture*>(textures[i])->mtlTexture()
+                : nil;
+        }
+
+        [m_encoder setTextures:mtlTextures.data()
+                     withRange:NSMakeRange(baseIndex, count)];
     }
 
     void setSampler(ISampler* sampler, u32 index) override
@@ -438,6 +488,56 @@ public:
     void end() override
     {
         [m_encoder endEncoding];
+    }
+
+    // ─── Acceleration structures ────────────────────────────────────────────
+
+    void setAccelerationStructure(IAccelerationStructure* accel, u32 index) override
+    {
+        if (accel)
+        {
+            auto* ma = static_cast<MetalAccelerationStructure*>(accel);
+            [m_encoder setAccelerationStructure:ma->mtlAccelStruct()
+                                  atBufferIndex:index];
+        }
+    }
+
+    // ─── Resource residency ──────────────────────────────────────────────────
+
+    void useResource(IBuffer* buffer, ResourceUsage usage) override
+    {
+        if (!buffer) return;
+        auto* mb = static_cast<MetalBuffer*>(buffer);
+        MTLResourceUsage mtlUsage = 0;
+        if (static_cast<u32>(usage) & static_cast<u32>(ResourceUsage::Read))
+            mtlUsage |= MTLResourceUsageRead;
+        if (static_cast<u32>(usage) & static_cast<u32>(ResourceUsage::Write))
+            mtlUsage |= MTLResourceUsageWrite;
+        [m_encoder useResource:mb->mtlBuffer() usage:mtlUsage];
+    }
+
+    void useResource(ITexture* texture, ResourceUsage usage) override
+    {
+        if (!texture) return;
+        auto* mt = static_cast<MetalTexture*>(texture);
+        MTLResourceUsage mtlUsage = 0;
+        if (static_cast<u32>(usage) & static_cast<u32>(ResourceUsage::Read))
+            mtlUsage |= MTLResourceUsageRead;
+        if (static_cast<u32>(usage) & static_cast<u32>(ResourceUsage::Write))
+            mtlUsage |= MTLResourceUsageWrite;
+        [m_encoder useResource:mt->mtlTexture() usage:mtlUsage];
+    }
+
+    void useResource(IAccelerationStructure* accel, ResourceUsage usage) override
+    {
+        if (!accel) return;
+        auto* ma = static_cast<MetalAccelerationStructure*>(accel);
+        MTLResourceUsage mtlUsage = 0;
+        if (static_cast<u32>(usage) & static_cast<u32>(ResourceUsage::Read))
+            mtlUsage |= MTLResourceUsageRead;
+        if (static_cast<u32>(usage) & static_cast<u32>(ResourceUsage::Write))
+            mtlUsage |= MTLResourceUsageWrite;
+        [m_encoder useResource:ma->mtlAccelStruct() usage:mtlUsage];
     }
 
 private:
@@ -766,6 +866,11 @@ public:
     void commit() override
     {
         [m_cmdBuf commit];
+    }
+
+    void signalOnCompletion(IFence* fence) override
+    {
+        static_cast<MetalFence*>(fence)->attachCommandBuffer(m_cmdBuf);
     }
 
     void pushDebugGroup(std::string_view label) override
@@ -1206,10 +1311,227 @@ public:
         return std::make_unique<MetalOffscreenSwapchain>(m_device, width, height);
     }
 
+    // ─── Acceleration structures ────────────────────────────────────────────
+
+    [[nodiscard]] std::unique_ptr<IAccelerationStructure>
+    createPrimitiveAccelStruct(std::span<const AccelStructGeometryDesc> geometries) override
+    {
+        if (![m_device supportsRaytracing] || geometries.empty()) return nullptr;
+
+        NSMutableArray<MTLAccelerationStructureTriangleGeometryDescriptor*>* geoArray =
+            [NSMutableArray arrayWithCapacity:geometries.size()];
+
+        for (const auto& geo : geometries)
+        {
+            auto* td = [[MTLAccelerationStructureTriangleGeometryDescriptor alloc] init];
+            td.vertexBuffer  = static_cast<MetalBuffer*>(geo.vertexBuffer)->mtlBuffer();
+            td.vertexBufferOffset = 0;
+            td.vertexStride  = geo.vertexStride;
+            td.vertexFormat  = MTLAttributeFormatFloat3;
+            if (geo.indexBuffer)
+            {
+                td.indexBuffer = static_cast<MetalBuffer*>(geo.indexBuffer)->mtlBuffer();
+                td.indexBufferOffset = 0;
+                td.indexType   = MTLIndexTypeUInt32;
+                td.triangleCount = geo.indexCount / 3;
+            }
+            else
+            {
+                td.triangleCount = geo.vertexCount / 3;
+            }
+            [geoArray addObject:td];
+        }
+
+        auto* desc = [MTLPrimitiveAccelerationStructureDescriptor descriptor];
+        desc.geometryDescriptors = geoArray;
+        return buildAccelStructSync(desc);
+    }
+
+    [[nodiscard]] std::unique_ptr<IAccelerationStructure>
+    createInstanceAccelStruct(std::span<const AccelStructInstanceDesc> instances) override
+    {
+        if (![m_device supportsRaytracing] || instances.empty()) return nullptr;
+        return buildTLASSync(instances);
+    }
+
+    void rebuildAccelStruct(
+        IAccelerationStructure& accel,
+        std::span<const AccelStructGeometryDesc> geometries,
+        std::span<const AccelStructInstanceDesc> instances,
+        AccelStructBuildMode mode) override
+    {
+        if (![m_device supportsRaytracing]) return;
+        auto& ma = static_cast<MetalAccelerationStructure&>(accel);
+
+        if (!instances.empty())
+        {
+            // TLAS rebuild — always full rebuild for correctness.
+            auto fresh = buildTLASSync(instances);
+            if (fresh)
+                ma.replaceNative(static_cast<MetalAccelerationStructure*>(fresh.get())->mtlAccelStruct());
+        }
+        else if (!geometries.empty())
+        {
+            // BLAS rebuild.
+            NSMutableArray<MTLAccelerationStructureTriangleGeometryDescriptor*>* geoArray =
+                [NSMutableArray arrayWithCapacity:geometries.size()];
+            for (const auto& geo : geometries)
+            {
+                auto* td = [[MTLAccelerationStructureTriangleGeometryDescriptor alloc] init];
+                td.vertexBuffer  = static_cast<MetalBuffer*>(geo.vertexBuffer)->mtlBuffer();
+                td.vertexBufferOffset = 0;
+                td.vertexStride  = geo.vertexStride;
+                td.vertexFormat  = MTLAttributeFormatFloat3;
+                if (geo.indexBuffer)
+                {
+                    td.indexBuffer = static_cast<MetalBuffer*>(geo.indexBuffer)->mtlBuffer();
+                    td.indexBufferOffset = 0;
+                    td.indexType   = MTLIndexTypeUInt32;
+                    td.triangleCount = geo.indexCount / 3;
+                }
+                else
+                {
+                    td.triangleCount = geo.vertexCount / 3;
+                }
+                [geoArray addObject:td];
+            }
+            auto* desc = [MTLPrimitiveAccelerationStructureDescriptor descriptor];
+            desc.geometryDescriptors = geoArray;
+
+            MTLAccelerationStructureSizes sizes =
+                [m_device accelerationStructureSizesWithDescriptor:desc];
+
+            if (mode == AccelStructBuildMode::Refit)
+            {
+                id<MTLBuffer> scratch = [m_device newBufferWithLength:sizes.refitScratchBufferSize
+                                                              options:MTLResourceStorageModePrivate];
+                id<MTLCommandBuffer> cmdbuf = [asBuildQueue() commandBuffer];
+                id<MTLAccelerationStructureCommandEncoder> enc =
+                    [cmdbuf accelerationStructureCommandEncoder];
+                [enc refitAccelerationStructure:ma.mtlAccelStruct()
+                                     descriptor:desc
+                                    destination:ma.mtlAccelStruct()
+                                  scratchBuffer:scratch
+                            scratchBufferOffset:0];
+                [enc endEncoding];
+                [cmdbuf commit];
+                [cmdbuf waitUntilCompleted];
+            }
+            else
+            {
+                auto fresh = buildAccelStructSync(desc);
+                if (fresh)
+                    ma.replaceNative(
+                        static_cast<MetalAccelerationStructure*>(fresh.get())->mtlAccelStruct());
+            }
+        }
+    }
+
+    [[nodiscard]] bool supportsRayTracing() const noexcept override
+    {
+        return [m_device supportsRaytracing];
+    }
+
 private:
+    /// Lazy-init command queue for synchronous AS builds.
+    id<MTLCommandQueue> asBuildQueue()
+    {
+        if (!m_asBuildQueue)
+            m_asBuildQueue = [m_device newCommandQueue];
+        return m_asBuildQueue;
+    }
+
+    /// Synchronously build an acceleration structure from a descriptor.
+    std::unique_ptr<IAccelerationStructure> buildAccelStructSync(
+        MTLAccelerationStructureDescriptor* desc)
+    {
+        MTLAccelerationStructureSizes sizes =
+            [m_device accelerationStructureSizesWithDescriptor:desc];
+
+        id<MTLAccelerationStructure> as =
+            [m_device newAccelerationStructureWithSize:sizes.accelerationStructureSize];
+        DAEDALUS_ASSERT(as != nil, "buildAccelStructSync: AS allocation failed");
+
+        id<MTLBuffer> scratch =
+            [m_device newBufferWithLength:sizes.buildScratchBufferSize
+                                  options:MTLResourceStorageModePrivate];
+        DAEDALUS_ASSERT(scratch != nil, "buildAccelStructSync: scratch allocation failed");
+
+        id<MTLCommandBuffer> cmdbuf = [asBuildQueue() commandBuffer];
+        id<MTLAccelerationStructureCommandEncoder> enc =
+            [cmdbuf accelerationStructureCommandEncoder];
+        [enc buildAccelerationStructure:as
+                             descriptor:desc
+                          scratchBuffer:scratch
+                    scratchBufferOffset:0];
+        [enc endEncoding];
+        [cmdbuf commit];
+        [cmdbuf waitUntilCompleted];
+
+        return std::make_unique<MetalAccelerationStructure>(as);
+    }
+
+    /// Build a TLAS from instance descriptors (synchronous).
+    std::unique_ptr<IAccelerationStructure> buildTLASSync(
+        std::span<const AccelStructInstanceDesc> instances)
+    {
+        const NSUInteger count = instances.size();
+        const NSUInteger bufSize = count * sizeof(MTLAccelerationStructureInstanceDescriptor);
+        id<MTLBuffer> instanceBuf =
+            [m_device newBufferWithLength:bufSize options:MTLResourceStorageModeShared];
+        DAEDALUS_ASSERT(instanceBuf != nil, "buildTLASSync: instance buffer alloc failed");
+
+        auto* descs = static_cast<MTLAccelerationStructureInstanceDescriptor*>(
+            instanceBuf.contents);
+
+        // Collect unique BLAS references for instancedAccelerationStructures array.
+        NSMutableArray<id<MTLAccelerationStructure>>* blasArray = [NSMutableArray array];
+        std::unordered_map<void*, uint32_t> blasIndexMap;
+
+        for (const auto& inst : instances)
+        {
+            auto* ma = static_cast<MetalAccelerationStructure*>(inst.blas);
+            void* key = (__bridge void*)ma->mtlAccelStruct();
+            if (blasIndexMap.find(key) == blasIndexMap.end())
+            {
+                blasIndexMap[key] = static_cast<uint32_t>([blasArray count]);
+                [blasArray addObject:ma->mtlAccelStruct()];
+            }
+        }
+
+        for (NSUInteger i = 0; i < count; ++i)
+        {
+            const auto& inst = instances[i];
+            auto& d = descs[i];
+            std::memset(&d, 0, sizeof(d));
+
+            auto* ma = static_cast<MetalAccelerationStructure*>(inst.blas);
+            void* key = (__bridge void*)ma->mtlAccelStruct();
+            d.accelerationStructureIndex = blasIndexMap[key];
+            d.mask = inst.mask;
+            d.intersectionFunctionTableOffset = 0;
+
+            // Column-major 4×4 → Metal MTLPackedFloat4x3 (4 columns of float3).
+            // Drop the w component from each column.
+            const float* m = inst.transform;
+            d.transformationMatrix.columns[0] = MTLPackedFloat3{m[0],  m[1],  m[2]};
+            d.transformationMatrix.columns[1] = MTLPackedFloat3{m[4],  m[5],  m[6]};
+            d.transformationMatrix.columns[2] = MTLPackedFloat3{m[8],  m[9],  m[10]};
+            d.transformationMatrix.columns[3] = MTLPackedFloat3{m[12], m[13], m[14]};
+        }
+
+        auto* desc = [MTLInstanceAccelerationStructureDescriptor descriptor];
+        desc.instanceDescriptorBuffer        = instanceBuf;
+        desc.instanceCount                   = count;
+        desc.instancedAccelerationStructures = blasArray;
+
+        return buildAccelStructSync(desc);
+    }
+
     id<MTLDevice>                                   m_device;
     std::string                                     m_deviceName;
     std::unordered_map<std::string, id<MTLLibrary>> m_libraryCache;
+    id<MTLCommandQueue>                             m_asBuildQueue = nil;
 };
 
 // ─── Factory ─────────────────────────────────────────────────────────────────

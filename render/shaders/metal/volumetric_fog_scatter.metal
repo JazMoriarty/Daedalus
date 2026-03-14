@@ -1,5 +1,5 @@
 // volumetric_fog_scatter.metal
-// Pass 3c — Froxel light scatter.
+// Pass 3c — Froxel light scatter with shadow occlusion.
 //
 // One compute thread per froxel (160 × 90 × 64 = ~921k threads).
 // For each froxel the kernel reconstructs its world-space centre, then
@@ -7,14 +7,21 @@
 // for every light source in the scene.  The accumulated in-scatter radiance
 // plus the uniform extinction coefficient are written to the output 3D texture.
 //
+// Shadow occlusion:
+//   The sun (directional light) and spot light [0] (the shadow caster) are
+//   tested against the shadow depth map via frame.sunViewProj.  All other
+//   lights contribute without shadow testing (no shadow maps available).
+//
 // Inputs / outputs:
 //   texture(0) : froxelScatter  RGBA16Float 3D (write) — (in-scatter.rgb, extinction.a)
+//   texture(1) : shadowMap      Depth32Float 2D (sample) — shadow depth from shadow caster
 //   buffer(0)  : FrameConstants
 //   buffer(1)  : VolumetricFogConstants
 //   buffer(2)  : uint lightCount
 //   buffer(3)  : PointLightGPU[]
 //   buffer(4)  : uint spotCount
 //   buffer(5)  : SpotLightGPU[]
+//   sampler(0) : linear clamp (shadow map sampling)
 
 #include "common.h"
 
@@ -42,16 +49,42 @@ static float3 froxel_to_world(uint3              froxelId,
     return reconstruct_world_pos(ndcZ, uv, frame.invViewProj);
 }
 
+// ─── Shadow visibility ───────────────────────────────────────────────────────
+// Projects a world-space point through frame.sunViewProj (the shadow caster's
+// view-projection) and compares against the shadow depth map.  Returns 1.0 if
+// the point is lit, 0.0 if occluded.
+
+static float shadow_visibility(float3                   worldPos,
+                               constant FrameConstants& frame,
+                               depth2d<float>           shadowMap,
+                               sampler                  shadowSamp)
+{
+    float4 lightClip = frame.sunViewProj * float4(worldPos, 1.0f);
+    float3 lightNDC  = lightClip.xyz / lightClip.w;
+
+    // Map NDC xy [-1,1] → UV [0,1].  Metal NDC: x right, y up; UV: x right, y down.
+    float2 shadowUV = lightNDC.xy * float2(0.5f, -0.5f) + 0.5f;
+
+    // Points outside the shadow map frustum are considered lit (no data).
+    if (any(shadowUV < 0.0f) || any(shadowUV > 1.0f)) return 1.0f;
+
+    float shadowDepth = shadowMap.sample(shadowSamp, shadowUV);
+    float bias        = 0.005f;
+    return (lightNDC.z - bias <= shadowDepth) ? 1.0f : 0.0f;
+}
+
 // ─── Kernel ──────────────────────────────────────────────────────────────────
 
 kernel void fog_scatter(
     texture3d<float, access::write>   froxelScatter  [[texture(0)]],
+    depth2d<float>                    shadowMap      [[texture(1)]],
     constant FrameConstants&          frame          [[buffer(0)]],
     constant VolumetricFogConstants&  fog            [[buffer(1)]],
     constant uint&                    lightCount     [[buffer(2)]],
     constant PointLightGPU*           lights         [[buffer(3)]],
     constant uint&                    spotCount      [[buffer(4)]],
     constant SpotLightGPU*            spotLights     [[buffer(5)]],
+    sampler                           shadowSamp     [[sampler(0)]],
     uint3                             gid            [[thread_position_in_grid]])
 {
     if (gid.x >= FROXEL_W || gid.y >= FROXEL_H || gid.z >= FROXEL_D) return;
@@ -70,7 +103,22 @@ kernel void fog_scatter(
     // Constant ambient radiance, attenuated by the scattering albedo.
     float3 inScatter = fog.ambientFog.xyz * fog.scattering;
 
+    // Shadow visibility for this froxel (shared by sun and spot[0]).
+    float visibility = shadow_visibility(worldPos, frame, shadowMap, shadowSamp);
+
+    // ── Sun (directional light) ──────────────────────────────────────────────
+    // Evaluate the sun's contribution to in-scatter, gated by the shadow map.
+    {
+        float3 sunDir   = normalize(frame.sunDirection.xyz);
+        float3 sunColor = frame.sunColor.xyz * frame.sunColor.w;
+        float  cosTheta = dot(viewDir, sunDir);
+        float  phase    = hg_phase(cosTheta, fog.anisotropy);
+
+        inScatter += sunColor * fog.scattering * phase * visibility;
+    }
+
     // ── Point lights ─────────────────────────────────────────────────────────
+    // No shadow maps available for point lights; unshadowed contribution.
     for (uint i = 0; i < lightCount; ++i)
     {
         float3 lPos  = lights[i].positionRadius.xyz;
@@ -90,7 +138,9 @@ kernel void fog_scatter(
         inScatter += lCol * fog.scattering * phase * atten;
     }
 
-    // ── Spot lights ───────────────────────────────────────────────────────────────────────
+    // ── Spot lights ──────────────────────────────────────────────────────────
+    // Spot[0] is the shadow caster — apply shadow visibility.
+    // Remaining spots contribute without shadow testing.
     for (uint si = 0; si < spotCount; ++si)
     {
         const SpotLightGPU spot = spotLights[si];
@@ -111,8 +161,9 @@ kernel void fog_scatter(
                                       spot.innerCosAndPad.x,
                                       dot(-L, spotDir));
 
-        float3 lCol = spot.colorIntensity.xyz * spot.colorIntensity.w;
-        inScatter += lCol * fog.scattering * phase * atten * coneAtten;
+        float3 lCol      = spot.colorIntensity.xyz * spot.colorIntensity.w;
+        float  spotVis   = (si == 0) ? visibility : 1.0f;
+        inScatter += lCol * fog.scattering * phase * atten * coneAtten * spotVis;
     }
 
     // Write (in-scatter.rgb, extinction.a) to the froxel grid.

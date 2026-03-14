@@ -1,4 +1,4 @@
-# Daedalus Engine — Design Specification v0.1
+# Daedalus Engine — Design Specification v0.2
 
 ## Project Vision
 
@@ -27,9 +27,9 @@ Build 2.0 capabilities inform what Daedalus must match and exceed. Every Build 2
 
 **Build 2.0 had:** sector-over-sector, dynamic CPU shadows, 32-bit color, voxel sprites, multi-user editing, EVALDRAW scripting, skyboxes, no sector limits, 6DOF camera.
 
-**Build 2.0 lacked:** GPU rendering, transparency, PBR materials, normal/parallax mapping, post-processing, cross-platform support, modern scripting, physics, hot-reload, voxel character pipeline.
+**Build 2.0 lacked:** GPU rendering, transparency, PBR materials, normal/parallax mapping, post-processing, cross-platform support, modern scripting, physics, hot-reload, voxel character pipeline, ray tracing.
 
-**Daedalus resolves all of the above.**
+**Daedalus resolves all of the above** — including a toggleable GPU path-tracing render mode with SVGF denoising.
 
 ---
 
@@ -130,6 +130,7 @@ A clean, modern abstraction over Metal (macOS) and Vulkan (Windows). All higher-
 - `IShader` — a compiled shader module
 - `IPipeline` — a fully compiled render or compute pipeline state object
 - `IBindGroup` — bound resources for a shader stage (maps to Metal argument buffers and Vulkan descriptor sets)
+- `IAccelerationStructure` — a GPU-built bounding volume hierarchy for ray tracing (maps to `MTLAccelerationStructure` on Metal, `VkAccelerationStructureKHR` on Vulkan)
 - `IFence` / `ISemaphore` — CPU/GPU and GPU/GPU synchronisation primitives
 
 Shaders are authored in a single higher-level language and compiled offline by the asset pipeline to MSL (Metal) and SPIR-V (Vulkan). No shader compilation occurs at runtime.
@@ -147,6 +148,15 @@ A DAG-based frame graph built fresh each frame. Each pass declares its input tex
 No manual barrier management exists anywhere above this layer.
 
 ### Layer 3 — Frame Pipeline
+
+Daedalus supports two render modes, selectable at runtime via `SceneView::renderMode`:
+
+- **Rasterized** (default) — the deferred PBR pipeline described below.
+- **RayTraced** — a GPU path-tracing pipeline that replaces the rasterised passes (shadow through skybox) with a single compute dispatch, described in **Render Mode: Ray Traced** below.
+
+Both modes produce the same `RGBA16Float` HDR output texture. The post-processing stack (TAA through FXAA) is shared and runs identically regardless of which mode produced the HDR input.
+
+#### Render Mode: Rasterized
 
 The complete sequence of render graph passes executed every frame, in order:
 
@@ -192,7 +202,7 @@ All shadow maps are packed into a single shadow atlas texture for GPU cache effi
 
 Lights without shadow casting enabled skip this pass entirely.
 
-**Ray Tracing integration point:** Ray-traced shadows replacing this pass are a named future quality tier. When enabled, this pass is substituted in the render graph with no architectural changes required elsewhere.
+In Rasterized mode, ray-traced shadows are not used. In RayTraced mode, shadow rays are cast directly to all lights — shadow maps are not generated at all. See **Render Mode: Ray Traced** for details.
 
 #### Pass 7 — SSAO Pass
 
@@ -282,7 +292,7 @@ Each step is a render graph node reading the previous node's HDR output texture.
 | Pass | Effect | Notes |
 |---|---|---|
 | 13 | TAA | Halton jitter, motion vector reproject, neighbourhood clamp, CAS sharpening |
-| 14 | SSR | Screen-space ray-march, IBL fills screen-edge gaps, disableable per project. **Ray tracing integration point** for future RT reflections. |
+|| 14 | SSR | Screen-space ray-march, IBL fills screen-edge gaps, disableable per project. In RayTraced mode, specular reflections are computed by the path tracer and SSR is automatically disabled. |
 | 15 | Bloom | Dual-filter downsample/upsample, luminance threshold |
 | 16 | Depth of Field | Bokeh CoC, near/far planes separated |
 | 17 | Motion Blur | Per-object + camera rotation, motion vector driven |
@@ -310,14 +320,75 @@ Final image submitted to the RHI swapchain for OS presentation.
 
 Materials are data assets defining: albedo map, normal map, roughness map, metalness map, emissive map, and scalar override values. Materials are compiled to GPU-resident bind groups by the asset pipeline. No fixed-function material properties exist.
 
+#### Render Mode: Ray Traced
+
+When `SceneView::renderMode == RenderMode::RayTraced`, the entire rasterised pass sequence (shadow maps → depth pre-pass → G-buffer → decals → SSAO → lighting → skybox) is replaced by a single GPU path-tracing compute dispatch. The transparent, particle, and volumetric fog passes continue to run identically (they read the depth buffer produced by the path tracer's primary hits). The post-processing stack is completely shared.
+
+**Hardware requirement:** Apple Silicon (M1+) on macOS. The `IRenderDevice` implementation queries the device for ray tracing support at initialisation. If unavailable, `RenderMode::RayTraced` is rejected and falls back to `RenderMode::Rasterized`.
+
+**RHI extensions for ray tracing:**
+
+- `IAccelerationStructure` — opaque handle to a GPU BVH. Two flavours: **primitive** (BLAS — built from vertex/index buffers for a single mesh) and **instance** (TLAS — built from BLAS instances with per-instance transforms).
+- `IRenderDevice::createPrimitiveAccelStruct()` — builds a BLAS from geometry descriptors.
+- `IRenderDevice::createInstanceAccelStruct()` — builds a TLAS from BLAS instance descriptors.
+- `IRenderDevice::rebuildAccelStruct()` — refits or fully rebuilds an existing acceleration structure.
+- `IComputePassEncoder::setAccelerationStructure()` — binds a TLAS at a buffer index for intersection queries in compute shaders.
+
+**RT Scene Manager (`RTSceneManager`):**
+
+A dedicated class owned by `FrameRenderer`, lazily allocated on first use. Responsibilities:
+
+- Builds one BLAS per unique vertex/index buffer pair (deduplicated by pointer). BLAS is rebuilt only when geometry changes.
+- Rebuilds the TLAS every frame from all visible `MeshDraw` instances (opaque + transparent), using portal traversal results to limit the instance set.
+- Maintains a flat GPU material table (`RTMaterialGPU[]`) indexed by instance ID — each entry carries albedo texture index, roughness, metalness, emissive texture index, tint, UV offset, and UV scale.
+
+**Path tracing compute kernel (`path_trace_main`):**
+
+One thread per pixel. Per-pixel algorithm:
+
+1. **Primary ray** — generated from camera matrices, jittered by the TAA Halton sequence for temporal accumulation across frames.
+2. **Intersection** — Metal's `intersect<triangle_data, instancing>()` queries the TLAS.
+3. **Material evaluation** — on hit: read `RTMaterialGPU[instanceId]`, sample albedo texture, compute surface normal from triangle barycentrics.
+4. **Direct lighting** — for each light (sun, point, spot): cast a shadow ray with `accept_any` flag for binary visibility. Evaluate Cook-Torrance BRDF (same as the rasterised lighting pass: Lambertian diffuse, GGX specular, Schlick Fresnel).
+5. **Indirect bounce** — importance-sample a cosine-weighted hemisphere (diffuse) or GGX lobe (specular) and recurse up to `RTParams::maxBounces` (default: 2). Each bounce evaluates direct lighting at the hit point.
+6. **Miss** — sample the procedural sky (identical to the skybox pass).
+7. **Output** — write HDR radiance to `hdrTex` (RGBA16Float). Write primary-hit normal to `gNormalTex` and primary-hit depth to `gDepthTex` as auxiliary outputs for the denoiser and post-processing.
+8. **Motion vectors** — compute screen-space motion from current and previous frame camera matrices at the primary hit point; write to `gMotionTex` for TAA.
+
+RNG is a PCG hash seeded from `(pixelCoord, frameIndex)` — deterministic, no texture lookups required.
+
+**SVGF denoiser:**
+
+Path-traced output at 1 sample per pixel is noisy. A Spatiotemporal Variance-Guided Filter (SVGF) denoises the result before the post-processing stack:
+
+1. **Temporal accumulation** — reprojects the previous frame's denoised output using motion vectors. Computes per-pixel luminance variance.
+2. **Spatial variance estimation** — 5×5 bilateral filter guided by depth and normal from the primary hit auxiliary outputs.
+3. **À-trous wavelet filter** — 3–5 iterations at increasing step sizes, guided by depth and normal. Produces a clean, temporally stable image.
+
+The denoiser uses the same guide signals (normal, depth, motion vectors) as SSAO and TAA in the rasterised path. Its persistent textures (history ping-pong, moments buffer) follow the same ownership pattern as `m_taaHistory`.
+
+**RT-specific `SceneView` parameters:**
+
+```
+struct RTParams
+{
+    u32  maxBounces      = 2;     // GI bounce count (1 = direct + 1 indirect).
+    u32  samplesPerPixel = 1;     // Rays per pixel per frame (accumulation via TAA).
+    bool denoise         = true;  // Enable SVGF temporal denoiser.
+};
+```
+
+RT resources (PSOs, SVGF history textures, material table buffer, acceleration structures) are lazily initialised on the first frame that uses `RenderMode::RayTraced`. No memory or GPU cost is incurred when the user never enables RT mode.
+
 ### Performance Architecture
 
-- Portal culling is the primary scene culling mechanism — no GPU overhead.
+- Portal culling is the primary scene culling mechanism — no GPU overhead. In RayTraced mode, portal traversal still determines the visible sector set; only visible geometry is submitted to the TLAS.
 - GPU instancing batches all instances of the same mesh and material into single indirect draw calls.
 - Shadow atlas packs all shadow maps into one texture — one bind, better cache utilisation.
 - Tiled/clustered deferred shading scales to hundreds of simultaneous lights.
 - No runtime shader compilation. All permutations compiled offline to MSL and SPIR-V.
 - Async compute allows shadow, SSAO, and particle passes to overlap with other GPU work.
+- Ray tracing leverages the modest triangle counts of the 2.5D sector/wall world model — a geometry sweet spot for BVH traversal.
 
 **No hacks, no shortcuts:** every visual effect is implemented correctly according to its reference algorithm. If an effect cannot be implemented correctly with current resources it is deferred to a later phase — never approximated with a workaround that creates technical debt.
 
@@ -679,6 +750,13 @@ Voxel sprite rendering. 3D mesh sprite rendering. Sprite sheet animation system 
 GPU particle system. Decal system. Volumetric fog.
 Transparency pass. SSR. Portal/mirror rendering.
 Asset pipeline: GLTF-to-voxel offline bake tool (target resolution, per-frame voxel mesh output).
+
+### Phase 1E — Ray Tracing
+
+RHI acceleration structure interface (`IAccelerationStructure`, `IRenderDevice` AS creation methods).
+Metal backend AS implementation. RT scene manager (BLAS/TLAS build, material table).
+Path tracing compute shader. SVGF denoiser (temporal accumulation, spatial variance, à-trous wavelet).
+`RenderMode` enum + `SceneView` integration. FrameRenderer RT branch. Editor/app toggle.
 
 ### Phase 2 — Game Layer
 

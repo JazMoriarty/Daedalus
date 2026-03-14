@@ -8,7 +8,7 @@
 //   texture(3) = ssaoTex           R32Float     SSAO occlusion
 //   texture(4) = hdrOut            RGBA16Float  HDR output (write)
 //   texture(5) = shadowMap         Depth32Float PCF shadow depth
-//   texture(6) = gEmissive         RGBA16Float  emissive.rgb
+//   texture(6) = gEmissive         RGBA16Float  emissive.rgb + outdoor flag (.a)
 //   buffer(0)  = FrameConstants
 //   buffer(1)  = point light count (u32)
 //   buffer(2)  = PointLightGPU[]
@@ -61,11 +61,17 @@ kernel void lighting_main(
     float3 worldPos = reconstruct_world_pos(depth, uv, frame.invViewProj);
     float3 V        = normalize(frame.cameraPos.xyz - worldPos);
 
-    // ─── Directional sun light (no shadow — sun is blocked by walls for interior;
-    //     for outdoor scenes sunIntensity > 0 and no spot light is present) ───
-    float3 sunDir = normalize(frame.sunDirection.xyz);
-    float3 sunCol = frame.sunColor.xyz * frame.sunColor.w;  // colour × intensity
-    float3 radiance = cook_torrance(N, V, sunDir, albedo, roughness, metalness) * sunCol;
+    // ─── Directional sun light ─────────────────────────────────────────────
+    // The outdoor flag (stored in gEmissive.a via the G-buffer) gates sun
+    // contribution so sealed interior sectors are not lit by the directional
+    // sun.  Only sectors with SectorFlags::Outdoors receive sun radiance.
+    float4 emissiveSample = gEmissive.read(gid);
+    float  isOutdoor      = emissiveSample.a;
+    float3 sunDir    = normalize(frame.sunDirection.xyz);
+    float3 sunCol    = frame.sunColor.xyz * frame.sunColor.w;  // colour × intensity
+    float3 radiance  = (isOutdoor > 0.5f)
+                     ? cook_torrance(N, V, sunDir, albedo, roughness, metalness) * sunCol
+                     : float3(0.0f);
 
     // ─── Spot lights ───────────────────────────────────────────────────────────────────────
     // All spots contribute radiance.  Only index 0 (the shadow-caster) runs the
@@ -143,8 +149,8 @@ kernel void lighting_main(
     // ─── Ambient (AO-modulated) ─────────────────────────────────────────────────────
     float3 ambient = frame.ambientColor.xyz * albedo * ao;
 
-    // ─── Emissive (additive, not scaled by lights or AO) ─────────────────────────────
-    float3 emissive = gEmissive.read(gid).rgb;
+    // ─── Emissive (additive, not scaled by lights or AO) ─────────────────────────
+    float3 emissive = emissiveSample.rgb;
 
     float3 hdr = radiance + ambient + emissive;
     hdrOut.write(float4(hdr, 1.0f), gid);

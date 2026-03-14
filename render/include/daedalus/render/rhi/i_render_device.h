@@ -8,6 +8,7 @@
 #include "daedalus/render/rhi/i_shader.h"
 #include "daedalus/render/rhi/i_pipeline.h"
 #include "daedalus/render/rhi/i_bind_group.h"
+#include "daedalus/render/rhi/i_acceleration_structure.h"
 #include "daedalus/render/rhi/i_fence.h"
 
 #include "daedalus/core/types.h"
@@ -90,7 +91,45 @@ public:
     [[nodiscard]] virtual std::unique_ptr<IPipeline>
     createComputePipeline(const ComputePipelineDescriptor& desc) = 0;
 
-    // ─── Synchronisation ──────────────────────────────────────────────────────
+    // ─── Acceleration structures ───────────────────────────────────────────
+
+    /// Build a primitive (bottom-level) acceleration structure from geometry.
+    ///
+    /// @param geometries  One or more geometry entries (vertex/index ranges).
+    /// @return            A BLAS handle, or nullptr if ray tracing is unsupported.
+    [[nodiscard]] virtual std::unique_ptr<IAccelerationStructure>
+    createPrimitiveAccelStruct(std::span<const AccelStructGeometryDesc> geometries) = 0;
+
+    /// Build an instance (top-level) acceleration structure from BLAS instances.
+    ///
+    /// @param instances  One or more instance entries with transforms.
+    /// @return           A TLAS handle, or nullptr if ray tracing is unsupported.
+    [[nodiscard]] virtual std::unique_ptr<IAccelerationStructure>
+    createInstanceAccelStruct(std::span<const AccelStructInstanceDesc> instances) = 0;
+
+    /// Rebuild or refit an existing acceleration structure in place.
+    ///
+    /// For BLAS: pass updated geometry descriptors.
+    /// For TLAS: pass updated instance descriptors.
+    /// The `geometries` span is used for BLAS; `instances` for TLAS.  Pass an
+    /// empty span for the unused parameter.
+    ///
+    /// @param accel      The acceleration structure to rebuild.
+    /// @param geometries Updated geometry descriptors (BLAS) — empty for TLAS.
+    /// @param instances  Updated instance descriptors (TLAS) — empty for BLAS.
+    /// @param mode       Build (full rebuild) or Refit (in-place update).
+    virtual void rebuildAccelStruct(
+        IAccelerationStructure& accel,
+        std::span<const AccelStructGeometryDesc> geometries,
+        std::span<const AccelStructInstanceDesc> instances,
+        AccelStructBuildMode mode) = 0;
+
+    /// Query whether the device supports hardware or software ray tracing.
+    /// When false, createPrimitiveAccelStruct / createInstanceAccelStruct
+    /// return nullptr and RenderMode::RayTraced is unavailable.
+    [[nodiscard]] virtual bool supportsRayTracing() const noexcept = 0;
+
+    // ─── Synchronisation ──────────────────────────────────────────────────
 
     [[nodiscard]] virtual std::unique_ptr<IFence>
     createFence() = 0;

@@ -77,7 +77,7 @@ struct GBufFragOut
 {
     float4 albedoAO       [[color(0)]];  // RGBA8Unorm  — albedo.rgb + baked_AO.a
     float4 normalRoughMet [[color(1)]];  // RGBA8Unorm  — oct_normal.rg + roughness.b + metalness.a
-    float4 emissive       [[color(2)]];  // RGBA16Float — emissive.rgb (a unused)
+    float4 emissive       [[color(2)]];  // RGBA16Float — emissive.rgb + outdoor flag (a)
     float2 motionVectors  [[color(3)]];  // RG16Float   — UV-space motion delta
 };
 
@@ -160,7 +160,9 @@ fragment GBufFragOut gbuffer_frag(
     // Bake per-sector ambient contribution (ambient color × intensity × albedo) into the
     // emissive channel.  The lighting pass reads this additively so each sector gets its
     // own ambient independent of the global frame.ambientColor (which is zeroed on the CPU).
-    out.emissive = float4(emissiveRGB + mat.sectorAmbient.xyz * albedo, 0.0);
+    // Alpha channel carries the outdoor flag (1.0 = outdoor sector, 0.0 = indoor) so the
+    // deferred lighting pass can gate directional sun contribution appropriately.
+    out.emissive = float4(emissiveRGB + mat.sectorAmbient.xyz * albedo, mat.sectorAmbient.w);
 
     // ─── Motion vectors (NDC delta → UV delta) ──────────────────────────────────────
     float2 currNDC   = in.currClip.xy / in.currClip.w;

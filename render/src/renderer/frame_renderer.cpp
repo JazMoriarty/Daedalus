@@ -71,6 +71,7 @@ void FrameRenderer::initialize(IRenderDevice&     device,
 {
     m_width  = width;
     m_height = height;
+    m_shaderLibPath = shaderLibPath;
 
     createPSOs(device, shaderLibPath);
     createPersistentResources(device, width, height);
@@ -760,6 +761,9 @@ void FrameRenderer::createPersistentResources(IRenderDevice& device, u32 w, u32 
 
     // TAA history textures
     recreateTAAHistory(device, w, h);
+
+    // Per-frame CPU/GPU sync fence (single-buffered uniform buffers).
+    m_frameFence = device.createFence();
 }
 
 void FrameRenderer::recreateTAAHistory(IRenderDevice& device, u32 w, u32 h)
@@ -839,6 +843,14 @@ void FrameRenderer::renderFrame(IRenderDevice& device,
     frame.pad0       = 0.0f;
     frame.jitter     = jitterPx;
     frame.pad1       = glm::vec2(0.0f);
+
+    // ── Wait for previous frame's GPU work to finish ─────────────────────────
+    // m_lightBuf, m_spotLightBuf, m_frameConstBuf, and RTSceneManager's
+    // m_materialTableBuf are single-buffered.  The CPU must not overwrite them
+    // while the previous frame's command buffer is still reading them on the GPU.
+    // This is a no-op on the first frame (MetalFence::waitUntilCompleted checks
+    // for a nil command buffer before blocking).
+    m_frameFence->waitUntilCompleted();
 
     // ── Sort and upload spot light buffer ───────────────────────────────────────────────────────────────
     // The nearest spotlight with castsShadows=true goes to index 0 and claims the
@@ -1060,7 +1072,7 @@ void FrameRenderer::renderFrame(IRenderDevice& device,
     });
     const RGTextureId gNormalId = m_graph.createTexture({
         0, 0, TextureFormat::RGBA8Unorm,                          // RT1: oct normal + roughness + metalness
-        TextureUsage::RenderTarget | TextureUsage::ShaderRead,
+        TextureUsage::RenderTarget | TextureUsage::ShaderRead | TextureUsage::ShaderWrite,
         "GNormal"
     });
     const RGTextureId gEmissiveId = m_graph.createTexture({
@@ -1070,7 +1082,7 @@ void FrameRenderer::renderFrame(IRenderDevice& device,
     });
     const RGTextureId gMotionId = m_graph.createTexture({
         0, 0, TextureFormat::RG16Float,                           // RT3: motion vectors
-        TextureUsage::RenderTarget | TextureUsage::ShaderRead,
+        TextureUsage::RenderTarget | TextureUsage::ShaderRead | TextureUsage::ShaderWrite,
         "GMotion"
     });
     const RGTextureId ssaoId = m_graph.createTexture({
@@ -1275,10 +1287,348 @@ void FrameRenderer::renderFrame(IRenderDevice& device,
 
     // Decal draw list (reference valid through m_graph.execute below)
     const std::vector<DecalDraw>& decalDraws = scene.decalDraws;
-
     const Viewport    vp{ 0.0f, 0.0f, static_cast<f32>(swapW), static_cast<f32>(swapH) };
     const ScissorRect sc{ 0, 0, swapW, swapH };
 
+    // ─── Determine render mode ────────────────────────────────────────────────
+    const bool rtMode = (scene.renderMode == RenderMode::RayTraced)
+                     && device.supportsRayTracing();
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // RT PATH — replaces Passes 1-6.6 with path trace + SVGF denoiser.
+    // Writes to hdrTex, gNormalTex, gDepthCopyTex, gMotionTex so the
+    // post-processing chain (TAA, SSR, bloom, tonemap, …) works identically.
+    // ═══════════════════════════════════════════════════════════════════════════
+    if (rtMode)
+    {
+        lazyInitRT(device);
+
+        // Build / update BLAS cache, TLAS, and material table.
+        m_rtSceneManager->update(device, scene.meshDraws, scene.transparentDraws);
+
+        // Only dispatch if there is geometry to trace.
+        if (m_rtSceneManager->tlas())
+        {
+            // ── Build RTConstantsGPU ──────────────────────────────────────────
+            RTConstantsGPU rtConst{};
+            rtConst.maxBounces      = scene.rt.maxBounces;
+            rtConst.samplesPerPixel = scene.rt.samplesPerPixel;
+
+            // Capture RT resources by value for lambda use.
+            IPipeline*              pPathTrace    = m_pathTracePSO.get();
+            IPipeline*              pSvgfTemporal = m_svgfTemporalPSO.get();
+            IPipeline*              pSvgfVariance = m_svgfVariancePSO.get();
+            IPipeline*              pSvgfAtrous   = m_svgfAtrousPSO.get();
+            IPipeline*              pRtRemod      = m_rtRemodPSO.get();
+            IPipeline*              pFogScatterRT = m_fogScatterRTPSO.get();
+            IAccelerationStructure* tlas          = m_rtSceneManager->tlas();
+            IBuffer*                matTable      = m_rtSceneManager->materialTable();
+            IBuffer*                primDataBuf   = m_rtSceneManager->primitiveDataBuffer();
+            ITexture*               rtAlbedoTex   = m_rtAlbedo.get();
+
+            // Unique VB/IB buffers for useResource residency declarations.
+            auto uniqueBufs = m_rtSceneManager->uniqueBuffers();
+            std::vector<IBuffer*> rtUniqueBuffers(uniqueBufs.begin(), uniqueBufs.end());
+
+            // Unique BLAS for useResource residency (Metal requires explicit
+            // residency for all primitive AS referenced through a TLAS).
+            auto uniqueBL = m_rtSceneManager->uniqueBLAS();
+            std::vector<IAccelerationStructure*> rtUniqueBLAS(uniqueBL.begin(), uniqueBL.end());
+
+            // Build the texture array for the path tracer.  Slot 0 in the
+            // texture table is reserved for the default white texture (nullptr
+            // in RTSceneManager); substitute the engine fallback here.
+            // Pad to MAX_RT_TEXTURES (96) so nil slots can never be sampled.
+            constexpr u32 kMaxRTTextures = 96;
+            auto texTable = m_rtSceneManager->textureTable();
+            std::vector<ITexture*> rtTextures(texTable.begin(), texTable.end());
+            if (!rtTextures.empty())
+                rtTextures[0] = fallbackAlbedo;
+            while (rtTextures.size() < kMaxRTTextures)
+                rtTextures.push_back(fallbackAlbedo);
+
+            // SVGF history ping-pong — same pattern as TAA.
+            const u32   rtCurr      = m_frameIndex & 1;
+            const u32   rtPrev      = 1u - rtCurr;
+            ITexture*   svgfCurrTex = m_svgfHistory[rtCurr].get();
+            ITexture*   svgfPrevTex = m_svgfHistory[rtPrev].get();
+            ITexture*   momentsTex  = m_svgfMoments.get();
+
+            // ── Pass RT.1 — Path trace compute ────────────────────────────────
+            {
+                RGComputePassDesc p;
+                p.name    = "PathTrace";
+                p.execute = [=](IComputePassEncoder* enc)
+                {
+                    // Declare resource residency for ray intersection queries.
+                    // BLAS objects must be explicitly declared resident when
+                    // tracing rays through a TLAS (Metal requirement).
+                    for (IAccelerationStructure* blas : rtUniqueBLAS)
+                        enc->useResource(blas, ResourceUsage::Read);
+                    for (IBuffer* buf : rtUniqueBuffers)
+                        enc->useResource(buf, ResourceUsage::Read);
+                    enc->useResource(matTable, ResourceUsage::Read);
+                    if (primDataBuf)
+                        enc->useResource(primDataBuf, ResourceUsage::Read);
+
+                    enc->setComputePipeline(pPathTrace);
+                    enc->setBuffer(frameBuf,  0, 0);             // FrameConstants     buffer(0)
+                    enc->setBytes(&rtConst, sizeof(rtConst), 1); // RTConstants        buffer(1)
+                    enc->setBuffer(matTable, 0, 2);              // RTMaterialGPU[]    buffer(2)
+                    enc->setBuffer(lightBuf, 16, 3);             // PointLightGPU[]    buffer(3)
+                    enc->setBuffer(lightBuf, 0, 4);              // lightCount (u32)   buffer(4)
+                    enc->setAccelerationStructure(tlas, 5);      // TLAS               buffer(5)
+                    if (primDataBuf)
+                        enc->setBuffer(primDataBuf, 0, 6);       // RTPrimitiveData[]  buffer(6)
+                    enc->setBuffer(spotBuf, 16, 7);              // SpotLightGPU[]     buffer(7)
+                    enc->setBuffer(spotBuf, 0, 8);               // spotLightCount     buffer(8)
+                    enc->setTexture(hdrTex,        0);           // outHDR             texture(0)
+                    enc->setTexture(gNormalTex,    1);           // outNormal          texture(1)
+                    enc->setTexture(gDepthCopyTex, 2);           // outDepth           texture(2)
+                    enc->setTexture(gMotionTex,    3);           // outMotion          texture(3)
+                    enc->setTexture(rtAlbedoTex,   4);           // outAlbedo          texture(4)
+                    enc->setTextures(rtTextures,   5);           // textures[]         texture(5+)
+                    enc->setSampler(repeatSamp, 0);              // texSampler         sampler(0)
+                    enc->dispatch(swapW, swapH, 1);
+                };
+                m_graph.addComputePass(std::move(p));
+            }
+
+            // ── SVGF denoiser (optional) ──────────────────────────────────────
+            if (scene.rt.denoise)
+            {
+                SVGFConstantsGPU svgfConst{};
+
+                // Pass RT.2 — SVGF temporal accumulation
+                {
+                    RGComputePassDesc p;
+                    p.name    = "SVGFTemporal";
+                    p.execute = [=](IComputePassEncoder* enc)
+                    {
+                        enc->setComputePipeline(pSvgfTemporal);
+                        enc->setBuffer(frameBuf, 0, 0);                    // FrameConstants  buffer(0)
+                        enc->setBytes(&svgfConst, sizeof(svgfConst), 1);   // SVGFConstants   buffer(1)
+                        enc->setTexture(hdrTex,         0);  // inColor     (current noisy)
+                        enc->setTexture(svgfPrevTex,    1);  // inHistory   (previous denoised)
+                        enc->setTexture(gMotionTex,     2);  // inMotion
+                        enc->setTexture(gDepthCopyTex,  3);  // inDepth     (current)
+                        enc->setTexture(gDepthCopyTex,  4);  // inPrevDepth (approx)
+                        enc->setTexture(gNormalTex,     5);  // inNormal    (current)
+                        enc->setTexture(gNormalTex,     6);  // inPrevNormal (approx)
+                        enc->setTexture(svgfCurrTex,    7);  // outColor
+                        enc->setTexture(momentsTex,     8);  // outMoments
+                        enc->dispatch(swapW, swapH, 1);
+                    };
+                    m_graph.addComputePass(std::move(p));
+                }
+
+                // Pass RT.3 — SVGF variance estimation
+                {
+                    RGComputePassDesc p;
+                    p.name    = "SVGFVariance";
+                    p.execute = [=](IComputePassEncoder* enc)
+                    {
+                        enc->setComputePipeline(pSvgfVariance);
+                        enc->setBuffer(frameBuf, 0, 0);
+                        enc->setBytes(&svgfConst, sizeof(svgfConst), 1);
+                        enc->setTexture(momentsTex,    0);  // inMoments
+                        enc->setTexture(gNormalTex,    1);  // inNormal
+                        enc->setTexture(gDepthCopyTex, 2);  // inDepth
+                        enc->setTexture(ssaoTex,       3);  // outVar (reuse R32Float)
+                        enc->dispatch(swapW, swapH, 1);
+                    };
+                    m_graph.addComputePass(std::move(p));
+                }
+
+                // Pass RT.4 — SVGF à-trous filter (3 iterations)
+                // Ping-pong between svgfCurrTex and hdrTex.  Final output
+                // lands in hdrTex so TAA reads the correct texture.
+                constexpr u32 kAtrousIterations = 3;
+                for (u32 iter = 0; iter < kAtrousIterations; ++iter)
+                {
+                    SVGFConstantsGPU atrousConst = svgfConst;
+                    atrousConst.stepWidth = 1u << iter;
+
+                    // Even iterations: read svgfCurr → write hdr
+                    // Odd iterations:  read hdr → write svgfCurr
+                    ITexture* readTex  = (iter & 1) == 0 ? svgfCurrTex : hdrTex;
+                    ITexture* writeTex = (iter & 1) == 0 ? hdrTex      : svgfCurrTex;
+
+                    RGComputePassDesc p;
+                    p.name    = "SVGFAtrous";
+                    p.execute = [=](IComputePassEncoder* enc)
+                    {
+                        enc->setComputePipeline(pSvgfAtrous);
+                        enc->setBuffer(frameBuf, 0, 0);
+                        enc->setBytes(&atrousConst, sizeof(atrousConst), 1);
+                        enc->setTexture(readTex,       0);  // inColor
+                        enc->setTexture(gNormalTex,    1);  // inNormal
+                        enc->setTexture(gDepthCopyTex, 2);  // inDepth
+                        enc->setTexture(ssaoTex,       3);  // inVar
+                        enc->setTexture(writeTex,      4);  // outColor
+                        enc->dispatch(swapW, swapH, 1);
+                    };
+                    m_graph.addComputePass(std::move(p));
+                }
+                // After 3 iterations (odd count), final output is in hdrTex.
+
+                // ── Save denoised demodulated irradiance as SVGF history ────
+                // The temporal pass on the NEXT frame reads svgfPrevTex, which
+                // is this frame's svgfCurrTex.  We must store the denoised
+                // irradiance BEFORE remodulation so the history stays in the
+                // same demodulated space as the path tracer output.  Without
+                // this, the remodulated (albedo-baked) result would leak into
+                // the history, causing progressive darkening each frame.
+                // Uses the à-trous kernel with stepWidth=0 (identity filter).
+                {
+                    SVGFConstantsGPU histConst{};
+                    histConst.stepWidth  = 0;
+                    histConst.phiColor   = 1e20f;  // disable edge stopping
+                    histConst.phiNormal  = 0.0f;
+                    histConst.phiDepth   = 1e20f;
+
+                    RGComputePassDesc p;
+                    p.name    = "SVGFSaveHistory";
+                    p.execute = [=](IComputePassEncoder* enc)
+                    {
+                        enc->setComputePipeline(pSvgfAtrous);
+                        enc->setBuffer(frameBuf, 0, 0);
+                        enc->setBytes(&histConst, sizeof(histConst), 1);
+                        enc->setTexture(hdrTex,        0);  // inColor  (denoised demodulated)
+                        enc->setTexture(gNormalTex,    1);  // inNormal
+                        enc->setTexture(gDepthCopyTex, 2);  // inDepth
+                        enc->setTexture(ssaoTex,       3);  // inVar
+                        enc->setTexture(svgfCurrTex,   4);  // outColor (save as history)
+                        enc->dispatch(swapW, swapH, 1);
+                    };
+                    m_graph.addComputePass(std::move(p));
+                }
+            }
+            else
+            {
+                // ── No denoiser — copy demodulated irradiance to temp ────────
+                // Needed so RTRemodulate can read svgfCurrTex and write back
+                // to hdrTex without a same-texture read/write conflict.
+                {
+                    SVGFConstantsGPU copyConst{};
+                    copyConst.stepWidth  = 0;
+                    copyConst.phiColor   = 1e20f;
+                    copyConst.phiNormal  = 0.0f;
+                    copyConst.phiDepth   = 1e20f;
+
+                    RGComputePassDesc p;
+                    p.name    = "RTDemodCopy";
+                    p.execute = [=](IComputePassEncoder* enc)
+                    {
+                        enc->setComputePipeline(pSvgfAtrous);
+                        enc->setBuffer(frameBuf, 0, 0);
+                        enc->setBytes(&copyConst, sizeof(copyConst), 1);
+                        enc->setTexture(hdrTex,        0);  // inColor  (raw demodulated)
+                        enc->setTexture(gNormalTex,    1);  // inNormal
+                        enc->setTexture(gDepthCopyTex, 2);  // inDepth
+                        enc->setTexture(ssaoTex,       3);  // inVar
+                        enc->setTexture(svgfCurrTex,   4);  // outColor
+                        enc->dispatch(swapW, swapH, 1);
+                    };
+                    m_graph.addComputePass(std::move(p));
+                }
+            }
+
+            // ── Pass RT.5 — Albedo remodulation ─────────────────────────────
+            // Multiply (denoised or raw) demodulated irradiance by primary-hit
+            // albedo to restore texture colour.  Reads from svgfCurrTex (which
+            // now holds the demodulated irradiance saved BEFORE remodulation)
+            // and writes directly to hdrTex so the post-processing chain reads
+            // the correct fully-lit, fully-textured result.
+            {
+                RGComputePassDesc p;
+                p.name    = "RTRemodulate";
+                p.execute = [=](IComputePassEncoder* enc)
+                {
+                    enc->setComputePipeline(pRtRemod);
+                    enc->setBuffer(frameBuf, 0, 0);         // FrameConstants   buffer(0)
+                    enc->setTexture(svgfCurrTex,   0);      // inIrradiance     texture(0)
+                    enc->setTexture(rtAlbedoTex,   1);      // inAlbedo         texture(1)
+                    enc->setTexture(hdrTex,        2);      // outHDR           texture(2)
+                    enc->dispatch(swapW, swapH, 1);
+                };
+                m_graph.addComputePass(std::move(p));
+            }
+
+            // ── Pass RT.6 — Fog scatter RT (compute)  [only if fog.enabled] ──
+            // Traces shadow rays via the TLAS for every light + sun to produce
+            // shadow-occluded volumetric shafts.
+            if (scene.fog.enabled)
+            {
+                RGComputePassDesc p;
+                p.name    = "FogScatterRT";
+                p.execute = [=](IComputePassEncoder* enc)
+                {
+                    // Declare BLAS + buffer residency for ray intersection.
+                    for (IAccelerationStructure* blas : rtUniqueBLAS)
+                        enc->useResource(blas, ResourceUsage::Read);
+                    for (IBuffer* buf : rtUniqueBuffers)
+                        enc->useResource(buf, ResourceUsage::Read);
+
+                    enc->setComputePipeline(pFogScatterRT);
+                    enc->setTexture(froxelScatterTex, 0);         // froxelScatter (write)      texture(0)
+                    enc->setBuffer (frameBuf,  0,     0);         // FrameConstants             buffer(0)
+                    enc->setBytes  (&fogConst, sizeof(fogConst), 1); // VolumetricFogConstants  buffer(1)
+                    enc->setBuffer (lightBuf,  0,     2);         // lightCount                 buffer(2)
+                    enc->setBuffer (lightBuf, 16,     3);         // PointLightGPU[]            buffer(3)
+                    enc->setBuffer (spotBuf,   0,     4);         // spotCount                  buffer(4)
+                    enc->setBuffer (spotBuf,  16,     5);         // SpotLightGPU[]             buffer(5)
+                    enc->setAccelerationStructure(tlas, 6);       // TLAS                       buffer(6)
+                    enc->dispatch  (160, 90, 64);                 // 3D: one thread per froxel
+                };
+                m_graph.addComputePass(std::move(p));
+            }
+
+            // ── Pass RT.6b — Fog integrate (compute)  [only if fog.enabled] ──
+            if (scene.fog.enabled)
+            {
+                RGComputePassDesc p;
+                p.name    = "FogIntegrate";
+                p.execute = [=](IComputePassEncoder* enc)
+                {
+                    enc->setComputePipeline(pFogIntegrate);
+                    enc->setTexture(froxelScatterTex,   0);           // froxelScatter   (read)
+                    enc->setTexture(froxelIntegrateTex, 1);           // froxelIntegrate (write)
+                    enc->setBytes  (&fogConst, sizeof(fogConst), 0);  // VolumetricFogConstants  buffer(0)
+                    enc->dispatch  (160, 90, 1);                      // 2D: one thread per column
+                };
+                m_graph.addComputePass(std::move(p));
+            }
+
+            // ── Pass RT.6c — Fog composite (compute)  [only if fog.enabled] ──
+            // In-place: reads hdrTex and writes back fogged result.
+            if (scene.fog.enabled)
+            {
+                RGComputePassDesc p;
+                p.name    = "FogComposite";
+                p.execute = [=](IComputePassEncoder* enc)
+                {
+                    enc->setComputePipeline(pFogComposite);
+                    enc->setTexture (hdrTex,             0);           // hdrTex          (read_write)
+                    enc->setTexture (froxelIntegrateTex, 1);           // froxelIntegrate (read/sample)
+                    enc->setTexture (gDepthCopyTex,      2);           // gDepthCopy      (read)
+                    enc->setBuffer  (frameBuf,  0,        0);          // FrameConstants  buffer(0)
+                    enc->setBytes   (&fogConst, sizeof(fogConst), 1);  // VolumetricFogConstants  buffer(1)
+                    enc->setSampler (linSamp,             0);          // sampler(0): linear clamp
+                    enc->dispatch   (swapW, swapH, 1);
+                };
+                m_graph.addComputePass(std::move(p));
+            }
+        }
+    }
+    else
+    {
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // RASTER PATH — original deferred PBR pipeline (Passes 1-6.6)
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    // ─
     // ───────────────────────────────────────────────────────────────────────────────
     // Pass 1 — Shadow depth (depth-only, 2048×2048)
     // ───────────────────────────────────────────────────────────────────────────────
@@ -1358,7 +1708,8 @@ void FrameRenderer::renderFrame(IRenderDevice& device,
                                                      draw.material.tint,
                                                      draw.material.uvOffset,
                                                      draw.material.uvScale,
-                                                     glm::vec4(draw.material.sectorAmbient, 0.0f) };
+                                                     glm::vec4(draw.material.sectorAmbient,
+                                                               draw.material.isOutdoor ? 1.0f : 0.0f) };
                 enc->setFragmentBytes(&matConst, sizeof(MaterialConstantsGPU), 1);
                 // Fragment stage: material textures (fallback if nullptr)
                 enc->setFragmentTexture(
@@ -1498,13 +1849,15 @@ void FrameRenderer::renderFrame(IRenderDevice& device,
         p.execute = [=](IComputePassEncoder* enc)
         {
             enc->setComputePipeline(pFogScatter);
-            enc->setTexture(froxelScatterTex, 0);         // froxelScatter (write)
-            enc->setBuffer (frameBuf,  0,     0);         // FrameConstants   buffer(0)
+            enc->setTexture(froxelScatterTex, 0);         // froxelScatter (write)      texture(0)
+            enc->setTexture(shadowDepthTex,   1);         // shadowMap (depth sample)   texture(1)
+            enc->setBuffer (frameBuf,  0,     0);         // FrameConstants             buffer(0)
             enc->setBytes  (&fogConst, sizeof(fogConst), 1); // VolumetricFogConstants  buffer(1)
-            enc->setBuffer (lightBuf,  0,     2);         // lightCount       buffer(2)
-            enc->setBuffer (lightBuf, 16,     3);         // PointLightGPU[]  buffer(3)
-            enc->setBuffer (spotBuf,   0,     4);         // spotCount        buffer(4)
-            enc->setBuffer (spotBuf,  16,     5);         // SpotLightGPU[]   buffer(5)
+            enc->setBuffer (lightBuf,  0,     2);         // lightCount                 buffer(2)
+            enc->setBuffer (lightBuf, 16,     3);         // PointLightGPU[]            buffer(3)
+            enc->setBuffer (spotBuf,   0,     4);         // spotCount                  buffer(4)
+            enc->setBuffer (spotBuf,  16,     5);         // SpotLightGPU[]             buffer(5)
+            enc->setSampler(linSamp,          0);         // shadow map sampler         sampler(0)
             enc->dispatch  (160, 90, 64);                 // 3D: one thread per froxel
         };
         m_graph.addComputePass(std::move(p));
@@ -1618,7 +1971,8 @@ void FrameRenderer::renderFrame(IRenderDevice& device,
                                                      draw.material.tint,
                                                      draw.material.uvOffset,
                                                      draw.material.uvScale,
-                                                     glm::vec4(draw.material.sectorAmbient, 0.0f) };
+                                                     glm::vec4(draw.material.sectorAmbient,
+                                                               draw.material.isOutdoor ? 1.0f : 0.0f) };
                 enc->setFragmentBytes(&matConst, sizeof(MaterialConstantsGPU), 1);
                 // Fragment stage: spot lights
                 enc->setFragmentBuffer(spotBuf,  0, 3);  // spotCount
@@ -1779,6 +2133,8 @@ void FrameRenderer::renderFrame(IRenderDevice& device,
         };
         m_graph.addComputePass(std::move(p));
     }
+
+    } // end raster path (else-branch of rtMode)
 
     // ──────────────────────────────────────────────────────────────────────────────
     // Pass 7 — TAA
@@ -2111,6 +2467,9 @@ void FrameRenderer::renderFrame(IRenderDevice& device,
     m_graph.execute(*cmdBuf);
     cmdBuf->popDebugGroup();
     cmdBuf->present(swapchain);
+    // Associate the fence with this command buffer BEFORE commit so that
+    // the next frame's waitUntilCompleted() call blocks until the GPU is done.
+    cmdBuf->signalOnCompletion(m_frameFence.get());
     cmdBuf->commit();
 
     // ── Toggle particle alive-list flip for next frame ────────────────────────
@@ -2123,6 +2482,100 @@ void FrameRenderer::renderFrame(IRenderDevice& device,
     }
 
     ++m_frameIndex;
+}
+
+// ─── lazyInitRT ──────────────────────────────────────────────────────────────
+// First-time allocation of RT compute PSOs and persistent SVGF textures.
+// Called on the first frame where RT mode is active.
+
+void FrameRenderer::lazyInitRT(IRenderDevice& device)
+{
+    if (m_rtInitialized) return;
+    m_rtInitialized = true;
+
+    const std::string& lib = m_shaderLibPath;
+    auto loadCS = [&](const char* e)
+    {
+        return device.createShaderFromLibrary(lib, ShaderStage::Compute, e);
+    };
+
+    // Path trace PSO.
+    {
+        auto cs = loadCS("path_trace_main");
+        ComputePipelineDescriptor d;
+        d.computeShader = cs.get();
+        d.debugName     = "PathTrace";
+        m_pathTracePSO  = device.createComputePipeline(d);
+    }
+
+    // SVGF temporal PSO.
+    {
+        auto cs = loadCS("svgf_temporal_main");
+        ComputePipelineDescriptor d;
+        d.computeShader   = cs.get();
+        d.debugName       = "SVGFTemporal";
+        m_svgfTemporalPSO = device.createComputePipeline(d);
+    }
+
+    // SVGF variance PSO.
+    {
+        auto cs = loadCS("svgf_variance_main");
+        ComputePipelineDescriptor d;
+        d.computeShader   = cs.get();
+        d.debugName       = "SVGFVariance";
+        m_svgfVariancePSO = device.createComputePipeline(d);
+    }
+
+    // SVGF à-trous PSO.
+    {
+        auto cs = loadCS("svgf_atrous_main");
+        ComputePipelineDescriptor d;
+        d.computeShader  = cs.get();
+        d.debugName      = "SVGFAtrous";
+        m_svgfAtrousPSO  = device.createComputePipeline(d);
+    }
+
+    // RT remodulate PSO (post-denoiser albedo remodulation).
+    {
+        auto cs = loadCS("rt_remodulate_main");
+        ComputePipelineDescriptor d;
+        d.computeShader = cs.get();
+        d.debugName     = "RTRemodulate";
+        m_rtRemodPSO    = device.createComputePipeline(d);
+    }
+
+    // RT volumetric fog scatter PSO (shadow rays via TLAS).
+    {
+        auto cs = loadCS("fog_scatter_rt");
+        ComputePipelineDescriptor d;
+        d.computeShader    = cs.get();
+        d.debugName        = "FogScatterRT";
+        m_fogScatterRTPSO  = device.createComputePipeline(d);
+    }
+
+    // SVGF persistent textures (same resolution as the main render target).
+    TextureDescriptor texDesc{};
+    texDesc.width  = m_width;
+    texDesc.height = m_height;
+    texDesc.format = TextureFormat::RGBA16Float;
+    texDesc.usage  = TextureUsage::ShaderRead | TextureUsage::ShaderWrite;
+
+    texDesc.debugName  = "SVGFHistory0";
+    m_svgfHistory[0]   = device.createTexture(texDesc);
+    texDesc.debugName  = "SVGFHistory1";
+    m_svgfHistory[1]   = device.createTexture(texDesc);
+
+    texDesc.format     = TextureFormat::RG16Float;
+    texDesc.debugName  = "SVGFMoments";
+    m_svgfMoments      = device.createTexture(texDesc);
+
+    // RT albedo texture for demodulated denoising.
+    texDesc.format     = TextureFormat::RGBA8Unorm;
+    texDesc.debugName  = "RTAlbedo";
+    m_rtAlbedo         = device.createTexture(texDesc);
+
+    // RT scene manager.
+    m_rtSceneManager = std::make_unique<RTSceneManager>();
 }
 
 // ─── renderMirrorPrepass ─────────────────────────────────────────────────────
@@ -2275,7 +2728,8 @@ void FrameRenderer::renderMirrorPrepass(IRenderDevice& device,
                         draw.material.roughness, draw.material.metalness,
                         0.0f, 0.0f,
                         draw.material.tint, draw.material.uvOffset, draw.material.uvScale,
-                        glm::vec4(draw.material.sectorAmbient, 0.0f)
+                        glm::vec4(draw.material.sectorAmbient,
+                                  draw.material.isOutdoor ? 1.0f : 0.0f)
                     };
                     enc->setFragmentBytes(&matConst, sizeof(MaterialConstantsGPU), 1);
                     enc->setFragmentTexture(

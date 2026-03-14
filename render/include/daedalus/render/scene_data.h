@@ -97,7 +97,7 @@ static_assert(sizeof(SpotLightGPU) == 64, "SpotLightGPU size mismatch");
 //   [4–7]  tint         vec4  (rgba multiplier; rgb=albedo tint, a=opacity; default=1,1,1,1)
 //   [8–9]  uvOffset     vec2  (UV origin of the active sprite sheet frame cell; default=0,0)
 //   [10–11] uvScale     vec2  (UV size of one frame cell; default=1,1)
-//   [12–15] sectorAmbient vec4  (xyz = per-sector ambient color × intensity; w unused; default=0)
+//   [12–15] sectorAmbient vec4  (xyz = per-sector ambient color × intensity; w = outdoor flag)
 
 struct alignas(16) MaterialConstantsGPU
 {
@@ -108,7 +108,7 @@ struct alignas(16) MaterialConstantsGPU
     glm::vec4 tint          = glm::vec4(1.0f);  ///< Albedo tint (rgb) + opacity override (a).
     glm::vec2 uvOffset      = glm::vec2(0.0f);  ///< UV origin of the active frame cell.
     glm::vec2 uvScale       = glm::vec2(1.0f);  ///< UV size of one frame cell.
-    glm::vec4 sectorAmbient = glm::vec4(0.0f);  ///< Per-sector ambient color × intensity (xyz); w unused.
+    glm::vec4 sectorAmbient = glm::vec4(0.0f);  ///< Per-sector ambient (xyz); w = 1.0 if outdoor sector.
 };
 static_assert(sizeof(MaterialConstantsGPU) == 64, "MaterialConstantsGPU must be 64 bytes");
 
@@ -367,5 +367,117 @@ struct alignas(16) OptionalFxConstantsGPU
 };
 static_assert(sizeof(OptionalFxConstantsGPU) == 32,
               "OptionalFxConstantsGPU must be 32 bytes");
+
+// ─── RTConstantsGPU ─────────────────────────────────────────────────────────
+// Uploaded once per frame when RT mode is active (path_trace_main compute pass).
+// Matches RTConstants in common.h exactly.
+//
+// Layout (16 bytes):
+//   [0]  maxBounces       u32   GI bounce count
+//   [1]  samplesPerPixel  u32   rays per pixel per frame
+//   [2]  pad0             u32
+//   [3]  pad1             u32
+
+struct alignas(16) RTConstantsGPU
+{
+    u32 maxBounces      = 2;
+    u32 samplesPerPixel = 1;
+    u32 pad0 = 0;
+    u32 pad1 = 0;
+};
+static_assert(sizeof(RTConstantsGPU) == 16, "RTConstantsGPU must be 16 bytes");
+
+// ─── RTPrimitiveDataGPU ─────────────────────────────────────────────────────
+// Per-triangle vertex attributes for RT barycentric interpolation.
+// Indexed by (RTMaterialGPU::primitiveDataOffset + primitive_id).
+// Matches RTPrimitiveData in common.h exactly.
+//
+// Layout (112 bytes):
+//   [0-1]   uv0       f32×2
+//   [2-3]   uv1       f32×2
+//   [4-5]   uv2       f32×2
+//   [6-8]   normal0   f32×3
+//   [9-11]  normal1   f32×3
+//   [12-14] normal2   f32×3
+//   [15-18] tangent0  f32×4
+//   [19-22] tangent1  f32×4
+//   [23-26] tangent2  f32×4
+//   [27]    pad       f32
+
+struct RTPrimitiveDataGPU
+{
+    f32 uv0[2];
+    f32 uv1[2];
+    f32 uv2[2];
+    f32 normal0[3];
+    f32 normal1[3];
+    f32 normal2[3];
+    f32 tangent0[4];
+    f32 tangent1[4];
+    f32 tangent2[4];
+    f32 pad = 0.0f;
+};
+static_assert(sizeof(RTPrimitiveDataGPU) == 112,
+              "RTPrimitiveDataGPU must be 112 bytes");
+
+// ─── RTMaterialGPU ──────────────────────────────────────────────────────────
+// Per-instance material entry in the flat material table read by the RT shader.
+// Indexed by intersection instanceId.  Matches RTMaterialGPU in common.h exactly.
+//
+// Layout (80 bytes):
+//   [0]   albedoTextureIndex    u32
+//   [1]   normalTextureIndex    u32
+//   [2]   emissiveTextureIndex  u32
+//   [3]   roughness             f32
+//   [4]   metalness             f32
+//   [5]   primitiveDataOffset   u32  (base index into the primitive data buffer)
+//   [6-7] pad                   f32×2
+//   [8-11]  tint                vec4
+//   [12-13] uvOffset            vec2
+//   [14-15] uvScale             vec2
+//   [16-19] sectorAmbient       vec4
+
+struct alignas(16) RTMaterialGPU
+{
+    u32       albedoTextureIndex   = 0;
+    u32       normalTextureIndex   = 0;
+    u32       emissiveTextureIndex = 0;
+    f32       roughness            = 0.5f;
+    f32       metalness            = 0.0f;
+    u32       primitiveDataOffset  = 0;  ///< Base index into the RT primitive data buffer.
+    f32       pad1 = 0.0f;
+    f32       pad2 = 0.0f;
+    glm::vec4 tint          = glm::vec4(1.0f);
+    glm::vec2 uvOffset      = glm::vec2(0.0f);
+    glm::vec2 uvScale       = glm::vec2(1.0f);
+    glm::vec4 sectorAmbient = glm::vec4(0.0f);
+};
+static_assert(sizeof(RTMaterialGPU) == 80, "RTMaterialGPU must be 80 bytes");
+
+// ─── SVGFConstantsGPU ───────────────────────────────────────────────────────
+// Uploaded once per frame when SVGF denoiser is active.
+// Matches SVGFConstants in common.h exactly.
+//
+// Layout (32 bytes):
+//   [0]  alpha          f32   temporal blend weight
+//   [1]  momentsAlpha   f32   moments temporal blend weight
+//   [2]  phiColor       f32   colour edge-stopping sigma
+//   [3]  phiNormal      f32   normal edge-stopping sigma
+//   [4]  phiDepth       f32   depth edge-stopping sigma
+//   [5]  stepWidth      u32   à-trous step size (1, 2, 4, …)
+//   [6-7] pad           f32×2
+
+struct alignas(16) SVGFConstantsGPU
+{
+    f32 alpha        = 0.05f;  ///< Temporal blend (lower = more history).
+    f32 momentsAlpha = 0.2f;   ///< Moments temporal blend.
+    f32 phiColor     = 10.0f;  ///< Colour edge-stopping sigma.
+    f32 phiNormal    = 128.0f; ///< Normal edge-stopping sigma.
+    f32 phiDepth     = 1.0f;   ///< Depth edge-stopping sigma.
+    u32 stepWidth    = 1;      ///< à-trous step size.
+    f32 pad0 = 0.0f;
+    f32 pad1 = 0.0f;
+};
+static_assert(sizeof(SVGFConstantsGPU) == 32, "SVGFConstantsGPU must be 32 bytes");
 
 } // namespace daedalus::render
