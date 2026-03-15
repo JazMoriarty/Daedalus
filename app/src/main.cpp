@@ -613,6 +613,7 @@ int main(int argc, char* argv[])
                     desc.halfHeight  = ent.halfExtents.y;  // Capsule: y = halfHeight
                     desc.mass        = ent.mass;
                     desc.isStatic    = !ent.dynamic;
+                    desc.initialRot  = dlRot;
 
                     auto rbResult = dlPhysicsWorld->addRigidBody(entityId, desc, ent.position);
                     if (!rbResult.has_value())

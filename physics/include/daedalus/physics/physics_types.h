@@ -10,6 +10,7 @@
 
 #include <expected>
 #include <glm/glm.hpp>
+#include <glm/gtc/quaternion.hpp>
 
 namespace daedalus::physics
 {
@@ -73,6 +74,9 @@ struct RigidBodyDesc
 
     float          mass        = 1.0f;   ///< kg; ignored for static bodies.
     bool           isStatic    = false;  ///< True → immovable; false → dynamic.
+
+    /// Initial orientation of the body at spawn (identity = no rotation).
+    glm::quat      initialRot  = glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
 };
 
 // ─── RayHit ───────────────────────────────────────────────────────────────────

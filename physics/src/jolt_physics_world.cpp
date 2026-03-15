@@ -265,10 +265,15 @@ JoltPhysicsWorld::addRigidBody(EntityId id, const RigidBodyDesc& desc,
 
     const bool dynamic = !desc.isStatic;
 
+    // Convert GLM quaternion (w,x,y,z constructor) to Jolt quaternion (x,y,z,w).
+    const JPH::Quat initialRot(
+        desc.initialRot.x, desc.initialRot.y,
+        desc.initialRot.z, desc.initialRot.w);
+
     JPH::BodyCreationSettings bcs(
         shape,
         toJPHR(initialPos),
-        JPH::Quat::sIdentity(),
+        initialRot,
         dynamic ? JPH::EMotionType::Dynamic : JPH::EMotionType::Static,
         dynamic ? Layers::MOVING : Layers::NON_MOVING
     );
