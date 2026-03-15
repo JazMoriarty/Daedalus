@@ -28,6 +28,8 @@
 
 #include "imgui.h"
 
+#include <glm/gtc/constants.hpp>
+
 #include <algorithm>
 #include <cstddef>
 #include <cstdio>
@@ -306,29 +308,38 @@ void PropertyInspector::draw(EditMapDocument&      doc,
         ImGui::Spacing();
         ImGui::SeparatorText("UV Mapping");
         {
+            // Offset — DragFloat2 uses the format string per-component, so a
+            // single-label format like "Offset (%.3f, %.3f)" produces UB
+            // (second %f reads garbage).  Use TextDisabled for the row header
+            // and a plain "%.3f" format so both X and Y display correctly.
+            ImGui::TextDisabled("Offset");
             glm::vec2 uvOff = wall.uvOffset;
             ImGui::SetNextItemWidth(-1.0f);
-            ImGui::DragFloat2("##uvoff", &uvOff.x, 0.01f, -100.0f, 100.0f,
-                              "Offset (%.3f, %.3f)");
+            ImGui::DragFloat2("##uvoff", &uvOff.x, 0.01f, -100.0f, 100.0f, "%.3f");
             if (ImGui::IsItemDeactivatedAfterEdit())
                 doc.pushCommand(std::make_unique<CmdSetWallUV>(
                     doc, sid, wi, uvOff, wall.uvScale, wall.uvRotation));
 
+            ImGui::TextDisabled("Scale");
             glm::vec2 uvSc = wall.uvScale;
             ImGui::SetNextItemWidth(-1.0f);
-            ImGui::DragFloat2("##uvsc", &uvSc.x, 0.01f, 0.001f, 100.0f,
-                              "Scale (%.3f, %.3f)");
+            ImGui::DragFloat2("##uvsc", &uvSc.x, 0.01f, 0.001f, 100.0f, "%.3f");
             if (ImGui::IsItemDeactivatedAfterEdit())
                 doc.pushCommand(std::make_unique<CmdSetWallUV>(
                     doc, sid, wi, wall.uvOffset, uvSc, wall.uvRotation));
 
-            float uvRot = wall.uvRotation;
+            // Display rotation in degrees; store internally as radians.
+            constexpr float kRad2Deg = 180.0f / glm::pi<float>();
+            constexpr float kDeg2Rad = glm::pi<float>() / 180.0f;
+            float uvRotDeg = wall.uvRotation * kRad2Deg;
             ImGui::SetNextItemWidth(-1.0f);
-            ImGui::DragFloat("##uvrot", &uvRot, 0.01f, -6.283f, 6.283f,
-                             "Rotation: %.3f rad");
+            ImGui::DragFloat("##uvrot", &uvRotDeg, 0.5f, -360.0f, 360.0f,
+                             "Rotation: %.1f\xc2\xb0",
+                             ImGuiSliderFlags_AlwaysClamp);
             if (ImGui::IsItemDeactivatedAfterEdit())
                 doc.pushCommand(std::make_unique<CmdSetWallUV>(
-                    doc, sid, wi, wall.uvOffset, wall.uvScale, uvRot));
+                    doc, sid, wi, wall.uvOffset, wall.uvScale,
+                    uvRotDeg * kDeg2Rad));
 
             // ── UV action buttons ──────────────────────────────────────────────
             ImGui::Spacing();

@@ -107,13 +107,15 @@ void appendHorizontalSurface(
 // The inward normal points into the sector (computed as the perpendicular that
 // points left relative to the wall direction, which for CCW sectors is inward).
 // uScale, vScale, uOff, vOff: UV parameters.
+// uvRotation: UV rotation in radians (applied around the UV origin).
 void appendWallQuad(
     std::vector<render::StaticMeshVertex>& verts,
     std::vector<u32>&                      indices,
     glm::vec2 p0World, glm::vec2 p1World,
     float yFloor, float yCeil,
     float uScale, float vScale,
-    float uOff,   float vOff) noexcept
+    float uOff,   float vOff,
+    float uvRotation = 0.0f) noexcept
 {
     // Wall direction and length (in XZ plane).
     const glm::vec2 dir2D   = p1World - p0World;
@@ -139,13 +141,21 @@ void appendWallQuad(
     const float v0 = 0.0f   / vScale + vOff;
     const float v1 = height / vScale + vOff;
 
+    // Apply UV rotation around the UV origin (0,0).
+    // When uvRotation == 0, cosR=1 / sinR=0 and the expressions reduce to the
+    // original u/v values unchanged.
+    const float cosR = std::cos(uvRotation);
+    const float sinR = std::sin(uvRotation);
+    auto rotU = [cosR, sinR](float u, float v) { return u * cosR - v * sinR; };
+    auto rotV = [cosR, sinR](float u, float v) { return u * sinR + v * cosR; };
+
     const u32 base = static_cast<u32>(verts.size());
 
     // 4 vertices: bottom-left, bottom-right, top-right, top-left
-    verts.push_back(makeVertex(p0World.x, yFloor, p0World.y, nx,0,nz, u0,v0, tx,0,tz,1));
-    verts.push_back(makeVertex(p1World.x, yFloor, p1World.y, nx,0,nz, u1,v0, tx,0,tz,1));
-    verts.push_back(makeVertex(p1World.x, yCeil,  p1World.y, nx,0,nz, u1,v1, tx,0,tz,1));
-    verts.push_back(makeVertex(p0World.x, yCeil,  p0World.y, nx,0,nz, u0,v1, tx,0,tz,1));
+    verts.push_back(makeVertex(p0World.x, yFloor, p0World.y, nx,0,nz, rotU(u0,v0), rotV(u0,v0), tx,0,tz,1));
+    verts.push_back(makeVertex(p1World.x, yFloor, p1World.y, nx,0,nz, rotU(u1,v0), rotV(u1,v0), tx,0,tz,1));
+    verts.push_back(makeVertex(p1World.x, yCeil,  p1World.y, nx,0,nz, rotU(u1,v1), rotV(u1,v1), tx,0,tz,1));
+    verts.push_back(makeVertex(p0World.x, yCeil,  p0World.y, nx,0,nz, rotU(u0,v1), rotV(u0,v1), tx,0,tz,1));
 
     // Two triangles — winding must be CW in NDC so Metal's viewport Y-flip
     // produces CCW in framebuffer (= front-facing with MTLWindingCounterClockwise).
@@ -212,7 +222,8 @@ std::vector<render::MeshData> tessellateMap(const WorldMapData& map)
                                wall.p0, wallP1,
                                sector.floorHeight, sector.ceilHeight,
                                uScale, vScale,
-                               wall.uvOffset.x, wall.uvOffset.y);
+                               wall.uvOffset.x, wall.uvOffset.y,
+                               wall.uvRotation);
             }
             else
             {
@@ -228,7 +239,8 @@ std::vector<render::MeshData> tessellateMap(const WorldMapData& map)
                                    wall.p0, wallP1,
                                    adj.ceilHeight, sector.ceilHeight,
                                    uScale, vScale,
-                                   wall.uvOffset.x, wall.uvOffset.y);
+                                   wall.uvOffset.x, wall.uvOffset.y,
+                                   wall.uvRotation);
                 }
 
                 // Lower strip: from this_floor to adj_floor (if adj is higher).
@@ -238,7 +250,8 @@ std::vector<render::MeshData> tessellateMap(const WorldMapData& map)
                                    wall.p0, wallP1,
                                    sector.floorHeight, adj.floorHeight,
                                    uScale, vScale,
-                                   wall.uvOffset.x, wall.uvOffset.y);
+                                   wall.uvOffset.x, wall.uvOffset.y,
+                                   wall.uvRotation);
                 }
             }
         }
@@ -320,7 +333,8 @@ std::vector<std::vector<TaggedMeshBatch>> tessellateMapTagged(const WorldMapData
                                wall.p0, wallP1,
                                sector.floorHeight, sector.ceilHeight,
                                uScale, vScale,
-                               wall.uvOffset.x, wall.uvOffset.y);
+                               wall.uvOffset.x, wall.uvOffset.y,
+                               wall.uvRotation);
             }
             else
             {
@@ -336,7 +350,8 @@ std::vector<std::vector<TaggedMeshBatch>> tessellateMapTagged(const WorldMapData
                                    wall.p0, wallP1,
                                    adj.ceilHeight, sector.ceilHeight,
                                    uScale, vScale,
-                                   wall.uvOffset.x, wall.uvOffset.y);
+                                   wall.uvOffset.x, wall.uvOffset.y,
+                                   wall.uvRotation);
                 }
 
                 // Lower strip: lowerMaterialId.
@@ -347,7 +362,8 @@ std::vector<std::vector<TaggedMeshBatch>> tessellateMapTagged(const WorldMapData
                                    wall.p0, wallP1,
                                    sector.floorHeight, adj.floorHeight,
                                    uScale, vScale,
-                                   wall.uvOffset.x, wall.uvOffset.y);
+                                   wall.uvOffset.x, wall.uvOffset.y,
+                                   wall.uvRotation);
                 }
             }
         }
