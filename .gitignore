@@ -58,3 +58,9 @@ third_party/
 
 # ─── Editor-generated asset metadata ─────────────────────────────────────────
 *.meta
+
+# ─── Editor runtime state ────────────────────────────────────────────────────
+daedalusedit.ini
+*.dmap
+*.emap
+*.dlevel

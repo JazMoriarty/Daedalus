@@ -834,8 +834,23 @@ void FrameRenderer::renderFrame(IRenderDevice& device,
     const u32 currHist = m_frameIndex & 1u;
     const u32 prevHist = 1u - currHist;
 
+    // Determine RT mode early — needed before FrameGPU construction so we can
+    // suppress TAA jitter for the path tracer (see comment below).
+    const bool willUseRT = (scene.renderMode == RenderMode::RayTraced)
+                        && device.supportsRayTracing();
+
     // ── TAA jitter (sub-pixel, in clip space) ──────────────────────────────────
-    const glm::vec2 jitterPx  = haltonJitter(m_frameIndex);
+    // Jitter is only meaningful for rasterized TAA.  In RT mode it must be
+    // suppressed: the path tracer uses frame.invViewProj to reconstruct ray
+    // directions from pixel coordinates, so a per-frame Halton shift causes the
+    // whole image to oscillate by up to ~0.4 px every frame.  SVGF's temporal
+    // reprojection has no knowledge of this offset (frame.prevViewProj is
+    // unjittered), so the blend sees spurious "motion" on every static surface
+    // — producing the visible vertical jitter.  The motion vectors written by
+    // the path tracer also inherit the bias (currentVP jittered, prevVP not),
+    // making SVGF's disocclusion detection unreliable and causing shimmer at
+    // distance where the temporal accumulation is repeatedly invalidated.
+    const glm::vec2 jitterPx  = willUseRT ? glm::vec2(0.0f) : haltonJitter(m_frameIndex);
     const glm::vec2 jitterNDC = jitterPx * glm::vec2(2.0f / static_cast<f32>(swapW),
                                                        2.0f / static_cast<f32>(swapH));
     glm::mat4 jitterMat(1.0f);
@@ -866,7 +881,7 @@ void FrameRenderer::renderFrame(IRenderDevice& device,
     frame.deltaTime  = scene.deltaTime;
     frame.frameIndex = static_cast<f32>(m_frameIndex);
     frame.pad0       = 0.0f;
-    frame.jitter     = jitterPx;
+    frame.jitter     = jitterPx;  // zero in RT mode
     frame.pad1       = glm::vec2(0.0f);
 
     // ── Wait for previous frame's GPU work to finish ─────────────────────────
@@ -1337,9 +1352,8 @@ void FrameRenderer::renderFrame(IRenderDevice& device,
     const Viewport    vp{ 0.0f, 0.0f, static_cast<f32>(swapW), static_cast<f32>(swapH) };
     const ScissorRect sc{ 0, 0, swapW, swapH };
 
-    // ─── Determine render mode ────────────────────────────────────────────────
-    const bool rtMode = (scene.renderMode == RenderMode::RayTraced)
-                     && device.supportsRayTracing();
+    // ─── Determine render mode ─────────────────────────────────────────────────────────────
+    const bool rtMode = willUseRT;  // computed early above to gate TAA jitter
 
     // Log rtMode state on the first frame it changes (use a static to avoid spam).
     {

@@ -61,6 +61,7 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <thread>
 #include <unordered_set>
 #include <vector>
 
@@ -76,15 +77,17 @@ static std::string executableDir()
 }
 
 // ─── File dialog ─────────────────────────────────────────────────────────────
-// SDL3's SDL_ShowOpenFileDialog / SDL_ShowSaveFileDialog / SDL_ShowOpenFolderDialog
-// are used instead of NSOpenPanel because SDL3's Cocoa event handling intercepts
-// mouseDown events at the NSApplication level, which prevents NSOpenPanel's file
-// list from receiving them during a runModal session (scroll events and button
-// mouse-up still work, but single-clicking a file item does not).
-// The SDL3 API opens the dialog asynchronously and delivers the result via a
-// callback.  The callback documentation notes it may fire from a different thread,
-// so the ready flag is std::atomic with release/acquire ordering to synchronise
-// the result string write before the flag store.
+// SDL3's sendEvent: override at the NSApplication level intercepts mouseDown
+// events for ALL windows — including NSOpenPanel sheets shown by SDL3's own
+// SDL_ShowOpenFileDialog.  The result is that single-clicking file items never
+// registers regardless of whether the panel is modal or non-modal.  Scroll and
+// mouse-up events still work, but the panel is effectively un-clickable.
+//
+// Fix: run the dialog in a completely separate process via osascript.  The dialog
+// lives inside osascript's NSApplication, which has no SDL3 event filter, so
+// clicks work unconditionally.  A detached std::thread blocks on popen() until
+// the user responds; the result is delivered via FileDialogState using the same
+// ready/result protocol used throughout the editor.
 
 enum class FileDialogPurpose
 {
@@ -102,17 +105,41 @@ struct FileDialogState
     std::atomic<bool> ready{false};
 };
 
-/// SDL3 file-dialog callback.  May be called from a thread other than the main
-/// thread.  Stores the chosen path (or empty string if cancelled / error) then
-/// sets the ready flag with release ordering so the main loop can safely read
-/// result with acquire ordering.
-static void fileDialogCb(void* userdata,
-                         const char* const* filelist,
-                         int /*filter*/)
+/// Spawn a file-picker dialog in a detached background thread using osascript.
+/// \p appleScript is a one-line AppleScript expression that evaluates to a
+/// POSIX path string (e.g. "POSIX path of (choose file)").  Single quotes
+/// inside the script are automatically escaped for the shell.
+///
+/// The thread blocks on popen() until the user responds, then stores the
+/// result path (empty string on cancel) and sets \p state->ready with
+/// release ordering so the main loop can safely read result with acquire.
+static void spawnFileDialog(FileDialogState* state, std::string appleScript)
 {
-    auto* s   = static_cast<FileDialogState*>(userdata);
-    s->result = (filelist && filelist[0]) ? filelist[0] : std::string{};
-    s->ready.store(true, std::memory_order_release);
+    // Escape any single quotes in the script so the outer shell quoting is safe.
+    for (std::size_t pos = 0;
+         (pos = appleScript.find('\'', pos)) != std::string::npos; )
+    {
+        appleScript.replace(pos, 1, "'\"'\"'");
+        pos += 5;
+    }
+    const std::string cmd = "osascript -e '" + appleScript + "' 2>/dev/null";
+
+    std::thread([state, cmd]() {
+        FILE* f = popen(cmd.c_str(), "r");
+        std::string result;
+        if (f)
+        {
+            char buf[4096] = {};
+            if (fgets(buf, sizeof(buf), f))
+                result = buf;
+            pclose(f);
+            while (!result.empty() &&
+                   (result.back() == '\n' || result.back() == '\r'))
+                result.pop_back();
+        }
+        state->result = std::move(result);
+        state->ready.store(true, std::memory_order_release);
+    }).detach();
 }
 
 // ─── Initial docking layout ───────────────────────────────────────────────────
@@ -164,8 +191,7 @@ static void drawMenuBar(EditMapDocument& doc,
                          glm::vec2         lastMouseMapPos,
                          bool&             openNewMapDlg,
                          HelpPanel&        helpPanel,
-                         FileDialogState&  dlgState,
-                         SDL_Window*       window)
+                         FileDialogState&  dlgState)
 {
     if (ImGui::BeginMainMenuBar())
     {
@@ -177,8 +203,7 @@ static void drawMenuBar(EditMapDocument& doc,
 
             if (ImGui::MenuItem("Open\xe2\x80\xa6", "Cmd+O"))
             {
-                SDL_ShowOpenFileDialog(fileDialogCb, &dlgState, window,
-                                       nullptr, 0, nullptr, false);
+                spawnFileDialog(&dlgState, "POSIX path of (choose file)");
                 dlgState.purpose = FileDialogPurpose::OpenMap;
             }
 
@@ -186,8 +211,7 @@ static void drawMenuBar(EditMapDocument& doc,
 
             if (ImGui::MenuItem("Set Asset Root\xe2\x80\xa6"))
             {
-                SDL_ShowOpenFolderDialog(fileDialogCb, &dlgState, window,
-                                        nullptr, false);
+                spawnFileDialog(&dlgState, "POSIX path of (choose folder)");
                 dlgState.purpose = FileDialogPurpose::OpenAssetRoot;
             }
 
@@ -198,16 +222,11 @@ static void drawMenuBar(EditMapDocument& doc,
 
             if (ImGui::MenuItem("Save As\xe2\x80\xa6", "Cmd+Shift+S"))
             {
-                // Pass the full existing path (or just the leaf name) as a hint
-                // so the save dialog pre-fills the file name field.
-                const std::string defaultLoc = doc.filePath().empty()
+                const std::string defaultName = doc.filePath().empty()
                     ? "untitled.dmap"
-                    : doc.filePath().string();
-                static const SDL_DialogFileFilter k_dmapFilter[] = {
-                    {"Daedalus Map", "dmap"},
-                };
-                SDL_ShowSaveFileDialog(fileDialogCb, &dlgState, window,
-                                       k_dmapFilter, 1, defaultLoc.c_str());
+                    : doc.filePath().filename().string();
+                spawnFileDialog(&dlgState,
+                    "POSIX path of (choose file name default name \"" + defaultName + "\")");
                 dlgState.purpose = FileDialogPurpose::SaveMap;
             }
 
@@ -483,14 +502,10 @@ int main(int /*argc*/, char* /*argv*/[])
     PropertyInspector inspector;
     OutputLog         outputLog;
     FileDialogState   dlgState;
-    static const SDL_DialogFileFilter k_imageFilter[] = {
-        {"PNG Image",  "png"},
-        {"JPEG Image", "jpg;jpeg"},
-    };
-    RenderSettingsPanel renderPanel([&dlgState, window]()
+    RenderSettingsPanel renderPanel([&dlgState]()
     {
-        SDL_ShowOpenFileDialog(fileDialogCb, &dlgState, window,
-                               k_imageFilter, 2, nullptr, false);
+        spawnFileDialog(&dlgState,
+            "POSIX path of (choose file of type {\"public.image\"})");
         dlgState.purpose = FileDialogPurpose::OpenLUT;
     });
     ObjectBrowserPanel  objBrowser;
@@ -1226,9 +1241,15 @@ int main(int /*argc*/, char* /*argv*/[])
                 if (!dlgPath.empty())
                     (void)doc.loadFromFile(dlgPath);
                 break;
-            case FileDialogPurpose::SaveMap:
+        case FileDialogPurpose::SaveMap:
                 if (!dlgPath.empty())
-                    (void)doc.saveToFile(dlgPath);
+                {
+                    // osascript's "choose file name" does not enforce a file
+                    // extension — append .dmap if the user omitted it.
+                    std::filesystem::path p(dlgPath);
+                    if (p.extension() != ".dmap") p += ".dmap";
+                    (void)doc.saveToFile(p);
+                }
                 break;
             case FileDialogPurpose::OpenLUT:
                 renderPanel.deliverPath(dlgPath);
@@ -1245,7 +1266,7 @@ int main(int /*argc*/, char* /*argv*/[])
         // ── Menu bar ──────────────────────────────────────────────────────────
         drawMenuBar(doc, activeToolId, selectTool, drawSectorTool, vertexTool, activeTool,
                     vp2d.gridStep(), vp2d.lastMouseMapPos(), nmDlg.open, helpPanel,
-                    dlgState, window);
+                    dlgState);
 
         // ── Panels ────────────────────────────────────────────────────────────
         DrawSectorTool* drawToolPtr =

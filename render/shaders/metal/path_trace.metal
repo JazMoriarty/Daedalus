@@ -209,15 +209,13 @@ kernel void path_trace_main(
     const uint2 screenSize = uint2(frame.screenSize.xy);
     if (gid.x >= screenSize.x || gid.y >= screenSize.y) return;
 
-    RNG rng(gid, uint(frame.frameIndex));
-
     // ─── Generate primary ray ────────────────────────────────────────────────
-    // Jittered pixel centre for temporal accumulation via TAA.
-    float2 pixel = float2(gid) + 0.5f + frame.jitter;
+    // Pixel centre — frame.jitter is zero in RT mode (suppressed by the CPU to
+    // prevent the per-frame Halton shift from causing SVGF temporal instability).
+    float2 pixel = float2(gid) + 0.5f;
     float2 uv    = pixel / float2(screenSize);
     float2 ndc   = uv_to_ndc(uv);
 
-    // Unproject to world-space ray through the inverse VP.
     float4 nearClip = frame.invViewProj * float4(ndc, 0.0f, 1.0f);
     float4 farClip  = frame.invViewProj * float4(ndc, 1.0f, 1.0f);
     float3 origin   = nearClip.xyz / nearClip.w;
@@ -266,35 +264,34 @@ kernel void path_trace_main(
     float  metalness = surf.metalness;
 
     // ─── Auxiliary outputs (denoiser guide signals) ──────────────────────────
+    // Deterministic from the primary hit geometry — written once, shared across
+    // all samples per pixel.
 
     float linearDepth = length(surf.position - frame.cameraPos.xyz);
     outDepth.write(float4(linearDepth, 0.0f, 0.0f, 0.0f), gid);
 
-    // Encode normal (world-space → octahedral), remapped to [0,1] for RGBA8Unorm
-    // storage (matching the G-buffer convention in gbuffer.metal).
     float2 encN = encode_normal(N);
     outNormal.write(float4(encN * 0.5f + 0.5f, 0.0f, 0.0f), gid);
 
-    // Camera-only motion vectors.
     float4 clipCurr = frame.viewProj     * float4(surf.position, 1.0f);
     float4 clipPrev = frame.prevViewProj * float4(surf.position, 1.0f);
     float2 uvCurr   = ndc_to_uv(clipCurr.xy / clipCurr.w);
     float2 uvPrev   = ndc_to_uv(clipPrev.xy / clipPrev.w);
     outMotion.write(float4(uvCurr - uvPrev, 0.0f, 0.0f), gid);
 
-    // ─── Direct lighting (sun + point lights) ────────────────────────────────
+    // ─── Direct lighting ─────────────────────────────────────────────────────
+    // Shadow rays are deterministic (fixed origin and direction for a given
+    // primary hit) so direct lighting is computed once and shared across all
+    // samples.  Only the indirect bounce hemisphere directions vary per sample.
 
     float3 V = -dir;
-    float3 radiance = float3(0.0f);
+    float3 directRadiance = float3(0.0f);
 
-    // Ambient contribution (per-sector + global).
-    radiance += albedo * (frame.ambientColor.xyz + surf.sectorAmbient.xyz);
+    // Ambient + emissive.
+    directRadiance += albedo * (frame.ambientColor.xyz + surf.sectorAmbient.xyz);
+    directRadiance += surf.emissive;
 
-    // Emissive contribution.
-    radiance += surf.emissive;
-
-    // Sun direct + shadow — shadow ray handles occlusion (ceiling/walls block sun
-    // indoors automatically; no need for an explicit outdoor flag gate in RT mode).
+    // Sun direct.
     float NdotSun = max(dot(N, sunDir), 0.0f);
     if (NdotSun > 0.0f)
     {
@@ -311,8 +308,8 @@ kernel void path_trace_main(
         if (shadowHit.type == intersection_type::none)
         {
             float3 sunRadiance = frame.sunColor.xyz * frame.sunColor.w;
-            radiance += cook_torrance(N, V, sunDir, albedo, roughness, metalness)
-                      * sunRadiance;
+            directRadiance += cook_torrance(N, V, sunDir, albedo, roughness, metalness)
+                            * sunRadiance;
         }
     }
 
@@ -327,18 +324,16 @@ kernel void path_trace_main(
 
         float3 toLight = lPos - surf.position;
         float  dist    = length(toLight);
-        if (dist > lRad || dist < 0.0001f) continue;  // skip degenerate / inside-light
+        if (dist > lRad || dist < 0.0001f) continue;
 
         float3 L     = toLight / dist;
         float  NdotL = max(dot(N, L), 0.0f);
         if (NdotL <= 0.0f) continue;
 
-        // Attenuation: inverse-square with radius falloff.
         float attenuation = lInt / (dist * dist + 0.0001f);
         float falloff     = saturate(1.0f - (dist / lRad));
         attenuation      *= falloff * falloff;
 
-        // Shadow ray.
         ray shadowRay;
         shadowRay.origin       = surf.position + surf.geoNormal * 0.001f;
         shadowRay.direction    = L;
@@ -350,10 +345,8 @@ kernel void path_trace_main(
         auto shadowHit = shadowIsect.intersect(shadowRay, tlas);
 
         if (shadowHit.type == intersection_type::none)
-        {
-            radiance += cook_torrance(N, V, L, albedo, roughness, metalness)
-                      * lColor * attenuation;
-        }
+            directRadiance += cook_torrance(N, V, L, albedo, roughness, metalness)
+                            * lColor * attenuation;
     }
 
     // Spot lights.
@@ -370,11 +363,10 @@ kernel void path_trace_main(
 
         float3 toLight = sPos - surf.position;
         float  dist    = length(toLight);
-        if (dist >= sRange || dist < 0.0001f) continue;  // skip degenerate / inside-light
+        if (dist >= sRange || dist < 0.0001f) continue;
 
         float3 L = toLight / dist;
 
-        // Cone falloff.
         float cosTheta = dot(-L, sDir);
         float cone     = smoothstep(outerCos, innerCos, cosTheta);
         if (cone <= 0.0f) continue;
@@ -382,11 +374,9 @@ kernel void path_trace_main(
         float NdotL = max(dot(N, L), 0.0f);
         if (NdotL <= 0.0f) continue;
 
-        // Distance attenuation.
         float atten = 1.0f - clamp(dist / sRange, 0.0f, 1.0f);
         atten *= atten;
 
-        // Shadow ray.
         ray shadowRay;
         shadowRay.origin       = surf.position + surf.geoNormal * 0.001f;
         shadowRay.direction    = L;
@@ -398,125 +388,138 @@ kernel void path_trace_main(
         auto shadowHit = shadowIsect.intersect(shadowRay, tlas);
 
         if (shadowHit.type == intersection_type::none)
-        {
-            radiance += cook_torrance(N, V, L, albedo, roughness, metalness)
-                      * sColor * sInt * cone * atten;
-        }
+            directRadiance += cook_torrance(N, V, L, albedo, roughness, metalness)
+                            * sColor * sInt * cone * atten;
     }
 
-    // ─── Indirect bounces ────────────────────────────────────────────────────
+    // ─── Indirect bounces — accumulated over samplesPerPixel ─────────────────
+    // Each sample draws an independent cosine-weighted hemisphere direction at
+    // the primary hit and traces up to maxBounces recursive bounces.  Samples
+    // are averaged before demodulation so the denoiser receives a lower-variance
+    // irradiance estimate for the same compute budget.
+    //
+    // RNG seeding: per-sample seed = frameIndex × 16 + sampleIdx.  The ×16
+    // multiplier (> slider max of 4) ensures adjacent sample indices on the same
+    // frame never alias with adjacent frames at 1 SPP.  Inter-pixel decorrelation
+    // is provided by the pixel coordinate mixing in the RNG constructor.
 
-    float3 throughput  = float3(1.0f);
-    float3 bouncePos   = surf.position;
-    float3 bounceGeoN  = surf.geoNormal;
-    float3 bounceN     = N;
-    float3 bounceAlbedo = albedo;
+    const uint spp = max(rtConst.samplesPerPixel, 1u);
+    float3 indirectAccum = float3(0.0f);
 
-    for (uint bounce = 0; bounce < rtConst.maxBounces; ++bounce)
+    for (uint sampleIdx = 0; sampleIdx < spp; ++sampleIdx)
     {
-        // Cosine-weighted hemisphere sample.
-        float3 T, B;
-        make_basis(bounceN, T, B);
-        float3 localDir = cosine_hemisphere(rng.next2());
-        float3 bounceDir = to_world(localDir, T, B, bounceN);
+        RNG rng(gid, uint(frame.frameIndex) * 16u + sampleIdx);
 
-        ray bounceRay;
-        bounceRay.origin       = bouncePos + bounceGeoN * 0.001f;
-        bounceRay.direction    = bounceDir;
-        bounceRay.min_distance = 0.001f;
-        bounceRay.max_distance = 1e20f;
+        float3 indirectRadiance = float3(0.0f);
+        float3 throughput   = float3(1.0f);
+        float3 bouncePos    = surf.position;
+        float3 bounceGeoN   = surf.geoNormal;
+        float3 bounceN      = N;
+        float3 bounceAlbedo = albedo;
 
-        auto bounceHit = isect.intersect(bounceRay, tlas);
-
-        if (bounceHit.type == intersection_type::none)
+        for (uint bounce = 0; bounce < rtConst.maxBounces; ++bounce)
         {
-            // Sky contribution.
-            float3 sky = sky_color(bounceDir, sunDir,
-                                   frame.sunColor.xyz, frame.sunColor.w);
-            // Cosine-weighted PDF cancels with the NdotL in the rendering equation,
-            // leaving just albedo/PI * PI = albedo.  (Hemisphere integral of cos/PI = 1.)
-            radiance += throughput * bounceAlbedo * sky;
-            break;
-        }
+            // Cosine-weighted hemisphere sample.
+            float3 T, B;
+            make_basis(bounceN, T, B);
+            float3 localDir  = cosine_hemisphere(rng.next2());
+            float3 bounceDir = to_world(localDir, T, B, bounceN);
 
-        // Hit surface — evaluate with texture sampling.
-        SurfaceHit bounceSurf = evaluate_surface(
-            bouncePos + bounceGeoN * 0.001f, bounceDir, bounceHit.distance,
-            bounceHit.instance_id, bounceHit.primitive_id,
-            bounceHit.triangle_barycentric_coord,
-            materials, primitives, textures, texSampler);
+            ray bounceRay;
+            bounceRay.origin       = bouncePos + bounceGeoN * 0.001f;
+            bounceRay.direction    = bounceDir;
+            bounceRay.min_distance = 0.001f;
+            bounceRay.max_distance = 1e20f;
 
-        float3 newN      = bounceSurf.normal;
-        float3 newAlbedo = bounceSurf.albedo;
+            auto bounceHit = isect.intersect(bounceRay, tlas);
 
-        // Accumulate throughput (lambertian: albedo / PI * PI = albedo).
-        throughput *= bounceAlbedo;
-
-        // Russian roulette after first bounce.
-        if (bounce > 0)
-        {
-            float p = max(max(throughput.r, throughput.g), throughput.b);
-            if (rng.next() > p) break;
-            throughput /= p;
-        }
-
-        // Direct lighting at the bounce hit — shadow ray handles indoor occlusion.
-        float sunNdotL = max(dot(newN, sunDir), 0.0f);
-        if (sunNdotL > 0.0f)
-        {
-            ray shadowRay;
-            shadowRay.origin       = bounceSurf.position + bounceSurf.geoNormal * 0.001f;
-            shadowRay.direction    = sunDir;
-            shadowRay.min_distance = 0.001f;
-            shadowRay.max_distance = 1e20f;
-
-            intersector<instancing> sIsect;
-            sIsect.accept_any_intersection(true);
-            auto sHit = sIsect.intersect(shadowRay, tlas);
-
-            if (sHit.type == intersection_type::none)
+            if (bounceHit.type == intersection_type::none)
             {
-                float3 sunRad = frame.sunColor.xyz * frame.sunColor.w;
-                radiance += throughput * newAlbedo * sunRad * sunNdotL / PI;
+                // Cosine-weighted PDF cancels with the NdotL factor in the
+                // rendering equation, leaving albedo as the throughput weight.
+                float3 sky = sky_color(bounceDir, sunDir,
+                                       frame.sunColor.xyz, frame.sunColor.w);
+                indirectRadiance += throughput * bounceAlbedo * sky;
+                break;
             }
+
+            SurfaceHit bounceSurf = evaluate_surface(
+                bouncePos + bounceGeoN * 0.001f, bounceDir, bounceHit.distance,
+                bounceHit.instance_id, bounceHit.primitive_id,
+                bounceHit.triangle_barycentric_coord,
+                materials, primitives, textures, texSampler);
+
+            float3 newN      = bounceSurf.normal;
+            float3 newAlbedo = bounceSurf.albedo;
+
+            throughput *= bounceAlbedo;
+
+            // Russian roulette after the first bounce to terminate low-energy paths.
+            if (bounce > 0)
+            {
+                float p = max(max(throughput.r, throughput.g), throughput.b);
+                if (rng.next() > p) break;
+                throughput /= p;
+            }
+
+            // Direct lighting at bounce hit (sun only — point/spot lights add
+            // minimal energy at bounce surfaces and keeping them here would
+            // proportionally increase GPU cost with each additional sample).
+            float sunNdotL = max(dot(newN, sunDir), 0.0f);
+            if (sunNdotL > 0.0f)
+            {
+                ray shadowRay;
+                shadowRay.origin       = bounceSurf.position + bounceSurf.geoNormal * 0.001f;
+                shadowRay.direction    = sunDir;
+                shadowRay.min_distance = 0.001f;
+                shadowRay.max_distance = 1e20f;
+
+                intersector<instancing> sIsect;
+                sIsect.accept_any_intersection(true);
+                auto sHit = sIsect.intersect(shadowRay, tlas);
+
+                if (sHit.type == intersection_type::none)
+                {
+                    float3 sunRad = frame.sunColor.xyz * frame.sunColor.w;
+                    indirectRadiance += throughput * newAlbedo * sunRad * sunNdotL / PI;
+                }
+            }
+
+            indirectRadiance += throughput * bounceSurf.emissive;
+
+            bouncePos    = bounceSurf.position;
+            bounceGeoN   = bounceSurf.geoNormal;
+            bounceN      = newN;
+            bounceAlbedo = newAlbedo;
         }
 
-        // Emissive at bounce.
-        radiance += throughput * bounceSurf.emissive;
-
-        bouncePos    = bounceSurf.position;
-        bounceGeoN   = bounceSurf.geoNormal;
-        bounceN      = newN;
-        bounceAlbedo = newAlbedo;
+        indirectAccum += indirectRadiance;
     }
 
-    // ─── Write demodulated irradiance + albedo ────────────────────────────────────
-    // Divide out primary-hit albedo so the SVGF denoiser operates on lighting
-    // only.  A post-denoiser remodulation pass multiplies albedo back in.
-    //
-    // WHY 0.01 and not 0.1:
-    // The floor value is the threshold below which an albedo channel is clamped.
-    // The floor in BOTH demodulation and remodulation must be identical so they
-    // cancel: irradiance = radiance / safeAlbedo,  final = irradiance * safeAlbedo.
-    //
-    // With floor=0.1, any surface darker than albedo≈0.1 (e.g. the floor at ~0.02–
-    // 0.05) had ALL its channels clamped to the same flat 0.1.  Two adjacent dark
-    // pixels with different actual albedos (brick vs mortar) both got safeAlbedo=0.1
-    // → their demodulated irradiance differed (0.02L/0.1 ≠ 0.05L/0.1), causing false
-    // irradiance edges that SVGF couldn't preserve.  After remodulation by the same
-    // flat 0.1 the edge collapsed to a uniform value → texture destroyed.
-    //
-    // With floor=0.01, the floor texture (albedo ~0.02–0.05) is NOT clamped at all:
-    // safeAlbedo = actual albedo.  Demodulation then becomes proper per-channel
-    // cancellation (0.02L / 0.02 = L, 0.05L / 0.05 = L) → the demodulated irradiance
-    // is UNIFORM across uniformly-lit floor regions regardless of texture variation.
-    // SVGF can blur freely without creating artefacts; remodulation with the stored
-    // safeAlbedo (= actual albedo) restores the texture automatically.
-    //
-    // 0.01 caps the maximum per-channel noise amplification at 100× (vs 1000× for
-    // 0.001, which caused blow-out on near-zero colour channels of saturated darks).
+    // ─── Write demodulated irradiance + albedo ────────────────────────────────
+    // Average indirect samples then add deterministic direct component.
+    // Divide out primary-hit albedo so SVGF denoises pure irradiance.
+    // safeAlbedo floor of 0.01 matches rt_remodulate.metal exactly so the
+    // demodulation/remodulation pair cancels without texture destruction.
 
+    float3 radiance   = directRadiance + indirectAccum / float(spp);
     float3 safeAlbedo = max(albedo, float3(0.01f));
-    outHDR.write(float4(radiance / safeAlbedo, 1.0f), gid);
+    float3 irradiance = radiance / safeAlbedo;
+
+    // ── Firefly suppression ───────────────────────────────────────────────────
+    // Bounce rays that escape thin-shell geometry seams (wall-floor, wall-ceiling
+    // corners) sample the bright outdoor sky, producing outlier irradiance values
+    // amplified up to 1/safeAlbedo × sky_luminance on dark surfaces.  Because the
+    // seam geometry is consistent, the same pixel can escape on every frame and
+    // SVGF temporal accumulation reinforces rather than suppresses the sparkle.
+    // Clamping irradiance here prevents SVGF from locking in the artifact while
+    // leaving all legitimate surface lighting unaffected — real indirect
+    // contributions on well-lit surfaces are well below the threshold.
+    float irrLum = dot(irradiance, float3(0.2126f, 0.7152f, 0.0722f));
+    const float kFireflyThreshold = 30.0f;
+    if (irrLum > kFireflyThreshold)
+        irradiance *= kFireflyThreshold / max(irrLum, 1e-6f);
+
+    outHDR.write(float4(irradiance, 1.0f), gid);
     outAlbedo.write(float4(safeAlbedo, 1.0f), gid);
 }
