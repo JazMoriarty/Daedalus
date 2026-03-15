@@ -131,6 +131,16 @@ void MaterialCatalog::scan()
 
         me.uuid = readOrCreateMeta(p);
 
+        // Query native image dimensions from the file header (no pixel decode).
+        {
+            int tw = 0, th = 0;
+            if (stbi_info(p.c_str(), &tw, &th, nullptr))
+            {
+                me.texWidth  = static_cast<uint32_t>(tw);
+                me.texHeight = static_cast<uint32_t>(th);
+            }
+        }
+
         m_entries.push_back(std::move(me));
     }
 

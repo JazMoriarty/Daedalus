@@ -187,6 +187,12 @@ private:
     world::SectorId m_uvEditSectorId     = world::INVALID_SECTOR_ID;
     std::size_t     m_uvEditWallIdx      = 0;
 
+    // ─── UV clipboard (C to copy, Enter to paste) ────────────────────────────
+    bool      m_uvClipValid    = false;
+    glm::vec2 m_uvClipOffset   = {0.0f, 0.0f};
+    glm::vec2 m_uvClipScale    = {1.0f, 1.0f};
+    float     m_uvClipRotation = 0.0f;
+
     void ensureInit(rhi::IRenderDevice& device, unsigned w, unsigned h);
     void retessellate(rhi::IRenderDevice& device, const world::WorldMapData& map);
     void reloadLutIfNeeded(render::IAssetLoader& loader,

@@ -8,6 +8,8 @@
 #include "document/commands/cmd_set_sector_flags.h"
 #include "document/commands/cmd_set_wall_flags.h"
 #include "document/commands/cmd_set_wall_uv.h"
+#include "daedalus/editor/compound_command.h"
+#include "uv_utils.h"
 #include "document/commands/cmd_link_portal.h"
 #include "document/commands/cmd_unlink_portal.h"
 #include "document/commands/cmd_move_light.h"
@@ -327,6 +329,90 @@ void PropertyInspector::draw(EditMapDocument&      doc,
             if (ImGui::IsItemDeactivatedAfterEdit())
                 doc.pushCommand(std::make_unique<CmdSetWallUV>(
                     doc, sid, wi, wall.uvOffset, wall.uvScale, uvRot));
+
+            // ── UV action buttons ──────────────────────────────────────────────
+            ImGui::Spacing();
+
+            // Pre-compute wall geometry (needed by several buttons below).
+            const glm::vec2 uvP0     = wall.p0;
+            const glm::vec2 uvP1     = sectors[sid].walls[(wi + 1) % n].p0;
+            const float     uvWallLen = glm::length(uvP1 - uvP0);
+            const float     uvWallHt  = sectors[sid].ceilHeight - sectors[sid].floorHeight;
+
+            // Pixel Perfect: scale to 1:1 pixel density using front material dims.
+            {
+                const MaterialEntry* ppEntry = catalog.find(wall.frontMaterialId);
+                const bool hasDims = ppEntry && ppEntry->texWidth > 0 && ppEntry->texHeight > 0;
+                if (!hasDims) ImGui::BeginDisabled();
+                if (ImGui::SmallButton("Pixel Perfect##uv") && hasDims)
+                    doc.pushCommand(std::make_unique<CmdSetWallUV>(
+                        doc, sid, wi, wall.uvOffset,
+                        computePixelPerfectUVScale(ppEntry->texWidth, ppEntry->texHeight),
+                        wall.uvRotation));
+                if (!hasDims) ImGui::EndDisabled();
+            }
+
+            ImGui::SameLine();
+
+            // Fit Wall: stretch texture to fill wall exactly once.
+            if (ImGui::SmallButton("Fit Wall##uv"))
+                doc.pushCommand(std::make_unique<CmdSetWallUV>(
+                    doc, sid, wi,
+                    glm::vec2{0.0f, 0.0f},
+                    glm::vec2{uvWallLen, uvWallHt},
+                    0.0f));
+
+            ImGui::SameLine();
+
+            // Square: set V scale equal to U scale.
+            if (ImGui::SmallButton("Square##uv"))
+                doc.pushCommand(std::make_unique<CmdSetWallUV>(
+                    doc, sid, wi, wall.uvOffset,
+                    glm::vec2{wall.uvScale.x, wall.uvScale.x},
+                    wall.uvRotation));
+
+            // Align to left (previous) wall.
+            if (ImGui::SmallButton("\xe2\x86\x90 Align##uv"))
+            {
+                const std::size_t prevWi = (wi + n - 1) % n;
+                const world::Wall& prevW  = sectors[sid].walls[prevWi];
+                const float prevLen =
+                    glm::length(sectors[sid].walls[wi].p0 - prevW.p0);
+                const float prevScaleX =
+                    (prevW.uvScale.x > 1e-6f) ? prevW.uvScale.x : 1.0f;
+                doc.pushCommand(std::make_unique<CmdSetWallUV>(
+                    doc, sid, wi,
+                    glm::vec2{prevW.uvOffset.x + prevLen / prevScaleX, prevW.uvOffset.y},
+                    wall.uvScale, wall.uvRotation));
+            }
+
+            ImGui::SameLine();
+
+            // Align to right (next) wall.
+            if (ImGui::SmallButton("Align \xe2\x86\x92##uv"))
+            {
+                const std::size_t nextWi = (wi + 1) % n;
+                const world::Wall& nextW  = sectors[sid].walls[nextWi];
+                const float curScaleX =
+                    (wall.uvScale.x > 1e-6f) ? wall.uvScale.x : 1.0f;
+                doc.pushCommand(std::make_unique<CmdSetWallUV>(
+                    doc, sid, wi,
+                    glm::vec2{nextW.uvOffset.x - uvWallLen / curScaleX, nextW.uvOffset.y},
+                    wall.uvScale, wall.uvRotation));
+            }
+
+            // Texel density readout.
+            {
+                const MaterialEntry* densEntry = catalog.find(wall.frontMaterialId);
+                if (densEntry && densEntry->texWidth > 0 && densEntry->texHeight > 0)
+                {
+                    const float scX = (wall.uvScale.x > 1e-6f) ? wall.uvScale.x : 1e-6f;
+                    const float scY = (wall.uvScale.y > 1e-6f) ? wall.uvScale.y : 1e-6f;
+                    const float densU = static_cast<float>(densEntry->texWidth)  / scX;
+                    const float densV = static_cast<float>(densEntry->texHeight) / scY;
+                    ImGui::TextDisabled("%.0f px/u  %.0f px/v", densU, densV);
+                }
+            }
         }
 
         ImGui::Spacing();
@@ -360,8 +446,30 @@ void PropertyInspector::draw(EditMapDocument&      doc,
                         (surface == WallSurface::Front) ? "Wall Front" :
                         (surface == WallSurface::Upper) ? "Wall Upper" :
                         (surface == WallSurface::Lower) ? "Wall Lower" : "Wall Back";
-                    assetBrowser.openPicker([&doc, sid, wi, surface](const UUID& uuid) {
-                        doc.pushCommand(std::make_unique<CmdSetWallMaterial>(doc, sid, wi, surface, uuid));
+                    // Auto-fit UV on assignment: compute pixel-perfect scale from the
+                    // texture's native dimensions, falling back to stretch-to-fit.
+                    assetBrowser.openPicker([&doc, &catalog, sid, wi, surface](const UUID& uuid)
+                    {
+                        const auto& sectors = doc.mapData().sectors;
+                        if (sid >= sectors.size()) return;
+                        const auto& sec = sectors[sid];
+                        if (wi >= sec.walls.size()) return;
+                        const glm::vec2 p0  = sec.walls[wi].p0;
+                        const glm::vec2 p1  = sec.walls[(wi + 1) % sec.walls.size()].p0;
+                        const float wallLen = glm::length(p1 - p0);
+                        const float wallHt  = sec.ceilHeight - sec.floorHeight;
+
+                        glm::vec2 newScale{wallLen, wallHt};
+                        const MaterialEntry* entry = catalog.find(uuid);
+                        if (entry && entry->texWidth > 0 && entry->texHeight > 0)
+                            newScale = computePixelPerfectUVScale(entry->texWidth, entry->texHeight);
+
+                        std::vector<std::unique_ptr<ICommand>> steps;
+                        steps.push_back(std::make_unique<CmdSetWallMaterial>(doc, sid, wi, surface, uuid));
+                        steps.push_back(std::make_unique<CmdSetWallUV>(
+                            doc, sid, wi, glm::vec2{0.0f, 0.0f}, newScale, 0.0f));
+                        doc.pushCommand(std::make_unique<CompoundCommand>(
+                            "Apply Wall Material", std::move(steps)));
                     }, surfLbl);
                 }
                 ImGui::SameLine();

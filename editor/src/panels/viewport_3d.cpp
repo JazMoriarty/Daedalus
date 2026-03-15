@@ -15,6 +15,8 @@
 #include "document/commands/cmd_set_wall_material.h"
 #include "document/commands/cmd_set_sector_material.h"
 #include "document/commands/cmd_set_wall_uv.h"
+#include "daedalus/editor/compound_command.h"
+#include "uv_utils.h"
 
 // stb_image (declaration only — implementation compiled once in asset_loader.cpp)
 #include "stb_image.h"
@@ -1514,10 +1516,31 @@ void Viewport3D::draw(EditMapDocument&      doc,
                 { capSurf = WallSurface::Lower; capLbl = "Wall Lower"; }
             }
             assetBrowser.openPicker(
-                [&doc, capSid, capWi, capSurf](const UUID& uuid)
+                [&doc, &catalog, capSid, capWi, capSurf](const UUID& uuid)
                 {
-                    doc.pushCommand(std::make_unique<CmdSetWallMaterial>(
+                    // Compute wall dimensions at the moment of assignment.
+                    const auto& sectors = doc.mapData().sectors;
+                    if (capSid >= static_cast<world::SectorId>(sectors.size())) return;
+                    const auto& sec = sectors[capSid];
+                    if (capWi >= sec.walls.size()) return;
+                    const glm::vec2 p0  = sec.walls[capWi].p0;
+                    const glm::vec2 p1  = sec.walls[(capWi + 1) % sec.walls.size()].p0;
+                    const float wallLen = glm::length(p1 - p0);
+                    const float wallHt  = sec.ceilHeight - sec.floorHeight;
+
+                    // Pixel-perfect scale if dims are known, else stretch to fit.
+                    glm::vec2 newScale{wallLen, wallHt};
+                    const MaterialEntry* entry = catalog.find(uuid);
+                    if (entry && entry->texWidth > 0 && entry->texHeight > 0)
+                        newScale = computePixelPerfectUVScale(entry->texWidth, entry->texHeight);
+
+                    std::vector<std::unique_ptr<ICommand>> steps;
+                    steps.push_back(std::make_unique<CmdSetWallMaterial>(
                         doc, capSid, capWi, capSurf, uuid));
+                    steps.push_back(std::make_unique<CmdSetWallUV>(
+                        doc, capSid, capWi, glm::vec2{0.0f, 0.0f}, newScale, 0.0f));
+                    doc.pushCommand(std::make_unique<CompoundCommand>(
+                        "Apply Wall Material", std::move(steps)));
                 },
                 capLbl);
         }
@@ -1549,21 +1572,24 @@ void Viewport3D::draw(EditMapDocument&      doc,
                         doc, uvSid, uvWi, newOff, newSc, newRot));
                 };
 
-                constexpr float kNudge    = 0.1f;
-                constexpr float kScale    = 0.1f;
-                constexpr float kRotDeg   = glm::pi<float>() / 12.0f;  // 15°
+                constexpr float kNudge  = 0.1f;
+                constexpr float kScale  = 0.1f;
+                constexpr float kRotStep = glm::pi<float>() / 12.0f;  // 15°
 
-                // Arrow keys: nudge offset.
-                if (ImGui::IsKeyPressed(ImGuiKey_UpArrow))
+                const bool altHeld   = ImGui::GetIO().KeyAlt;
+                const bool shiftHeld = ImGui::GetIO().KeyShift;
+
+                // Arrow keys: nudge offset.  Alt+Arrow is reserved for alignment (below).
+                if (ImGui::IsKeyPressed(ImGuiKey_UpArrow) && !altHeld)
                     pushUV({uvWall.uvOffset.x, uvWall.uvOffset.y + kNudge},
                            uvWall.uvScale, uvWall.uvRotation);
-                if (ImGui::IsKeyPressed(ImGuiKey_DownArrow))
+                if (ImGui::IsKeyPressed(ImGuiKey_DownArrow) && !altHeld)
                     pushUV({uvWall.uvOffset.x, uvWall.uvOffset.y - kNudge},
                            uvWall.uvScale, uvWall.uvRotation);
-                if (ImGui::IsKeyPressed(ImGuiKey_LeftArrow))
+                if (ImGui::IsKeyPressed(ImGuiKey_LeftArrow) && !altHeld)
                     pushUV({uvWall.uvOffset.x - kNudge, uvWall.uvOffset.y},
                            uvWall.uvScale, uvWall.uvRotation);
-                if (ImGui::IsKeyPressed(ImGuiKey_RightArrow))
+                if (ImGui::IsKeyPressed(ImGuiKey_RightArrow) && !altHeld)
                     pushUV({uvWall.uvOffset.x + kNudge, uvWall.uvOffset.y},
                            uvWall.uvScale, uvWall.uvRotation);
 
@@ -1577,28 +1603,33 @@ void Viewport3D::draw(EditMapDocument&      doc,
                            {uvWall.uvScale.x + kScale, uvWall.uvScale.y},
                            uvWall.uvRotation);
 
-                // , / . — scale V.
+                // , / . — scale V;  Shift+,/. — rotate ±15°.
+                // Checked with a single IsKeyPressed per key to prevent double-fire.
                 if (ImGui::IsKeyPressed(ImGuiKey_Comma))
-                    pushUV(uvWall.uvOffset,
-                           {uvWall.uvScale.x, std::max(0.01f, uvWall.uvScale.y - kScale)},
-                           uvWall.uvRotation);
+                {
+                    if (shiftHeld)
+                        pushUV(uvWall.uvOffset, uvWall.uvScale,
+                               uvWall.uvRotation - kRotStep);
+                    else
+                        pushUV(uvWall.uvOffset,
+                               {uvWall.uvScale.x, std::max(0.01f, uvWall.uvScale.y - kScale)},
+                               uvWall.uvRotation);
+                }
                 if (ImGui::IsKeyPressed(ImGuiKey_Period))
-                    pushUV(uvWall.uvOffset,
-                           {uvWall.uvScale.x, uvWall.uvScale.y + kScale},
-                           uvWall.uvRotation);
-
-                // < / > — rotate ±15°.
-                if (ImGui::IsKeyPressed(ImGuiKey_Comma) && ImGui::GetIO().KeyShift)
-                    pushUV(uvWall.uvOffset, uvWall.uvScale,
-                           uvWall.uvRotation - kRotDeg);
-                if (ImGui::IsKeyPressed(ImGuiKey_Period) && ImGui::GetIO().KeyShift)
-                    pushUV(uvWall.uvOffset, uvWall.uvScale,
-                           uvWall.uvRotation + kRotDeg);
+                {
+                    if (shiftHeld)
+                        pushUV(uvWall.uvOffset, uvWall.uvScale,
+                               uvWall.uvRotation + kRotStep);
+                    else
+                        pushUV(uvWall.uvOffset,
+                               {uvWall.uvScale.x, uvWall.uvScale.y + kScale},
+                               uvWall.uvRotation);
+                }
 
                 // H — flip U.  Shift+H — flip V.
                 if (ImGui::IsKeyPressed(ImGuiKey_H, /*repeat=*/false))
                 {
-                    if (ImGui::GetIO().KeyShift)
+                    if (shiftHeld)
                         pushUV(uvWall.uvOffset,
                                {uvWall.uvScale.x, -uvWall.uvScale.y},
                                uvWall.uvRotation);
@@ -1611,6 +1642,72 @@ void Viewport3D::draw(EditMapDocument&      doc,
                 // Backspace — reset UVs to default.
                 if (ImGui::IsKeyPressed(ImGuiKey_Backspace, /*repeat=*/false))
                     pushUV({0.0f, 0.0f}, {1.0f, 1.0f}, 0.0f);
+
+                // P — pixel-perfect scale using the front material's native dimensions.
+                if (ImGui::IsKeyPressed(ImGuiKey_P, /*repeat=*/false))
+                {
+                    const MaterialEntry* entry = catalog.find(uvWall.frontMaterialId);
+                    if (entry && entry->texWidth > 0 && entry->texHeight > 0)
+                        pushUV(uvWall.uvOffset,
+                               computePixelPerfectUVScale(entry->texWidth, entry->texHeight),
+                               uvWall.uvRotation);
+                }
+
+                // Shift+/ — square scale: set V scale equal to U scale.
+                if (ImGui::IsKeyPressed(ImGuiKey_Slash, /*repeat=*/false) && shiftHeld)
+                    pushUV(uvWall.uvOffset,
+                           {uvWall.uvScale.x, uvWall.uvScale.x},
+                           uvWall.uvRotation);
+
+                // C — copy UV to clipboard.
+                if (ImGui::IsKeyPressed(ImGuiKey_C, /*repeat=*/false))
+                {
+                    m_uvClipValid    = true;
+                    m_uvClipOffset   = uvWall.uvOffset;
+                    m_uvClipScale    = uvWall.uvScale;
+                    m_uvClipRotation = uvWall.uvRotation;
+                }
+
+                // Enter — paste UV from clipboard.
+                // Shift+Enter pastes scale+rotation only (preserves current offset).
+                if (ImGui::IsKeyPressed(ImGuiKey_Enter, /*repeat=*/false) && m_uvClipValid)
+                {
+                    if (shiftHeld)
+                        pushUV(uvWall.uvOffset, m_uvClipScale, m_uvClipRotation);
+                    else
+                        pushUV(m_uvClipOffset, m_uvClipScale, m_uvClipRotation);
+                }
+
+                // Alt+Left — align offset so this wall continues from the left (previous) wall.
+                if (ImGui::IsKeyPressed(ImGuiKey_LeftArrow, /*repeat=*/false) && altHeld)
+                {
+                    const auto& sec  = uvSectors[uvSid];
+                    const std::size_t n = sec.walls.size();
+                    const std::size_t prevWi = (uvWi + n - 1) % n;
+                    const world::Wall& prevW  = sec.walls[prevWi];
+                    const float prevLen =
+                        glm::length(sec.walls[uvWi].p0 - prevW.p0);
+                    const float prevScaleX =
+                        (prevW.uvScale.x > 1e-6f) ? prevW.uvScale.x : 1.0f;
+                    pushUV({prevW.uvOffset.x + prevLen / prevScaleX, prevW.uvOffset.y},
+                           uvWall.uvScale, uvWall.uvRotation);
+                }
+
+                // Alt+Right — align offset so this wall ends where the right (next) wall begins.
+                if (ImGui::IsKeyPressed(ImGuiKey_RightArrow, /*repeat=*/false) && altHeld)
+                {
+                    const auto& sec  = uvSectors[uvSid];
+                    const std::size_t n = sec.walls.size();
+                    const std::size_t nextWi = (uvWi + 1) % n;
+                    const world::Wall& nextW  = sec.walls[nextWi];
+                    const glm::vec2 curP1 = nextW.p0;
+                    const float curLen =
+                        glm::length(curP1 - uvWall.p0);
+                    const float curScaleX =
+                        (uvWall.uvScale.x > 1e-6f) ? uvWall.uvScale.x : 1.0f;
+                    pushUV({nextW.uvOffset.x - curLen / curScaleX, nextW.uvOffset.y},
+                           uvWall.uvScale, uvWall.uvRotation);
+                }
             }
         }
     }

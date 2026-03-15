@@ -39,6 +39,11 @@ struct MaterialEntry
     std::string           displayName;  ///< Filename without extension (for display).
     std::string           folderPath;   ///< Relative folder path within root ("" = root).
 
+    /// Native image dimensions in pixels.  Populated during scan() via a
+    /// lightweight stbi_info header read.  Zero if the file could not be queried.
+    uint32_t texWidth  = 0;
+    uint32_t texHeight = 0;
+
     /// 64×64 thumbnail texture; null until first getOrLoadThumbnail() call.
     std::unique_ptr<rhi::ITexture> thumbnail;
 
