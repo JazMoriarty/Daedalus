@@ -737,10 +737,20 @@ int main(int argc, char* argv[])
                         dlEntityBuffers.push_back(device->createBuffer(ibd));
                         rhi::IBuffer* ibo = dlEntityBuffers.back().get();
 
+                        // Load albedo texture if the glTF material provided a path.
+                        rhi::ITexture* meshAlbedo = nullptr;
+                        if (!md.albedoPath.empty())
+                        {
+                            const std::filesystem::path texPath =
+                                std::filesystem::path(ent.assetPath).parent_path() / md.albedoPath;
+                            meshAlbedo = loadEntityTex(texPath.string(), /*sRGB=*/true);
+                        }
+
                         render::StaticMeshComponent smc;
                         smc.vertexBuffer       = vbo;
                         smc.indexBuffer        = ibo;
                         smc.indexCount         = static_cast<u32>(md.indices.size());
+                        smc.material.albedo    = meshAlbedo;
                         smc.material.roughness = 0.85f;
                         smc.material.metalness = 0.0f;
                         dlWorld.addComponent(entityId, std::move(smc));

@@ -54,12 +54,16 @@ public:
     Viewport3D& operator=(const Viewport3D&) = delete;
 
     /// Draw the panel for this frame.
+    /// entityRotating / entityRotIdx: when the 2D viewport is actively rotating an
+    /// entity via RMB drag, pass those values to show a 3D forward-vector overlay.
     void draw(EditMapDocument&      doc,
               render::IAssetLoader& loader,
               rhi::IRenderDevice&   device,
               rhi::ICommandQueue&   queue,
               MaterialCatalog&      catalog,
-              AssetBrowserPanel&    assetBrowser);
+              AssetBrowserPanel&    assetBrowser,
+              bool                  entityRotating = false,
+              std::size_t           entityRotIdx   = 0);
 
     /// Enable/disable relative-mouse-mode (mouselook).  Called from main.mm on Tab/Escape.
     void setMouseCapture(SDL_Window* window, bool capture) noexcept;

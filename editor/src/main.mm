@@ -1462,7 +1462,8 @@ int main(int /*argc*/, char* /*argv*/[])
             }
         }
 
-        vp3d.draw(doc, *assetLoader, *device, *queue, catalog, assetBrowser);
+        vp3d.draw(doc, *assetLoader, *device, *queue, catalog, assetBrowser,
+                  vp2d.isEntityRotating(), vp2d.rotatingEntityIdx());
         inspector.draw(doc, catalog, *device, *assetLoader, assetBrowser);
         assetBrowser.draw(catalog, *device, *assetLoader, modelCatalog);
         renderPanel.draw(doc);

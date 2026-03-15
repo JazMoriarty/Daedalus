@@ -90,6 +90,10 @@ public:
     /// Called from main.mm each frame before draw().
     void updateFlyCamera(bool captured, glm::vec2 eyeXZ, float yawRad) noexcept;
 
+    /// True while an entity is being yaw-rotated via RMB drag in the 2D viewport.
+    [[nodiscard]] bool        isEntityRotating()  const noexcept { return m_entityRotActive; }
+    [[nodiscard]] std::size_t rotatingEntityIdx() const noexcept { return m_entityRotIdx;    }
+
     /// Expose rect-select state so the select tool can draw the overlay.
     [[nodiscard]] bool      isRectSelecting()   const noexcept { return m_rectSelActive; }
     [[nodiscard]] glm::vec2 rectSelectAnchor()  const noexcept { return m_rectSelAnchor; }
@@ -116,6 +120,11 @@ private:
     bool        m_lightDragActive = false;  ///< True while dragging a light.
     std::size_t m_lightDragIdx    = 0;      ///< Index of the light being dragged.
     glm::vec3   m_lightDragOrigin = {};     ///< World-space position at drag start.
+
+    // Entity rotate state
+    bool        m_entityRotActive = false;  ///< True while rotating an entity (RMB drag).
+    std::size_t m_entityRotIdx    = 0;      ///< Index of the entity being rotated.
+    float       m_entityRotOrigin = 0.0f;   ///< Yaw at rotate start (radians).
 
     // Player start drag / rotate state
     bool      m_psDragActive = false;   ///< True while translating the player start (LMB drag).

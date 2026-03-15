@@ -505,7 +505,9 @@ void Viewport3D::draw(EditMapDocument&      doc,
                        rhi::IRenderDevice&   device,
                        rhi::ICommandQueue&   queue,
                        MaterialCatalog&      catalog,
-                       AssetBrowserPanel&    assetBrowser)
+                       AssetBrowserPanel&    assetBrowser,
+                       bool                  entityRotating,
+                       std::size_t           entityRotIdx)
 {
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
     ImGui::Begin("3D Viewport");
@@ -1613,10 +1615,53 @@ void Viewport3D::draw(EditMapDocument&      doc,
         }
     }
 
-    // ── Gizmo overlay (drawn on top of the image) ───────────────────────
+    // ── Gizmo overlay (drawn on top of the image) ──────────────────────
     drawGizmoAndHandleDrag(doc, view, proj, imageTopLeft, w, h);
 
-    // ── Bookkeeping ────────────────────────────────────────────────────────────
+    // ── Forward-vector overlay (shown while 2D viewport is rotating an entity) ───
+    if (entityRotating && entityRotIdx < doc.entities().size())
+    {
+        const EntityDef& ed  = doc.entities()[entityRotIdx];
+        const float      fw  = static_cast<float>(w);
+        const float      fh  = static_cast<float>(h);
+
+        auto project3d = [&](glm::vec3 world) -> ImVec2
+        {
+            glm::vec4 clip = proj * view * glm::vec4(world, 1.0f);
+            if (clip.w <= 0.0f) return ImVec2(-1e5f, -1e5f);
+            const float nx = clip.x / clip.w;
+            const float ny = clip.y / clip.w;
+            return ImVec2(
+                imageTopLeft.x + (nx * 0.5f + 0.5f) * fw,
+                imageTopLeft.y + (1.0f - (ny * 0.5f + 0.5f)) * fh);
+        };
+
+        const glm::vec3 fwdDir(std::sin(ed.yaw), 0.0f, std::cos(ed.yaw));
+        constexpr float kVecLen = 3.0f;
+        const ImVec2 from = project3d(ed.position);
+        const ImVec2 to   = project3d(ed.position + fwdDir * kVecLen);
+
+        ImDrawList* dlFwd = ImGui::GetWindowDrawList();
+        constexpr ImU32 kFwdCol = IM_COL32(255, 200, 50, 230);
+        dlFwd->AddLine(from, to, kFwdCol, 2.5f);
+
+        // Arrowhead at tip.
+        const float ddx  = to.x - from.x;
+        const float ddy  = to.y - from.y;
+        const float dlen = std::sqrt(ddx * ddx + ddy * ddy);
+        if (dlen > 4.0f)
+        {
+            const float ux = ddx / dlen,  uy = ddy / dlen;
+            const float px = -uy,         py =  ux;
+            dlFwd->AddTriangleFilled(
+                to,
+                ImVec2{to.x - ux * 8.0f + px * 4.0f, to.y - uy * 8.0f + py * 4.0f},
+                ImVec2{to.x - ux * 8.0f - px * 4.0f, to.y - uy * 8.0f - py * 4.0f},
+                kFwdCol);
+        }
+    }
+
+    // ── Bookkeeping ───────────────────────────────────────────────────────────
     m_prevView = view;
     m_prevProj = proj;
     ++m_frameIdx;

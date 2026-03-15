@@ -12,11 +12,13 @@
 #include "document/commands/cmd_move_light.h"
 #include "document/commands/cmd_set_player_start.h"
 #include "document/commands/cmd_split_wall.h"
+#include "document/commands/cmd_rotate_entity.h"
 #include "document/commands/cmd_rotate_sector.h"
 
 #include "imgui.h"
 
 #include <glm/glm.hpp>
+#include <glm/gtc/constants.hpp>
 #include <algorithm>
 #include <cmath>
 #include <vector>
@@ -259,6 +261,22 @@ void Viewport2D::drawEntities(ImDrawList*            dl,
         // Selection ring.
         if (selected)
             dl->AddCircle(spi, kIconR + 4.0f, IM_COL32(255, 255, 255, 200), 24, 1.5f);
+
+        // Direction arrow — yaw=0 points toward +Z (down in top-down view).
+        // Brightens when selected so it's easy to read.
+        const ImU32  arrowAlpha = selected ? IM_COL32(255,255,255,220) : IM_COL32(255,255,255,120);
+        const float  sinY = std::sin(ed.yaw);
+        const float  cosY = std::cos(ed.yaw);
+        const float  arrLen = kIconR + 9.0f;
+        const ImVec2 tip {sp.x + sinY * arrLen, sp.y + cosY * arrLen};
+        dl->AddLine(spi, tip, arrowAlpha, 1.5f);
+        const float nx =  cosY;
+        const float ny = -sinY;
+        dl->AddTriangleFilled(
+            tip,
+            ImVec2{tip.x - sinY * 4.0f + nx * 3.0f, tip.y - cosY * 4.0f + ny * 3.0f},
+            ImVec2{tip.x - sinY * 4.0f - nx * 3.0f, tip.y - cosY * 4.0f - ny * 3.0f},
+            arrowAlpha);
     }
 }
 
@@ -817,9 +835,10 @@ void Viewport2D::draw(EditMapDocument& doc,
             }  // if (IsMouseClicked LMB)
             if (ImGui::IsMouseClicked(ImGuiMouseButton_Right))
             {
-                // RMB on a selected player start icon → begin yaw rotate drag.
-                constexpr float kHitRPs = 10.0f;  // screen-pixel hit radius
-                bool handledByPs = false;
+                constexpr float kHitR = 10.0f;  // screen-pixel hit radius
+                bool handled = false;
+
+                // RMB on player start icon → begin yaw rotate drag.
                 if (doc.selection().type == SelectionType::PlayerStart)
                 {
                     if (const auto& ps = doc.playerStart(); ps.has_value())
@@ -828,15 +847,41 @@ void Viewport2D::draw(EditMapDocument& doc,
                                                      canvasMin);
                         const float dx = mousePosV.x - sp.x;
                         const float dy = mousePosV.y - sp.y;
-                        if (dx * dx + dy * dy <= kHitRPs * kHitRPs)
+                        if (dx * dx + dy * dy <= kHitR * kHitR)
                         {
                             m_psRotActive = true;
                             m_psRotOrigin = ps->yaw;
-                            handledByPs   = true;
+                            handled       = true;
                         }
                     }
                 }
-                if (!handledByPs)
+
+                // RMB on any entity icon → select it and begin yaw rotate drag.
+                if (!handled)
+                {
+                    const auto& entities = doc.entities();
+                    for (std::size_t ei = 0; ei < entities.size() && !handled; ++ei)
+                    {
+                        const EntityDef& ed = entities[ei];
+                        const auto  sp = mapToScreen({ed.position.x, ed.position.z},
+                                                     canvasMin);
+                        const float dx = mousePosV.x - sp.x;
+                        const float dy = mousePosV.y - sp.y;
+                        if (dx * dx + dy * dy <= kHitR * kHitR)
+                        {
+                            SelectionState& sel = doc.selection();
+                            sel.clear();
+                            sel.type        = SelectionType::Entity;
+                            sel.entityIndex = ei;
+                            m_entityRotActive = true;
+                            m_entityRotIdx    = ei;
+                            m_entityRotOrigin = ed.yaw;
+                            handled           = true;
+                        }
+                    }
+                }
+
+                if (!handled)
                     activeTool->onMouseDown(doc, mouseMapRaw.x, mouseMapRaw.y, 1);
             }
             if (ImGui::IsMouseReleased(ImGuiMouseButton_Left))
@@ -977,6 +1022,40 @@ void Viewport2D::draw(EditMapDocument& doc,
             }
         }
         m_psRotActive = false;
+    }
+
+    // Entity live rotate (RMB drag — aim yaw toward mouse cursor).
+    // Default: snap to 45° increments.  Hold Shift for free rotation.
+    if (active && ImGui::IsMouseDown(ImGuiMouseButton_Right) && m_entityRotActive)
+    {
+        if (m_entityRotIdx < doc.entities().size())
+        {
+            EntityDef& ed = doc.entities()[m_entityRotIdx];
+            const auto  sp = mapToScreen({ed.position.x, ed.position.z}, canvasMin);
+            const float dx = mousePosV.x - sp.x;
+            const float dy = mousePosV.y - sp.y;
+            if (std::abs(dx) + std::abs(dy) > 2.0f)
+            {
+                const float rawYaw = std::atan2(dx, dy);
+                constexpr float k45 = glm::pi<float>() * 0.25f;
+                ed.yaw = shiftHeld ? rawYaw
+                                   : std::round(rawYaw / k45) * k45;
+                doc.markEntityDirty();
+            }
+        }
+    }
+
+    // Commit entity rotate when RMB is released.
+    if (m_entityRotActive && ImGui::IsMouseReleased(ImGuiMouseButton_Right))
+    {
+        if (m_entityRotIdx < doc.entities().size())
+        {
+            const float finalYaw = doc.entities()[m_entityRotIdx].yaw;
+            if (finalYaw != m_entityRotOrigin)
+                doc.pushCommand(std::make_unique<CmdRotateEntity>(
+                    doc, m_entityRotIdx, m_entityRotOrigin, finalYaw));
+        }
+        m_entityRotActive = false;
     }
 
     // Rect-select tracking — update current corner while dragging.
