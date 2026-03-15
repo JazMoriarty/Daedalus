@@ -370,7 +370,9 @@ void EntityGpuCache::populateSceneView(render::SceneView&            scene,
 
             glm::mat4 model = glm::mat4(1.0f);
             model = glm::translate(model, def.position);
-            model = glm::rotate(model, def.yaw, glm::vec3(0.0f, 1.0f, 0.0f));
+            model = glm::rotate(model, def.yaw,   glm::vec3(0.0f, 1.0f, 0.0f));
+            model = glm::rotate(model, def.pitch, glm::vec3(1.0f, 0.0f, 0.0f));
+            model = glm::rotate(model, def.roll,  glm::vec3(0.0f, 0.0f, 1.0f));
             model = glm::scale(model, def.scale);
 
             render::MeshDraw draw;
@@ -394,7 +396,9 @@ void EntityGpuCache::populateSceneView(render::SceneView&            scene,
 
             glm::mat4 model = glm::mat4(1.0f);
             model = glm::translate(model, def.position);
-            model = glm::rotate(model, def.yaw, glm::vec3(0.0f, 1.0f, 0.0f));
+            model = glm::rotate(model, def.yaw,   glm::vec3(0.0f, 1.0f, 0.0f));
+            model = glm::rotate(model, def.pitch, glm::vec3(1.0f, 0.0f, 0.0f));
+            model = glm::rotate(model, def.roll,  glm::vec3(0.0f, 0.0f, 1.0f));
             model = glm::scale(model, def.scale);
 
             render::DecalDraw decal;

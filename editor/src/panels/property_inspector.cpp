@@ -379,6 +379,15 @@ void PropertyInspector::draw(EditMapDocument&      doc,
         ImGui::Spacing();
         ImGui::SeparatorText("UV Mapping");
         {
+            // Statics to capture pre-drag UV values so the undo command
+            // constructor reads the correct original state even after live
+            // mutations have already been written to the wall.
+            // markDirty() triggers retessellation so the 3D viewport
+            // reflects UV changes in real time during drag.
+            static glm::vec2 s_origUvOff = {};
+            static glm::vec2 s_origUvSc  = {};
+            static float     s_origUvRot = 0.0f;  // radians
+
             // Offset — DragFloat2 uses the format string per-component, so a
             // single-label format like "Offset (%.3f, %.3f)" produces UB
             // (second %f reads garbage).  Use TextDisabled for the row header
@@ -386,29 +395,57 @@ void PropertyInspector::draw(EditMapDocument&      doc,
             ImGui::TextDisabled("Offset");
             glm::vec2 uvOff = wall.uvOffset;
             ImGui::SetNextItemWidth(-1.0f);
-            if (dragFloat2Undo("##uvoff", &uvOff.x, 0.01f, 0.0f, 0.0f, "%.3f"))
+            bool uvOffCommitted = dragFloat2Undo("##uvoff", &uvOff.x, 0.01f, 0.0f, 0.0f, "%.3f");
+            if (ImGui::IsItemActivated())
+                s_origUvOff = wall.uvOffset;
+            if (ImGui::IsItemActive() || ImGui::IsItemEdited())
+                { wall.uvOffset = uvOff; doc.markDirty(); }
+            if (uvOffCommitted)
+            {
+                // Reset to original so CmdSetWallUV captures the correct
+                // old value in its constructor; execute() re-applies the final.
+                const glm::vec2 finalOff = wall.uvOffset;
+                wall.uvOffset = s_origUvOff;
                 doc.pushCommand(std::make_unique<CmdSetWallUV>(
-                    doc, sid, wi, uvOff, wall.uvScale, wall.uvRotation));
+                    doc, sid, wi, finalOff, wall.uvScale, wall.uvRotation));
+            }
 
             ImGui::TextDisabled("Scale");
             glm::vec2 uvSc = wall.uvScale;
             ImGui::SetNextItemWidth(-1.0f);
-            if (dragFloat2Undo("##uvsc", &uvSc.x, 0.01f, 0.0f, 0.0f, "%.3f"))
+            bool uvScCommitted = dragFloat2Undo("##uvsc", &uvSc.x, 0.01f, 0.0f, 0.0f, "%.3f");
+            if (ImGui::IsItemActivated())
+                s_origUvSc = wall.uvScale;
+            if (ImGui::IsItemActive() || ImGui::IsItemEdited())
+                { wall.uvScale = uvSc; doc.markDirty(); }
+            if (uvScCommitted)
+            {
+                const glm::vec2 finalSc = wall.uvScale;
+                wall.uvScale = s_origUvSc;
                 doc.pushCommand(std::make_unique<CmdSetWallUV>(
-                    doc, sid, wi, wall.uvOffset, uvSc, wall.uvRotation));
+                    doc, sid, wi, wall.uvOffset, finalSc, wall.uvRotation));
+            }
 
             // Display rotation in degrees; store internally as radians.
             constexpr float kRad2Deg = 180.0f / glm::pi<float>();
             constexpr float kDeg2Rad = glm::pi<float>() / 180.0f;
             float uvRotDeg = wall.uvRotation * kRad2Deg;
             ImGui::SetNextItemWidth(-1.0f);
-            if (dragFloatUndo("##uvrot", &uvRotDeg, 0.5f, 0.0f, 0.0f,
-                              "Rotation: %.1f\xc2\xb0"))
+            bool uvRotCommitted = dragFloatUndo("##uvrot", &uvRotDeg, 0.5f, 0.0f, 0.0f,
+                                               "Rotation: %.1f\xc2\xb0");
+            if (ImGui::IsItemActivated())
+                s_origUvRot = wall.uvRotation;
+            if (ImGui::IsItemActive() || ImGui::IsItemEdited())
+                { wall.uvRotation = uvRotDeg * kDeg2Rad; doc.markDirty(); }
+            if (uvRotCommitted)
+            {
+                const float finalRot = wall.uvRotation;
+                wall.uvRotation = s_origUvRot;
                 doc.pushCommand(std::make_unique<CmdSetWallUV>(
-                    doc, sid, wi, wall.uvOffset, wall.uvScale,
-                    uvRotDeg * kDeg2Rad));
+                    doc, sid, wi, wall.uvOffset, wall.uvScale, finalRot));
+            }
 
-            // ── UV action buttons ──────────────────────────────────────────────
+            // ── UV action buttons ──────────────────────────────────────────────────────
             ImGui::Spacing();
 
             // Pre-compute wall geometry (needed by several buttons below).
@@ -665,7 +702,12 @@ void PropertyInspector::draw(EditMapDocument&      doc,
         ImGui::SeparatorText("Light");
         ImGui::Text("Index: %zu", li);
 
-        // ── Type ────────────────────────────────────────────────────
+        // Snapshot captured at the start of each drag for undo construction.
+        // Viewport3D reads doc.lights() fresh every frame so live mutations
+        // to ld.* appear in the viewport without any explicit dirty-flag call.
+        static LightDef s_preDragLight = {};
+
+        // ── Type ──────────────────────────────────────────────
         ImGui::Spacing();
         ImGui::SeparatorText("Type");
         {
@@ -686,90 +728,100 @@ void PropertyInspector::draw(EditMapDocument&      doc,
             }
         }
 
-        // ── Position ─────────────────────────────────────────────────
+        // ── Position ─────────────────────────────────────────
         ImGui::Spacing();
         ImGui::SeparatorText("Position");
         {
             glm::vec3 pos = ld.position;
             ImGui::SetNextItemWidth(-1.0f);
-            if (dragFloat3Undo("##lpos", &pos.x, 0.1f, 0.0f, 0.0f, "%.2f") &&
-                (pos.x != ld.position.x || pos.y != ld.position.y ||
-                 pos.z != ld.position.z))
+            bool posCommitted = dragFloat3Undo("##lpos", &pos.x, 0.1f, 0.0f, 0.0f, "%.2f");
+            if (ImGui::IsItemActivated())
+                s_preDragLight = ld;
+            if (ImGui::IsItemActive() || ImGui::IsItemEdited())
+                ld.position = pos;
+            if (posCommitted &&
+                (ld.position.x != s_preDragLight.position.x ||
+                 ld.position.y != s_preDragLight.position.y ||
+                 ld.position.z != s_preDragLight.position.z))
             {
                 doc.pushCommand(std::make_unique<CmdMoveLight>(
-                    doc, li, ld.position, pos));
+                    doc, li, s_preDragLight.position, ld.position));
             }
         }
 
-        // ── Appearance ───────────────────────────────────────────────
+        // ── Appearance ───────────────────────────────────────
         ImGui::Spacing();
         ImGui::SeparatorText("Appearance");
         {
-            const LightDef oldDef  = ld;
-            glm::vec3      col     = ld.color;
-            float          radius  = ld.radius;
-            float          intens  = ld.intensity;
+            glm::vec3 col    = ld.color;
+            float     radius = ld.radius;
+            float     intens = ld.intensity;
 
             bool colChanged = colorEditUndo("Color##light", &col.x, 3);
+            if (ImGui::IsItemActivated()) s_preDragLight = ld;
+            if (ImGui::IsItemActive() || ImGui::IsItemEdited()) ld.color = col;
 
             ImGui::SetNextItemWidth(-1.0f);
             bool radChanged = dragFloatUndo("##lrad", &radius, 0.1f, 0.0f, 0.0f, "Radius: %.1f m");
+            if (ImGui::IsItemActivated()) s_preDragLight = ld;
+            if (ImGui::IsItemActive() || ImGui::IsItemEdited()) ld.radius = radius;
 
             ImGui::SetNextItemWidth(-1.0f);
             bool intChanged = dragFloatUndo("##lint", &intens, 0.05f, 0.0f, 0.0f, "Intensity: %.2f");
+            if (ImGui::IsItemActivated()) s_preDragLight = ld;
+            if (ImGui::IsItemActive() || ImGui::IsItemEdited()) ld.intensity = intens;
 
             if (colChanged || radChanged || intChanged)
             {
-                LightDef newDef    = oldDef;
-                newDef.color     = col;
-                newDef.radius    = radius;
-                newDef.intensity = intens;
                 doc.pushCommand(std::make_unique<CmdSetLightProps>(
-                    doc, li, oldDef, newDef));
+                    doc, li, s_preDragLight, ld));
             }
         }
 
-        // ── Spot cone (visible when type == Spot) ────────────────────────
+        // ── Spot cone (visible when type == Spot) ──────────────────
         if (ld.type == LightType::Spot)
         {
             ImGui::Spacing();
             ImGui::SeparatorText("Spot Cone");
             {
-                const LightDef oldDef = ld;
                 glm::vec3 dir      = ld.direction;
                 float     innerDeg = glm::degrees(ld.innerConeAngle);
                 float     outerDeg = glm::degrees(ld.outerConeAngle);
                 float     range    = ld.range;
 
                 ImGui::SetNextItemWidth(-1.0f);
-                bool dirChanged   = dragFloat3Undo("##ldir", &dir.x, 0.01f, 0.0f, 0.0f, "%.2f");
+                bool dirChanged = dragFloat3Undo("##ldir", &dir.x, 0.01f, 0.0f, 0.0f, "%.2f");
+                if (ImGui::IsItemActivated()) s_preDragLight = ld;
+                if (ImGui::IsItemActive() || ImGui::IsItemEdited())
+                {
+                    const float len = glm::length(dir);
+                    ld.direction = (len > 1e-5f) ? (dir / len) : glm::vec3(0.0f, -1.0f, 0.0f);
+                }
 
                 ImGui::SetNextItemWidth(-1.0f);
                 bool innerChanged = dragFloatUndo("##linnercone", &innerDeg, 0.5f, 0.0f, 0.0f,
                                                   "Inner: %.1f\xc2\xb0");
+                if (ImGui::IsItemActivated()) s_preDragLight = ld;
+                if (ImGui::IsItemActive() || ImGui::IsItemEdited())
+                    ld.innerConeAngle = glm::radians(std::min(innerDeg, outerDeg));
 
                 ImGui::SetNextItemWidth(-1.0f);
                 bool outerChanged = dragFloatUndo("##loutercone", &outerDeg, 0.5f, 0.0f, 0.0f,
                                                   "Outer: %.1f\xc2\xb0");
+                if (ImGui::IsItemActivated()) s_preDragLight = ld;
+                if (ImGui::IsItemActive() || ImGui::IsItemEdited())
+                    ld.outerConeAngle = glm::radians(std::max(outerDeg, innerDeg));
 
                 ImGui::SetNextItemWidth(-1.0f);
                 bool rangeChanged = dragFloatUndo("##lrange", &range, 0.1f, 0.0f, 0.0f,
                                                   "Range: %.1f m");
+                if (ImGui::IsItemActivated()) s_preDragLight = ld;
+                if (ImGui::IsItemActive() || ImGui::IsItemEdited()) ld.range = range;
 
                 if (dirChanged || innerChanged || outerChanged || rangeChanged)
                 {
-                    const float len = glm::length(dir);
-                    LightDef newDef       = oldDef;
-                    newDef.direction      = (len > 1e-5f)
-                        ? (dir / len)
-                        : glm::vec3(0.0f, -1.0f, 0.0f);
-                    newDef.innerConeAngle = glm::radians(
-                        std::min(innerDeg, outerDeg));
-                    newDef.outerConeAngle = glm::radians(
-                        std::max(outerDeg, innerDeg));
-                    newDef.range          = range;
                     doc.pushCommand(std::make_unique<CmdSetLightProps>(
-                        doc, li, oldDef, newDef));
+                        doc, li, s_preDragLight, ld));
                 }
             }
         }
@@ -835,73 +887,82 @@ void PropertyInspector::draw(EditMapDocument&      doc,
         ImGui::Spacing();
         ImGui::SeparatorText("Transform");
         {
+            // Snapshot of entity state captured at the start of each drag for
+            // undo-command construction.  populateSceneView reads doc.entities()
+            // fresh every frame so live mutations to ed.* are reflected in the
+            // 3D viewport without any explicit dirty-flag call during drag.
+            static EntityDef s_preDragEntity = {};
+
             glm::vec3 pos = ed.position;
             ImGui::SetNextItemWidth(-1.0f);
-            if (dragFloat3Undo("##epos", &pos.x, 0.1f, 0.0f, 0.0f, "%.2f") &&
-                (pos.x != ed.position.x || pos.y != ed.position.y ||
-                 pos.z != ed.position.z))
+            bool posCommitted = dragFloat3Undo("##epos", &pos.x, 0.1f, 0.0f, 0.0f, "%.2f");
+            if (ImGui::IsItemActivated())
+                s_preDragEntity = ed;
+            if (ImGui::IsItemActive() || ImGui::IsItemEdited())
+                ed.position = pos;
+            if (posCommitted &&
+                (ed.position.x != s_preDragEntity.position.x ||
+                 ed.position.y != s_preDragEntity.position.y ||
+                 ed.position.z != s_preDragEntity.position.z))
             {
                 doc.pushCommand(std::make_unique<CmdMoveEntity>(
-                    doc, ei, ed.position, pos));
+                    doc, ei, s_preDragEntity.position, ed.position));
             }
 
             float yawDeg = glm::degrees(ed.yaw);
             ImGui::SetNextItemWidth(-1.0f);
-            if (dragFloatUndo("##eyaw", &yawDeg, 0.5f, 0.0f, 0.0f, "Yaw: %.1f\xc2\xb0"))
+            bool yawCommitted = dragFloatUndo("##eyaw", &yawDeg, 0.5f, 0.0f, 0.0f, "Yaw: %.1f\xc2\xb0");
+            if (ImGui::IsItemActivated())
+                s_preDragEntity = ed;
+            if (ImGui::IsItemActive() || ImGui::IsItemEdited())
+                ed.yaw = glm::radians(yawDeg);
+            if (yawCommitted && ed.yaw != s_preDragEntity.yaw)
             {
-                const float newYaw = glm::radians(yawDeg);
-                if (newYaw != ed.yaw)
-                {
-                    EntityDef oldDef = ed;
-                    EntityDef newDef = ed;
-                    newDef.yaw = newYaw;
-                    doc.pushCommand(std::make_unique<CmdSetEntityProps>(
-                        doc, ei, oldDef, newDef));
-                }
+                doc.pushCommand(std::make_unique<CmdSetEntityProps>(
+                    doc, ei, s_preDragEntity, ed));
             }
 
             float pitchDeg = glm::degrees(ed.pitch);
             ImGui::SetNextItemWidth(-1.0f);
-            if (dragFloatUndo("##epitch", &pitchDeg, 0.5f, 0.0f, 0.0f, "Pitch: %.1f\xc2\xb0"))
+            bool pitchCommitted = dragFloatUndo("##epitch", &pitchDeg, 0.5f, 0.0f, 0.0f, "Pitch: %.1f\xc2\xb0");
+            if (ImGui::IsItemActivated())
+                s_preDragEntity = ed;
+            if (ImGui::IsItemActive() || ImGui::IsItemEdited())
+                ed.pitch = glm::radians(pitchDeg);
+            if (pitchCommitted && ed.pitch != s_preDragEntity.pitch)
             {
-                const float newPitch = glm::radians(pitchDeg);
-                if (newPitch != ed.pitch)
-                {
-                    EntityDef oldDef = ed;
-                    EntityDef newDef = ed;
-                    newDef.pitch = newPitch;
-                    doc.pushCommand(std::make_unique<CmdSetEntityProps>(
-                        doc, ei, oldDef, newDef));
-                }
+                doc.pushCommand(std::make_unique<CmdSetEntityProps>(
+                    doc, ei, s_preDragEntity, ed));
             }
 
             float rollDeg = glm::degrees(ed.roll);
             ImGui::SetNextItemWidth(-1.0f);
-            if (dragFloatUndo("##eroll", &rollDeg, 0.5f, 0.0f, 0.0f, "Roll: %.1f\xc2\xb0"))
+            bool rollCommitted = dragFloatUndo("##eroll", &rollDeg, 0.5f, 0.0f, 0.0f, "Roll: %.1f\xc2\xb0");
+            if (ImGui::IsItemActivated())
+                s_preDragEntity = ed;
+            if (ImGui::IsItemActive() || ImGui::IsItemEdited())
+                ed.roll = glm::radians(rollDeg);
+            if (rollCommitted && ed.roll != s_preDragEntity.roll)
             {
-                const float newRoll = glm::radians(rollDeg);
-                if (newRoll != ed.roll)
-                {
-                    EntityDef oldDef = ed;
-                    EntityDef newDef = ed;
-                    newDef.roll = newRoll;
-                    doc.pushCommand(std::make_unique<CmdSetEntityProps>(
-                        doc, ei, oldDef, newDef));
-                }
+                doc.pushCommand(std::make_unique<CmdSetEntityProps>(
+                    doc, ei, s_preDragEntity, ed));
             }
 
             glm::vec3 scale = ed.scale;
             ImGui::TextDisabled("Scale");
             ImGui::SetNextItemWidth(-1.0f);
-            if (dragFloat3Undo("##escale", &scale.x, 0.01f, 0.0f, 0.0f, "%.3f") &&
-                (scale.x != ed.scale.x || scale.y != ed.scale.y ||
-                 scale.z != ed.scale.z))
+            bool scaleCommitted = dragFloat3Undo("##escale", &scale.x, 0.01f, 0.0f, 0.0f, "%.3f");
+            if (ImGui::IsItemActivated())
+                s_preDragEntity = ed;
+            if (ImGui::IsItemActive() || ImGui::IsItemEdited())
+                ed.scale = scale;
+            if (scaleCommitted &&
+                (ed.scale.x != s_preDragEntity.scale.x ||
+                 ed.scale.y != s_preDragEntity.scale.y ||
+                 ed.scale.z != s_preDragEntity.scale.z))
             {
-                EntityDef oldDef = ed;
-                EntityDef newDef = ed;
-                newDef.scale = scale;
                 doc.pushCommand(std::make_unique<CmdSetEntityProps>(
-                    doc, ei, oldDef, newDef));
+                    doc, ei, s_preDragEntity, ed));
             }
         }
 
