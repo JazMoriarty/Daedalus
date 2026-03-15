@@ -81,6 +81,79 @@ static bool colorEditUndo(const char* label, float* col, int channels,
     return false;
 }
 
+// DragFloat/DragInt wrappers that survive per-frame local re-initialisation.
+// Without these helpers, the caller re-initialises the local variable from
+// stored data every frame, so ImGui's drag-accumulator is always applied to
+// the STORED value instead of the previously-dragged value — dragged values
+// never accumulate beyond one frame's delta.  Each helper stores the
+// in-progress value in a static slot keyed by widget ID, restores it before
+// calling the ImGui widget, and returns true on IsItemDeactivatedAfterEdit.
+// NOTE: only one widget of each type can be active at once, which is
+// guaranteed by ImGui's single-active-item model.
+static bool dragFloatUndo(const char* label, float* v, float speed,
+                           float v_min, float v_max, const char* fmt,
+                           ImGuiSliderFlags flags = 0)
+{
+    static ImGuiID s_id  = 0;
+    static float   s_val = 0.0f;
+    const ImGuiID wid = ImGui::GetID(label);
+    if (s_id == wid) *v = s_val;
+    ImGui::DragFloat(label, v, speed, v_min, v_max, fmt, flags);
+    if (ImGui::IsItemActive() || ImGui::IsItemEdited())
+        { s_id = wid; s_val = *v; }
+    if (ImGui::IsItemDeactivatedAfterEdit())
+        { if (s_id == wid) { *v = s_val; s_id = 0; } return true; }
+    return false;
+}
+
+static bool dragFloat2Undo(const char* label, float* v, float speed,
+                            float v_min, float v_max, const char* fmt,
+                            ImGuiSliderFlags flags = 0)
+{
+    static ImGuiID s_id     = 0;
+    static float   s_val[2] = {};
+    const ImGuiID wid = ImGui::GetID(label);
+    if (s_id == wid) { v[0] = s_val[0]; v[1] = s_val[1]; }
+    ImGui::DragFloat2(label, v, speed, v_min, v_max, fmt, flags);
+    if (ImGui::IsItemActive() || ImGui::IsItemEdited())
+        { s_id = wid; s_val[0] = v[0]; s_val[1] = v[1]; }
+    if (ImGui::IsItemDeactivatedAfterEdit())
+        { if (s_id == wid) { v[0] = s_val[0]; v[1] = s_val[1]; s_id = 0; } return true; }
+    return false;
+}
+
+static bool dragFloat3Undo(const char* label, float* v, float speed,
+                            float v_min, float v_max, const char* fmt,
+                            ImGuiSliderFlags flags = 0)
+{
+    static ImGuiID s_id     = 0;
+    static float   s_val[3] = {};
+    const ImGuiID wid = ImGui::GetID(label);
+    if (s_id == wid) { v[0] = s_val[0]; v[1] = s_val[1]; v[2] = s_val[2]; }
+    ImGui::DragFloat3(label, v, speed, v_min, v_max, fmt, flags);
+    if (ImGui::IsItemActive() || ImGui::IsItemEdited())
+        { s_id = wid; s_val[0] = v[0]; s_val[1] = v[1]; s_val[2] = v[2]; }
+    if (ImGui::IsItemDeactivatedAfterEdit())
+        { if (s_id == wid) { v[0]=s_val[0]; v[1]=s_val[1]; v[2]=s_val[2]; s_id=0; } return true; }
+    return false;
+}
+
+static bool dragIntUndo(const char* label, int* v, float speed,
+                         int v_min, int v_max, const char* fmt,
+                         ImGuiSliderFlags flags = 0)
+{
+    static ImGuiID s_id  = 0;
+    static int     s_val = 0;
+    const ImGuiID wid = ImGui::GetID(label);
+    if (s_id == wid) *v = s_val;
+    ImGui::DragInt(label, v, speed, v_min, v_max, fmt, flags);
+    if (ImGui::IsItemActive() || ImGui::IsItemEdited())
+        { s_id = wid; s_val = *v; }
+    if (ImGui::IsItemDeactivatedAfterEdit())
+        { if (s_id == wid) { *v = s_val; s_id = 0; } return true; }
+    return false;
+}
+
 void PropertyInspector::draw(EditMapDocument&      doc,
                               MaterialCatalog&      catalog,
                               rhi::IRenderDevice&   device,
@@ -115,16 +188,16 @@ void PropertyInspector::draw(EditMapDocument&      doc,
         {
             float floor = sector.floorHeight;
             ImGui::SetNextItemWidth(-1.0f);
-            ImGui::DragFloat("##floor", &floor, 0.1f, -100.0f, 100.0f, "Floor: %.2f");
-            if (ImGui::IsItemDeactivatedAfterEdit() && floor != sector.floorHeight)
+            if (dragFloatUndo("##floor", &floor, 0.1f, 0.0f, 0.0f, "Floor: %.2f") &&
+                floor != sector.floorHeight)
                 doc.pushCommand(std::make_unique<CmdSetSectorHeights>(
                     doc, sid, floor, sector.ceilHeight));
         }
         {
             float ceil = sector.ceilHeight;
             ImGui::SetNextItemWidth(-1.0f);
-            ImGui::DragFloat("##ceil", &ceil, 0.1f, -100.0f, 100.0f, "Ceiling: %.2f");
-            if (ImGui::IsItemDeactivatedAfterEdit() && ceil != sector.ceilHeight)
+            if (dragFloatUndo("##ceil", &ceil, 0.1f, 0.0f, 0.0f, "Ceiling: %.2f") &&
+                ceil != sector.ceilHeight)
                 doc.pushCommand(std::make_unique<CmdSetSectorHeights>(
                     doc, sid, sector.floorHeight, ceil));
         }
@@ -165,9 +238,7 @@ void PropertyInspector::draw(EditMapDocument&      doc,
         {
             float intensity = sector.ambientIntensity;
             ImGui::SetNextItemWidth(-1.0f);
-            ImGui::DragFloat("##ambint", &intensity, 0.01f, 0.0f, 10.0f,
-                             "Intensity: %.2f");
-            if (ImGui::IsItemDeactivatedAfterEdit() &&
+            if (dragFloatUndo("##ambint", &intensity, 0.01f, 0.0f, 0.0f, "Intensity: %.2f") &&
                 intensity != sector.ambientIntensity)
                 doc.pushCommand(std::make_unique<CmdSetSectorAmbient>(
                     doc, sid, sector.ambientColor, intensity));
@@ -315,16 +386,14 @@ void PropertyInspector::draw(EditMapDocument&      doc,
             ImGui::TextDisabled("Offset");
             glm::vec2 uvOff = wall.uvOffset;
             ImGui::SetNextItemWidth(-1.0f);
-            ImGui::DragFloat2("##uvoff", &uvOff.x, 0.01f, -100.0f, 100.0f, "%.3f");
-            if (ImGui::IsItemDeactivatedAfterEdit())
+            if (dragFloat2Undo("##uvoff", &uvOff.x, 0.01f, 0.0f, 0.0f, "%.3f"))
                 doc.pushCommand(std::make_unique<CmdSetWallUV>(
                     doc, sid, wi, uvOff, wall.uvScale, wall.uvRotation));
 
             ImGui::TextDisabled("Scale");
             glm::vec2 uvSc = wall.uvScale;
             ImGui::SetNextItemWidth(-1.0f);
-            ImGui::DragFloat2("##uvsc", &uvSc.x, 0.01f, 0.001f, 100.0f, "%.3f");
-            if (ImGui::IsItemDeactivatedAfterEdit())
+            if (dragFloat2Undo("##uvsc", &uvSc.x, 0.01f, 0.0f, 0.0f, "%.3f"))
                 doc.pushCommand(std::make_unique<CmdSetWallUV>(
                     doc, sid, wi, wall.uvOffset, uvSc, wall.uvRotation));
 
@@ -333,10 +402,8 @@ void PropertyInspector::draw(EditMapDocument&      doc,
             constexpr float kDeg2Rad = glm::pi<float>() / 180.0f;
             float uvRotDeg = wall.uvRotation * kRad2Deg;
             ImGui::SetNextItemWidth(-1.0f);
-            ImGui::DragFloat("##uvrot", &uvRotDeg, 0.5f, -360.0f, 360.0f,
-                             "Rotation: %.1f\xc2\xb0",
-                             ImGuiSliderFlags_AlwaysClamp);
-            if (ImGui::IsItemDeactivatedAfterEdit())
+            if (dragFloatUndo("##uvrot", &uvRotDeg, 0.5f, 0.0f, 0.0f,
+                              "Rotation: %.1f\xc2\xb0"))
                 doc.pushCommand(std::make_unique<CmdSetWallUV>(
                     doc, sid, wi, wall.uvOffset, wall.uvScale,
                     uvRotDeg * kDeg2Rad));
@@ -625,9 +692,7 @@ void PropertyInspector::draw(EditMapDocument&      doc,
         {
             glm::vec3 pos = ld.position;
             ImGui::SetNextItemWidth(-1.0f);
-            ImGui::DragFloat3("##lpos", &pos.x, 0.1f, -10000.0f, 10000.0f,
-                              "(%.2f, %.2f, %.2f)");
-            if (ImGui::IsItemDeactivatedAfterEdit() &&
+            if (dragFloat3Undo("##lpos", &pos.x, 0.1f, 0.0f, 0.0f, "%.2f") &&
                 (pos.x != ld.position.x || pos.y != ld.position.y ||
                  pos.z != ld.position.z))
             {
@@ -648,12 +713,10 @@ void PropertyInspector::draw(EditMapDocument&      doc,
             bool colChanged = colorEditUndo("Color##light", &col.x, 3);
 
             ImGui::SetNextItemWidth(-1.0f);
-            ImGui::DragFloat("##lrad", &radius, 0.1f, 0.1f, 1000.0f, "Radius: %.1f m");
-            bool radChanged = ImGui::IsItemDeactivatedAfterEdit();
+            bool radChanged = dragFloatUndo("##lrad", &radius, 0.1f, 0.0f, 0.0f, "Radius: %.1f m");
 
             ImGui::SetNextItemWidth(-1.0f);
-            ImGui::DragFloat("##lint", &intens, 0.05f, 0.0f, 100.0f, "Intensity: %.2f");
-            bool intChanged = ImGui::IsItemDeactivatedAfterEdit();
+            bool intChanged = dragFloatUndo("##lint", &intens, 0.05f, 0.0f, 0.0f, "Intensity: %.2f");
 
             if (colChanged || radChanged || intChanged)
             {
@@ -679,24 +742,19 @@ void PropertyInspector::draw(EditMapDocument&      doc,
                 float     range    = ld.range;
 
                 ImGui::SetNextItemWidth(-1.0f);
-                ImGui::DragFloat3("##ldir", &dir.x, 0.01f, -1.0f, 1.0f,
-                                  "Dir (%.2f, %.2f, %.2f)");
-                bool dirChanged = ImGui::IsItemDeactivatedAfterEdit();
+                bool dirChanged   = dragFloat3Undo("##ldir", &dir.x, 0.01f, 0.0f, 0.0f, "%.2f");
 
                 ImGui::SetNextItemWidth(-1.0f);
-                ImGui::DragFloat("##linnercone", &innerDeg, 0.5f, 1.0f, 89.0f,
-                                 "Inner: %.1f\xc2\xb0");
-                bool innerChanged = ImGui::IsItemDeactivatedAfterEdit();
+                bool innerChanged = dragFloatUndo("##linnercone", &innerDeg, 0.5f, 0.0f, 0.0f,
+                                                  "Inner: %.1f\xc2\xb0");
 
                 ImGui::SetNextItemWidth(-1.0f);
-                ImGui::DragFloat("##loutercone", &outerDeg, 0.5f, 1.0f, 90.0f,
-                                 "Outer: %.1f\xc2\xb0");
-                bool outerChanged = ImGui::IsItemDeactivatedAfterEdit();
+                bool outerChanged = dragFloatUndo("##loutercone", &outerDeg, 0.5f, 0.0f, 0.0f,
+                                                  "Outer: %.1f\xc2\xb0");
 
                 ImGui::SetNextItemWidth(-1.0f);
-                ImGui::DragFloat("##lrange", &range, 0.1f, 0.1f, 1000.0f,
-                                 "Range: %.1f m");
-                bool rangeChanged = ImGui::IsItemDeactivatedAfterEdit();
+                bool rangeChanged = dragFloatUndo("##lrange", &range, 0.1f, 0.0f, 0.0f,
+                                                  "Range: %.1f m");
 
                 if (dirChanged || innerChanged || outerChanged || rangeChanged)
                 {
@@ -779,9 +837,7 @@ void PropertyInspector::draw(EditMapDocument&      doc,
         {
             glm::vec3 pos = ed.position;
             ImGui::SetNextItemWidth(-1.0f);
-            ImGui::DragFloat3("##epos", &pos.x, 0.1f, -10000.0f, 10000.0f,
-                              "(%.2f, %.2f, %.2f)");
-            if (ImGui::IsItemDeactivatedAfterEdit() &&
+            if (dragFloat3Undo("##epos", &pos.x, 0.1f, 0.0f, 0.0f, "%.2f") &&
                 (pos.x != ed.position.x || pos.y != ed.position.y ||
                  pos.z != ed.position.z))
             {
@@ -791,9 +847,7 @@ void PropertyInspector::draw(EditMapDocument&      doc,
 
             float yawDeg = glm::degrees(ed.yaw);
             ImGui::SetNextItemWidth(-1.0f);
-            ImGui::DragFloat("##eyaw", &yawDeg, 0.5f, -360.0f, 360.0f,
-                             "Yaw: %.1f\xc2\xb0");
-            if (ImGui::IsItemDeactivatedAfterEdit())
+            if (dragFloatUndo("##eyaw", &yawDeg, 0.5f, 0.0f, 0.0f, "Yaw: %.1f\xc2\xb0"))
             {
                 const float newYaw = glm::radians(yawDeg);
                 if (newYaw != ed.yaw)
@@ -808,9 +862,7 @@ void PropertyInspector::draw(EditMapDocument&      doc,
 
             float pitchDeg = glm::degrees(ed.pitch);
             ImGui::SetNextItemWidth(-1.0f);
-            ImGui::DragFloat("##epitch", &pitchDeg, 0.5f, -90.0f, 90.0f,
-                             "Pitch: %.1f\xc2\xb0");
-            if (ImGui::IsItemDeactivatedAfterEdit())
+            if (dragFloatUndo("##epitch", &pitchDeg, 0.5f, 0.0f, 0.0f, "Pitch: %.1f\xc2\xb0"))
             {
                 const float newPitch = glm::radians(pitchDeg);
                 if (newPitch != ed.pitch)
@@ -825,9 +877,7 @@ void PropertyInspector::draw(EditMapDocument&      doc,
 
             float rollDeg = glm::degrees(ed.roll);
             ImGui::SetNextItemWidth(-1.0f);
-            ImGui::DragFloat("##eroll", &rollDeg, 0.5f, -180.0f, 180.0f,
-                             "Roll: %.1f\xc2\xb0");
-            if (ImGui::IsItemDeactivatedAfterEdit())
+            if (dragFloatUndo("##eroll", &rollDeg, 0.5f, 0.0f, 0.0f, "Roll: %.1f\xc2\xb0"))
             {
                 const float newRoll = glm::radians(rollDeg);
                 if (newRoll != ed.roll)
@@ -841,10 +891,9 @@ void PropertyInspector::draw(EditMapDocument&      doc,
             }
 
             glm::vec3 scale = ed.scale;
+            ImGui::TextDisabled("Scale");
             ImGui::SetNextItemWidth(-1.0f);
-            ImGui::DragFloat3("##escale", &scale.x, 0.01f, 0.001f, 1000.0f,
-                              "Scale (%.3f, %.3f, %.3f)");
-            if (ImGui::IsItemDeactivatedAfterEdit() &&
+            if (dragFloat3Undo("##escale", &scale.x, 0.01f, 0.0f, 0.0f, "%.3f") &&
                 (scale.x != ed.scale.x || scale.y != ed.scale.y ||
                  scale.z != ed.scale.z))
             {
@@ -1012,20 +1061,16 @@ void PropertyInspector::draw(EditMapDocument&      doc,
                 float frameRate  = ed.anim.frameRate;
 
                 ImGui::SetNextItemWidth(-1.0f);
-                ImGui::DragInt("##efc", &frameCount, 1.0f, 1, 4096, "Frames: %d");
-                bool fcChanged = ImGui::IsItemDeactivatedAfterEdit();
+                bool fcChanged   = dragIntUndo("##efc",   &frameCount, 1.0f, 0, 0, "Frames: %d");
 
                 ImGui::SetNextItemWidth(-1.0f);
-                ImGui::DragInt("##ecols", &cols, 1.0f, 1, 256, "Cols: %d");
-                bool colsChanged = ImGui::IsItemDeactivatedAfterEdit();
+                bool colsChanged = dragIntUndo("##ecols", &cols,       1.0f, 0, 0, "Cols: %d");
 
                 ImGui::SetNextItemWidth(-1.0f);
-                ImGui::DragInt("##erows", &rows, 1.0f, 1, 256, "Rows: %d");
-                bool rowsChanged = ImGui::IsItemDeactivatedAfterEdit();
+                bool rowsChanged = dragIntUndo("##erows", &rows,       1.0f, 0, 0, "Rows: %d");
 
                 ImGui::SetNextItemWidth(-1.0f);
-                ImGui::DragFloat("##efps", &frameRate, 0.1f, 0.1f, 120.0f, "FPS: %.1f");
-                bool fpsChanged = ImGui::IsItemDeactivatedAfterEdit();
+                bool fpsChanged  = dragFloatUndo("##efps", &frameRate, 0.1f, 0.0f, 0.0f, "FPS: %.1f");
 
                 if (fcChanged || colsChanged || rowsChanged || fpsChanged)
                 {
@@ -1058,19 +1103,16 @@ void PropertyInspector::draw(EditMapDocument&      doc,
                 bool normChanged = ImGui::IsItemDeactivatedAfterEdit();
 
                 ImGui::SetNextItemWidth(-1.0f);
-                ImGui::DragFloat("##erough", &roughness, 0.01f, 0.0f, 1.0f,
-                                 "Roughness: %.2f");
-                bool roughChanged = ImGui::IsItemDeactivatedAfterEdit();
+                bool roughChanged = dragFloatUndo("##erough", &roughness, 0.01f,
+                                                  0.0f, 1.0f, "Roughness: %.2f");
 
                 ImGui::SetNextItemWidth(-1.0f);
-                ImGui::DragFloat("##emetal", &metalness, 0.01f, 0.0f, 1.0f,
-                                 "Metalness: %.2f");
-                bool metalChanged = ImGui::IsItemDeactivatedAfterEdit();
+                bool metalChanged = dragFloatUndo("##emetal", &metalness, 0.01f,
+                                                  0.0f, 1.0f, "Metalness: %.2f");
 
                 ImGui::SetNextItemWidth(-1.0f);
-                ImGui::DragFloat("##eopac", &opacity, 0.01f, 0.0f, 1.0f,
-                                 "Opacity: %.2f");
-                bool opacChanged = ImGui::IsItemDeactivatedAfterEdit();
+                bool opacChanged  = dragFloatUndo("##eopac",  &opacity,   0.01f,
+                                                  0.0f, 1.0f, "Opacity: %.2f");
 
                 if (normChanged || roughChanged || metalChanged || opacChanged)
                 {
@@ -1107,16 +1149,13 @@ void PropertyInspector::draw(EditMapDocument&      doc,
                 ImGui::SameLine(); ImGui::TextDisabled("Directions");
 
                 ImGui::SetNextItemWidth(-1.0f);
-                ImGui::DragInt("##rsrows", &animRows, 1.0f, 1, 256, "Anim Rows: %d");
-                bool rowsChanged = ImGui::IsItemDeactivatedAfterEdit();
+                bool rowsChanged = dragIntUndo("##rsrows", &animRows, 1.0f, 0, 0, "Anim Rows: %d");
 
                 ImGui::SetNextItemWidth(-1.0f);
-                ImGui::DragInt("##rscols", &animCols, 1.0f, 1, 256, "Anim Cols: %d");
-                bool colsChanged = ImGui::IsItemDeactivatedAfterEdit();
+                bool colsChanged = dragIntUndo("##rscols", &animCols, 1.0f, 0, 0, "Anim Cols: %d");
 
                 ImGui::SetNextItemWidth(-1.0f);
-                ImGui::DragFloat("##rsfps", &frameRate, 0.1f, 0.1f, 120.0f, "FPS: %.1f");
-                bool fpsChanged = ImGui::IsItemDeactivatedAfterEdit();
+                bool fpsChanged  = dragFloatUndo("##rsfps", &frameRate, 0.1f, 0.0f, 0.0f, "FPS: %.1f");
 
                 if (rowsChanged || colsChanged || fpsChanged)
                 {
@@ -1149,63 +1188,52 @@ void PropertyInspector::draw(EditMapDocument&      doc,
                 glm::vec3 gravity          = ed.particle.gravity;
 
                 ImGui::SetNextItemWidth(-1.0f);
-                ImGui::DragFloat("##perate", &emissionRate, 0.1f, 0.0f, 10000.0f,
-                                 "Emission Rate: %.1f/s");
-                bool erChanged = ImGui::IsItemDeactivatedAfterEdit();
+                bool erChanged   = dragFloatUndo("##perate", &emissionRate, 0.1f,
+                                                  0.0f, 0.0f, "Emission Rate: %.1f/s");
 
                 ImGui::SetNextItemWidth(-1.0f);
-                ImGui::DragFloat3("##pedir", &emitDir.x, 0.01f, -1.0f, 1.0f,
-                                  "Dir (%.2f, %.2f, %.2f)");
-                bool edirChanged = ImGui::IsItemDeactivatedAfterEdit();
+                bool edirChanged = dragFloat3Undo("##pedir", &emitDir.x, 0.01f,
+                                                  0.0f, 0.0f, "%.2f");
 
                 ImGui::SetNextItemWidth(-1.0f);
-                ImGui::DragFloat("##pecone", &coneHalfAngleDeg, 0.5f, 0.0f, 90.0f,
-                                 "Cone: %.1f\xc2\xb0");
-                bool coneChanged = ImGui::IsItemDeactivatedAfterEdit();
+                bool coneChanged = dragFloatUndo("##pecone", &coneHalfAngleDeg, 0.5f,
+                                                  0.0f, 0.0f, "Cone: %.1f\xc2\xb0");
 
                 ImGui::SetNextItemWidth(-1.0f);
-                ImGui::DragFloat("##pespmin", &speedMin, 0.1f, 0.0f, 1000.0f,
-                                 "Speed Min: %.1f");
-                bool sminChanged = ImGui::IsItemDeactivatedAfterEdit();
+                bool sminChanged = dragFloatUndo("##pespmin", &speedMin, 0.1f,
+                                                  0.0f, 0.0f, "Speed Min: %.1f");
 
                 ImGui::SetNextItemWidth(-1.0f);
-                ImGui::DragFloat("##pespmax", &speedMax, 0.1f, 0.0f, 1000.0f,
-                                 "Speed Max: %.1f");
-                bool smaxChanged = ImGui::IsItemDeactivatedAfterEdit();
+                bool smaxChanged = dragFloatUndo("##pespmax", &speedMax, 0.1f,
+                                                  0.0f, 0.0f, "Speed Max: %.1f");
 
                 ImGui::SetNextItemWidth(-1.0f);
-                ImGui::DragFloat("##peltmin", &lifetimeMin, 0.1f, 0.0f, 300.0f,
-                                 "Life Min: %.1f s");
-                bool ltminChanged = ImGui::IsItemDeactivatedAfterEdit();
+                bool ltminChanged = dragFloatUndo("##peltmin", &lifetimeMin, 0.1f,
+                                                   0.0f, 0.0f, "Life Min: %.1f s");
 
                 ImGui::SetNextItemWidth(-1.0f);
-                ImGui::DragFloat("##peltmax", &lifetimeMax, 0.1f, 0.0f, 300.0f,
-                                 "Life Max: %.1f s");
-                bool ltmaxChanged = ImGui::IsItemDeactivatedAfterEdit();
+                bool ltmaxChanged = dragFloatUndo("##peltmax", &lifetimeMax, 0.1f,
+                                                   0.0f, 0.0f, "Life Max: %.1f s");
 
                 bool csChanged = colorEditUndo("Color Start##particle", &colorStart.x, 4);
 
                 bool ceChanged = colorEditUndo("Color End##particle",   &colorEnd.x, 4);
 
                 ImGui::SetNextItemWidth(-1.0f);
-                ImGui::DragFloat("##peszstart", &sizeStart, 0.01f, 0.001f, 100.0f,
-                                 "Size Start: %.3f m");
-                bool ssChanged = ImGui::IsItemDeactivatedAfterEdit();
+                bool ssChanged   = dragFloatUndo("##peszstart", &sizeStart, 0.01f,
+                                                  0.0f, 0.0f, "Size Start: %.3f m");
 
                 ImGui::SetNextItemWidth(-1.0f);
-                ImGui::DragFloat("##peszend", &sizeEnd, 0.01f, 0.001f, 100.0f,
-                                 "Size End: %.3f m");
-                bool seChanged = ImGui::IsItemDeactivatedAfterEdit();
+                bool seChanged   = dragFloatUndo("##peszend", &sizeEnd, 0.01f,
+                                                  0.0f, 0.0f, "Size End: %.3f m");
 
                 ImGui::SetNextItemWidth(-1.0f);
-                ImGui::DragFloat("##pedrag", &drag, 0.01f, 0.0f, 100.0f,
-                                 "Drag: %.2f");
-                bool dragChanged = ImGui::IsItemDeactivatedAfterEdit();
+                bool dragChanged = dragFloatUndo("##pedrag", &drag, 0.01f,
+                                                  0.0f, 0.0f, "Drag: %.2f");
 
                 ImGui::SetNextItemWidth(-1.0f);
-                ImGui::DragFloat3("##pegrav", &gravity.x, 0.1f, -100.0f, 100.0f,
-                                  "Gravity (%.1f, %.1f, %.1f)");
-                bool gravChanged = ImGui::IsItemDeactivatedAfterEdit();
+                bool gravChanged = dragFloat3Undo("##pegrav", &gravity.x, 0.1f,
+                                                   0.0f, 0.0f, "%.1f");
 
                 if (erChanged || edirChanged || coneChanged ||
                     sminChanged || smaxChanged || ltminChanged || ltmaxChanged ||
@@ -1263,8 +1291,8 @@ void PropertyInspector::draw(EditMapDocument&      doc,
             {
                 float mass = ed.physics.mass;
                 ImGui::SetNextItemWidth(-1.0f);
-                ImGui::DragFloat("##pmass", &mass, 0.1f, 0.001f, 10000.0f, "Mass: %.2f kg");
-                if (ImGui::IsItemDeactivatedAfterEdit() && mass != ed.physics.mass)
+                if (dragFloatUndo("##pmass", &mass, 0.1f, 0.0f, 0.0f, "Mass: %.2f kg") &&
+                    mass != ed.physics.mass)
                 {
                     EntityDef oldDef = ed; EntityDef newDef = ed;
                     newDef.physics.mass = mass;
@@ -1383,9 +1411,8 @@ void PropertyInspector::draw(EditMapDocument&      doc,
 
             float falloff = ed.audio.falloffRadius;
             ImGui::SetNextItemWidth(-1.0f);
-            ImGui::DragFloat("##sfalloff", &falloff, 0.5f, 0.1f, 1000.0f,
-                             "Falloff: %.1f m");
-            if (ImGui::IsItemDeactivatedAfterEdit() && falloff != ed.audio.falloffRadius)
+            if (dragFloatUndo("##sfalloff", &falloff, 0.5f, 0.0f, 0.0f, "Falloff: %.1f m") &&
+                falloff != ed.audio.falloffRadius)
             {
                 EntityDef oldDef = ed; EntityDef newDef = ed;
                 newDef.audio.falloffRadius = falloff;
@@ -1402,8 +1429,8 @@ void PropertyInspector::draw(EditMapDocument&      doc,
 
             float volume = ed.audio.volume;
             ImGui::SetNextItemWidth(-1.0f);
-            ImGui::SliderFloat("##svol", &volume, 0.0f, 1.0f, "Volume: %.2f");
-            if (ImGui::IsItemDeactivatedAfterEdit() && volume != ed.audio.volume)
+            if (dragFloatUndo("##svol", &volume, 0.01f, 0.0f, 1.0f, "Volume: %.2f") &&
+                volume != ed.audio.volume)
             {
                 EntityDef oldDef = ed; EntityDef newDef = ed;
                 newDef.audio.volume = volume;
@@ -1445,9 +1472,7 @@ void PropertyInspector::draw(EditMapDocument&      doc,
         {
             glm::vec3 pos = ps->position;
             ImGui::SetNextItemWidth(-1.0f);
-            ImGui::DragFloat3("##pspos", &pos.x, 0.1f, -10000.0f, 10000.0f,
-                              "(%.2f, %.2f, %.2f)");
-            if (ImGui::IsItemDeactivatedAfterEdit() &&
+            if (dragFloat3Undo("##pspos", &pos.x, 0.1f, 0.0f, 0.0f, "%.2f") &&
                 (pos.x != ps->position.x ||
                  pos.y != ps->position.y ||
                  pos.z != ps->position.z))
@@ -1465,9 +1490,7 @@ void PropertyInspector::draw(EditMapDocument&      doc,
         {
             float yawDeg = glm::degrees(ps->yaw);
             ImGui::SetNextItemWidth(-1.0f);
-            ImGui::DragFloat("##psyaw", &yawDeg, 1.0f, -360.0f, 360.0f,
-                             "Yaw: %.1f\xc2\xb0");
-            if (ImGui::IsItemDeactivatedAfterEdit())
+            if (dragFloatUndo("##psyaw", &yawDeg, 1.0f, 0.0f, 0.0f, "Yaw: %.1f\xc2\xb0"))
             {
                 const float newYaw = glm::radians(yawDeg);
                 if (newYaw != ps->yaw)
@@ -1535,9 +1558,7 @@ void PropertyInspector::draw(EditMapDocument&      doc,
 
             float intensity = map.globalAmbientIntensity;
             ImGui::SetNextItemWidth(-1.0f);
-            ImGui::DragFloat("##gloint", &intensity, 0.01f, 0.0f, 10.0f,
-                             "Intensity: %.2f");
-            if (ImGui::IsItemDeactivatedAfterEdit())
+            if (dragFloatUndo("##gloint", &intensity, 0.01f, 0.0f, 0.0f, "Intensity: %.2f"))
                 doc.pushCommand(std::make_unique<CmdSetGlobalAmbient>(
                     doc, map.globalAmbientColor, map.globalAmbientColor,
                     map.globalAmbientIntensity, intensity));
@@ -1569,9 +1590,7 @@ void PropertyInspector::draw(EditMapDocument&      doc,
             {
                 float grav = doc.gravity();
                 ImGui::SetNextItemWidth(-1.0f);
-                ImGui::DragFloat("##gravity", &grav, 0.1f, 0.0f, 100.0f,
-                                 "Gravity: %.2f m/s\xc2\xb2");
-                if (ImGui::IsItemDeactivatedAfterEdit())
+                if (dragFloatUndo("##gravity", &grav, 0.1f, 0.0f, 0.0f, "Gravity: %.2f m/s\xc2\xb2"))
                     doc.pushCommand(std::make_unique<CmdSetMapDefaults>(
                         doc,
                         doc.skyPath(), doc.skyPath(),
@@ -1584,9 +1603,7 @@ void PropertyInspector::draw(EditMapDocument&      doc,
             {
                 float floorH = doc.defaultFloorHeight();
                 ImGui::SetNextItemWidth(-1.0f);
-                ImGui::DragFloat("##deffloor", &floorH, 0.1f, -100.0f, 100.0f,
-                                 "Default Floor: %.2f");
-                if (ImGui::IsItemDeactivatedAfterEdit())
+                if (dragFloatUndo("##deffloor", &floorH, 0.1f, 0.0f, 0.0f, "Default Floor: %.2f"))
                     doc.pushCommand(std::make_unique<CmdSetMapDefaults>(
                         doc,
                         doc.skyPath(), doc.skyPath(),
@@ -1599,9 +1616,7 @@ void PropertyInspector::draw(EditMapDocument&      doc,
             {
                 float ceilH = doc.defaultCeilHeight();
                 ImGui::SetNextItemWidth(-1.0f);
-                ImGui::DragFloat("##defceil", &ceilH, 0.1f, -100.0f, 100.0f,
-                                 "Default Ceil: %.2f");
-                if (ImGui::IsItemDeactivatedAfterEdit())
+                if (dragFloatUndo("##defceil", &ceilH, 0.1f, 0.0f, 0.0f, "Default Ceil: %.2f"))
                     doc.pushCommand(std::make_unique<CmdSetMapDefaults>(
                         doc,
                         doc.skyPath(), doc.skyPath(),

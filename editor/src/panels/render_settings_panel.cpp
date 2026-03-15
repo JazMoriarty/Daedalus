@@ -25,16 +25,6 @@ void RenderSettingsPanel::deliverPath(const std::filesystem::path& path)
     }
 }
 
-// Helper: clamp a float value and return true if changed.
-static inline bool DragClamped(const char* label, float* v,
-                                float speed, float lo, float hi,
-                                const char* fmt = "%.3f")
-{
-    const bool changed = ImGui::DragFloat(label, v, speed, lo, hi, fmt);
-    *v = std::clamp(*v, lo, hi);
-    return changed;
-}
-
 void RenderSettingsPanel::draw(EditMapDocument& doc)
 {
     // Apply any LUT path delivered from the async file dialog.
@@ -56,7 +46,7 @@ void RenderSettingsPanel::draw(EditMapDocument& doc)
         ImGui::SeparatorText("Sun");
         ImGui::ColorEdit3("Color##sun", &ss.sunColor.x);
         ImGui::SetNextItemWidth(-1.0f);
-        DragClamped("##sunint", &ss.sunIntensity, 0.05f, 0.0f, 20.0f, "Intensity: %.2f");
+        ImGui::DragFloat("##sunint", &ss.sunIntensity, 0.05f, 0.0f, 0.0f, "Intensity: %.2f");
 
         ImGui::SeparatorText("Direction (normalised)");
         ImGui::DragFloat3("##sundir", &ss.sunDirection.x, 0.01f, -1.0f, 1.0f);
@@ -65,7 +55,7 @@ void RenderSettingsPanel::draw(EditMapDocument& doc)
         auto& mapData = doc.mapData();
         ImGui::ColorEdit3("Color##amb", &mapData.globalAmbientColor.x);
         ImGui::SetNextItemWidth(-1.0f);
-        DragClamped("##ambint", &mapData.globalAmbientIntensity, 0.01f, 0.0f, 10.0f, "Intensity: %.2f");
+        ImGui::DragFloat("##ambint", &mapData.globalAmbientIntensity, 0.01f, 0.0f, 0.0f, "Intensity: %.2f");
     }
 
     // ── Volumetric Fog ────────────────────────────────────────────────────────
@@ -76,15 +66,15 @@ void RenderSettingsPanel::draw(EditMapDocument& doc)
         ImGui::BeginDisabled(!fog.enabled);
 
         ImGui::SetNextItemWidth(-1.0f);
-        DragClamped("##dens", &fog.density, 0.001f, 0.0f, 1.0f, "Density: %.4f");
+        ImGui::DragFloat("##dens", &fog.density, 0.001f, 0.0f, 0.0f, "Density: %.4f");
         ImGui::SetNextItemWidth(-1.0f);
-        DragClamped("##aniso", &fog.anisotropy, 0.01f, -1.0f, 1.0f, "Anisotropy: %.2f");
+        ImGui::DragFloat("##aniso", &fog.anisotropy, 0.01f, 0.0f, 0.0f, "Anisotropy: %.2f");
         ImGui::SetNextItemWidth(-1.0f);
-        DragClamped("##scat", &fog.scattering, 0.01f, 0.0f, 1.0f, "Scattering: %.2f");
+        ImGui::DragFloat("##scat", &fog.scattering, 0.01f, 0.0f, 0.0f, "Scattering: %.2f");
         ImGui::SetNextItemWidth(-1.0f);
-        DragClamped("##fnear", &fog.fogNear, 0.1f, 0.0f, 500.0f, "Near: %.1f m");
+        ImGui::DragFloat("##fnear", &fog.fogNear, 0.1f, 0.0f, 0.0f, "Near: %.1f m");
         ImGui::SetNextItemWidth(-1.0f);
-        DragClamped("##ffar", &fog.fogFar, 1.0f, 0.0f, 2000.0f, "Far: %.1f m");
+        ImGui::DragFloat("##ffar", &fog.fogFar, 1.0f, 0.0f, 0.0f, "Far: %.1f m");
 
         float fogAmb[3] = {fog.ambientFogR, fog.ambientFogG, fog.ambientFogB};
         if (ImGui::ColorEdit3("Ambient Fog##fog", fogAmb))
@@ -104,17 +94,18 @@ void RenderSettingsPanel::draw(EditMapDocument& doc)
         ImGui::BeginDisabled(!ssr.enabled);
 
         ImGui::SetNextItemWidth(-1.0f);
-        DragClamped("##ssrmd", &ssr.maxDistance, 0.5f, 0.0f, 200.0f, "Max Dist: %.1f m");
+        ImGui::DragFloat("##ssrmd", &ssr.maxDistance, 0.5f, 0.0f, 0.0f, "Max Dist: %.1f m");
         ImGui::SetNextItemWidth(-1.0f);
-        DragClamped("##ssrth", &ssr.thickness, 0.005f, 0.0f, 1.0f, "Thickness: %.3f m");
+        ImGui::DragFloat("##ssrth", &ssr.thickness, 0.005f, 0.0f, 0.0f, "Thickness: %.3f m");
         ImGui::SetNextItemWidth(-1.0f);
-        DragClamped("##ssrrc", &ssr.roughnessCutoff, 0.01f, 0.0f, 1.0f, "Roughness Cutoff: %.2f");
+        ImGui::DragFloat("##ssrrc", &ssr.roughnessCutoff, 0.01f, 0.0f, 0.0f, "Roughness Cutoff: %.2f");
         ImGui::SetNextItemWidth(-1.0f);
-        DragClamped("##ssrfs", &ssr.fadeStart, 0.005f, 0.0f, 0.5f, "Fade Start (UV): %.3f");
+        ImGui::DragFloat("##ssrfs", &ssr.fadeStart, 0.005f, 0.0f, 0.0f, "Fade Start (UV): %.3f");
 
         int steps = static_cast<int>(ssr.maxSteps);
-        if (ImGui::SliderInt("Max Steps##ssr", &steps, 8, 256))
-            ssr.maxSteps = static_cast<uint32_t>(steps);
+        ImGui::SetNextItemWidth(-1.0f);
+        if (ImGui::DragInt("##ssrmsteps", &steps, 1.0f, 0, 0, "Max Steps: %d"))
+            ssr.maxSteps = static_cast<uint32_t>(std::max(1, steps));
 
         ImGui::EndDisabled();
     }
@@ -127,15 +118,15 @@ void RenderSettingsPanel::draw(EditMapDocument& doc)
         ImGui::BeginDisabled(!dof.enabled);
 
         ImGui::SetNextItemWidth(-1.0f);
-        DragClamped("##doffd", &dof.focusDistance, 0.1f, 0.1f, 500.0f, "Focus Dist: %.1f m");
+        ImGui::DragFloat("##doffd", &dof.focusDistance, 0.1f, 0.0f, 0.0f, "Focus Dist: %.1f m");
         ImGui::SetNextItemWidth(-1.0f);
-        DragClamped("##doffr", &dof.focusRange, 0.1f, 0.1f, 100.0f, "Focus Range: %.1f m");
+        ImGui::DragFloat("##doffr", &dof.focusRange, 0.1f, 0.0f, 0.0f, "Focus Range: %.1f m");
         ImGui::SetNextItemWidth(-1.0f);
-        DragClamped("##dofbr", &dof.bokehRadius, 0.5f, 0.0f, 32.0f, "Bokeh Radius: %.1f px");
+        ImGui::DragFloat("##dofbr", &dof.bokehRadius, 0.5f, 0.0f, 0.0f, "Bokeh Radius: %.1f px");
         ImGui::SetNextItemWidth(-1.0f);
-        DragClamped("##dofnt", &dof.nearTransition, 0.05f, 0.0f, 20.0f, "Near Trans: %.2f m");
+        ImGui::DragFloat("##dofnt", &dof.nearTransition, 0.05f, 0.0f, 0.0f, "Near Trans: %.2f m");
         ImGui::SetNextItemWidth(-1.0f);
-        DragClamped("##dofft", &dof.farTransition, 0.05f, 0.0f, 50.0f, "Far Trans: %.2f m");
+        ImGui::DragFloat("##dofft", &dof.farTransition, 0.05f, 0.0f, 0.0f, "Far Trans: %.2f m");
 
         ImGui::EndDisabled();
     }
@@ -148,11 +139,12 @@ void RenderSettingsPanel::draw(EditMapDocument& doc)
         ImGui::BeginDisabled(!mb.enabled);
 
         ImGui::SetNextItemWidth(-1.0f);
-        DragClamped("##mbsa", &mb.shutterAngle, 0.01f, 0.0f, 1.0f, "Shutter Angle: %.2f");
+        ImGui::DragFloat("##mbsa", &mb.shutterAngle, 0.01f, 0.0f, 0.0f, "Shutter Angle: %.2f");
 
         int samp = static_cast<int>(mb.numSamples);
-        if (ImGui::SliderInt("Samples##mb", &samp, 2, 32))
-            mb.numSamples = static_cast<uint32_t>(samp);
+        ImGui::SetNextItemWidth(-1.0f);
+        if (ImGui::DragInt("##mbsamp", &samp, 1.0f, 0, 0, "Samples: %d"))
+            mb.numSamples = static_cast<uint32_t>(std::max(1, samp));
 
         ImGui::EndDisabled();
     }
@@ -165,7 +157,7 @@ void RenderSettingsPanel::draw(EditMapDocument& doc)
         ImGui::BeginDisabled(!cg.enabled);
 
         ImGui::SetNextItemWidth(-1.0f);
-        DragClamped("##cgint", &cg.intensity, 0.01f, 0.0f, 1.0f, "Intensity: %.2f");
+        ImGui::DragFloat("##cgint", &cg.intensity, 0.01f, 0.0f, 0.0f, "Intensity: %.2f");
         // LUT path: text field + optional browse button.
         {
             std::array<char, 512> buf{};
@@ -197,13 +189,13 @@ void RenderSettingsPanel::draw(EditMapDocument& doc)
         ImGui::BeginDisabled(!fx.enabled);
 
         ImGui::SetNextItemWidth(-1.0f);
-        DragClamped("##fxca", &fx.caAmount, 0.001f, 0.0f, 0.05f, "Chromatic Ab: %.4f");
+        ImGui::DragFloat("##fxca", &fx.caAmount, 0.001f, 0.0f, 0.0f, "Chromatic Ab: %.4f");
         ImGui::SetNextItemWidth(-1.0f);
-        DragClamped("##fxvi", &fx.vignetteIntensity, 0.01f, 0.0f, 1.0f, "Vignette Str: %.2f");
+        ImGui::DragFloat("##fxvi", &fx.vignetteIntensity, 0.01f, 0.0f, 0.0f, "Vignette Str: %.2f");
         ImGui::SetNextItemWidth(-1.0f);
-        DragClamped("##fxvr", &fx.vignetteRadius, 0.01f, 0.0f, 1.0f, "Vignette Rad: %.2f");
+        ImGui::DragFloat("##fxvr", &fx.vignetteRadius, 0.01f, 0.0f, 0.0f, "Vignette Rad: %.2f");
         ImGui::SetNextItemWidth(-1.0f);
-        DragClamped("##fxgr", &fx.grainAmount, 0.001f, 0.0f, 0.2f, "Film Grain: %.4f");
+        ImGui::DragFloat("##fxgr", &fx.grainAmount, 0.001f, 0.0f, 0.0f, "Film Grain: %.4f");
 
         ImGui::EndDisabled();
     }
@@ -222,12 +214,14 @@ void RenderSettingsPanel::draw(EditMapDocument& doc)
         ImGui::BeginDisabled(!rt.enabled);
 
         int bounces = static_cast<int>(rt.maxBounces);
-        if (ImGui::SliderInt("Max Bounces##rt", &bounces, 1, 8))
-            rt.maxBounces = static_cast<uint32_t>(bounces);
+        ImGui::SetNextItemWidth(-1.0f);
+        if (ImGui::DragInt("##rtbounces", &bounces, 0.25f, 0, 0, "Max Bounces: %d"))
+            rt.maxBounces = static_cast<uint32_t>(std::max(1, bounces));
 
         int spp = static_cast<int>(rt.samplesPerPixel);
-        if (ImGui::SliderInt("Samples/Pixel##rt", &spp, 1, 4))
-            rt.samplesPerPixel = static_cast<uint32_t>(spp);
+        ImGui::SetNextItemWidth(-1.0f);
+        if (ImGui::DragInt("##rtspp", &spp, 0.25f, 0, 0, "Samples/Pixel: %d"))
+            rt.samplesPerPixel = static_cast<uint32_t>(std::max(1, spp));
 
         ImGui::Checkbox("SVGF Denoise##rt", &rt.denoise);
 
