@@ -262,6 +262,11 @@ private:
     /// Lazy-create RT PSOs and persistent SVGF textures on first RT frame.
     void lazyInitRT(rhi::IRenderDevice& device);
 
+    /// (Re)allocate all screen-size RT/SVGF persistent textures at resolution w×h.
+    /// Called by lazyInitRT() on first use and by resize() whenever the viewport
+    /// dimensions change while RT mode is active (or has been used this session).
+    void recreateRTTextures(rhi::IRenderDevice& device, u32 w, u32 h);
+
     static glm::vec2 haltonJitter(u32 frameIndex) noexcept;
 };
 

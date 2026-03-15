@@ -796,7 +796,9 @@ void FrameRenderer::resize(rhi::IRenderDevice& device, u32 width, u32 height)
     m_width  = width;
     m_height = height;
     recreateTAAHistory(device, width, height);
-    m_frameIndex = 0;  // force TAA history re-clear on next renderFrame
+    if (m_rtInitialized)
+        recreateRTTextures(device, width, height);
+    m_frameIndex = 0;  // reset TAA + SVGF accumulation for the new resolution
 }
 
 // ─── renderFrame ─────────────────────────────────────────────────────────────
@@ -2685,14 +2687,35 @@ void FrameRenderer::lazyInitRT(IRenderDevice& device)
         m_fogScatterRTPSO  = device.createComputePipeline(d);
     }
 
-    // SVGF persistent textures (same resolution as the main render target).
+    // Previous-frame copy PSO (needed once; not tied to resolution).
+    {
+        auto cs = loadCS("rt_prev_copy_main");
+        ComputePipelineDescriptor d;
+        d.computeShader   = cs.get();
+        d.debugName       = "SVGFPrevCopy";
+        m_svgfPrevCopyPSO = device.createComputePipeline(d);
+    }
+
+    // Allocate screen-size RT/SVGF persistent textures at the current resolution.
+    recreateRTTextures(device, m_width, m_height);
+
+    // RT scene manager.
+    m_rtSceneManager = std::make_unique<RTSceneManager>();
+}
+
+// ─── recreateRTTextures ───────────────────────────────────────────────────────
+// (Re)allocates all screen-resolution RT/SVGF textures.  Called by lazyInitRT()
+// on the first RT frame and by resize() whenever the viewport changes while RT
+// has been (or is currently) active.
+
+void FrameRenderer::recreateRTTextures(IRenderDevice& device, u32 w, u32 h)
+{
     TextureDescriptor texDesc{};
-    texDesc.width  = m_width;
-    texDesc.height = m_height;
+    texDesc.width  = w;
+    texDesc.height = h;
     texDesc.format = TextureFormat::RGBA16Float;
-    // RenderTarget is added so the history textures can be GPU-cleared
-    // (LoadAction::Clear in a 0-draw render pass) when the render mode
-    // changes and the accumulated history would contain stale data.
+    // RenderTarget usage lets history textures be GPU-cleared (LoadAction::Clear
+    // in a 0-draw render pass) when the render mode changes.
     texDesc.usage  = TextureUsage::ShaderRead | TextureUsage::ShaderWrite
                    | TextureUsage::RenderTarget;
 
@@ -2702,26 +2725,13 @@ void FrameRenderer::lazyInitRT(IRenderDevice& device)
     m_svgfHistory[1]   = device.createTexture(texDesc);
 
     texDesc.format     = TextureFormat::RG16Float;
+    texDesc.usage      = TextureUsage::ShaderRead | TextureUsage::ShaderWrite;
     texDesc.debugName  = "SVGFMoments";
     m_svgfMoments      = device.createTexture(texDesc);
 
-    // RT albedo texture for demodulated denoising.
     texDesc.format     = TextureFormat::RGBA8Unorm;
     texDesc.debugName  = "RTAlbedo";
     m_rtAlbedo         = device.createTexture(texDesc);
-
-    // Previous-frame depth and normal for SVGF disocclusion detection.
-    // Without these, slots 4 and 6 in the temporal pass were bound to the
-    // *current* frame's textures, breaking the depth/normal consistency check
-    // for any camera motion (the check would read the current surface at the
-    // reprojected position rather than the previous frame's surface there).
-    {
-        auto cs = loadCS("rt_prev_copy_main");
-        ComputePipelineDescriptor d;
-        d.computeShader   = cs.get();
-        d.debugName       = "SVGFPrevCopy";
-        m_svgfPrevCopyPSO = device.createComputePipeline(d);
-    }
 
     texDesc.format     = TextureFormat::R32Float;
     texDesc.debugName  = "SVGFPrevDepth";
@@ -2730,9 +2740,6 @@ void FrameRenderer::lazyInitRT(IRenderDevice& device)
     texDesc.format      = TextureFormat::RGBA8Unorm;
     texDesc.debugName   = "SVGFPrevNormal";
     m_svgfPrevNormalTex = device.createTexture(texDesc);
-
-    // RT scene manager.
-    m_rtSceneManager = std::make_unique<RTSceneManager>();
 }
 
 // ─── renderMirrorPrepass ─────────────────────────────────────────────────────
