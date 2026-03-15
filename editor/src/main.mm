@@ -920,13 +920,43 @@ int main(int /*argc*/, char* /*argv*/[])
                                     NSTask* task = [[NSTask alloc] init];
                                     task.executableURL =
                                         [NSURL fileURLWithPath:appNS];
-                                    // Pass --rt if the editor is currently in RT mode
-                                    // so the app starts with the same render mode.
-                                    const bool editorRTEnabled =
-                                        doc.renderSettings().rt.enabled;
-                                    task.arguments = editorRTEnabled
-                                        ? @[levelNS, @"--rt"]
-                                        : @[levelNS];
+
+                                    // Build argument list: pass all render settings
+                                    // so the app starts with exactly what the editor
+                                    // has configured in the Render Settings panel.
+                                    const auto& rs = doc.renderSettings();
+                                    NSMutableArray<NSString*>* launchArgs =
+                                        [NSMutableArray arrayWithObject:levelNS];
+
+                                    // RT mode + sub-settings
+                                    if (rs.rt.enabled)
+                                        [launchArgs addObject:@"--rt"];
+                                    [launchArgs addObject:
+                                        [NSString stringWithFormat:@"--rt-bounces=%u",
+                                            rs.rt.maxBounces]];
+                                    [launchArgs addObject:
+                                        [NSString stringWithFormat:@"--rt-spp=%u",
+                                            rs.rt.samplesPerPixel]];
+                                    if (!rs.rt.denoise)
+                                        [launchArgs addObject:@"--rt-nodenoise"];
+
+                                    // Post-FX toggles
+                                    if (rs.fog.enabled)
+                                        [launchArgs addObject:@"--fog"];
+                                    if (rs.ssr.enabled)
+                                        [launchArgs addObject:@"--ssr"];
+                                    if (rs.dof.enabled)
+                                        [launchArgs addObject:@"--dof"];
+                                    if (!rs.motionBlur.enabled)
+                                        [launchArgs addObject:@"--nomotionblur"];
+                                    if (!rs.colorGrading.enabled)
+                                        [launchArgs addObject:@"--nocolorgrade"];
+                                    if (!rs.optionalFx.enabled)
+                                        [launchArgs addObject:@"--nooptfx"];
+                                    if (!rs.upscaling.fxaaEnabled)
+                                        [launchArgs addObject:@"--nofxaa"];
+
+                                    task.arguments = launchArgs;
 
                                     NSError* launchErr = nil;
                                     if ([task launchAndReturnError:&launchErr])

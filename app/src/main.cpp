@@ -338,13 +338,56 @@ int main(int argc, char* argv[])
     const bool isDlevel = (argc >= 2 && argv[1] != nullptr &&
         std::filesystem::path(argv[1]).extension() == ".dlevel");
 
-    // --rt flag: start DaedalusApp in ray-traced mode (passed by the editor
-    // when its render settings have RT enabled at launch time).
-    bool startInRTMode = false;
+    // Render settings passed by the editor at launch time so the app starts with
+    // exactly the same configuration as the editor's Render Settings panel.
+    //
+    // Flags recognised:
+    //   --rt                 Start in ray-traced mode (F6 toggles at runtime)
+    //   --rt-bounces=N       GI bounce count (default: 2)
+    //   --rt-spp=N           Samples per pixel (default: 1)
+    //   --rt-nodenoise       Disable SVGF denoiser
+    //   --fog                Enable volumetric fog
+    //   --ssr                Enable screen-space reflections
+    //   --dof                Enable depth of field
+    //   --nomotionblur       Disable motion blur (enabled by default in-app)
+    //   --nocolorgrade       Disable colour grading (enabled by default in-app)
+    //   --nooptfx            Disable vignette/grain/CA (enabled by default in-app)
+    //   --nofxaa             Disable FXAA (enabled by default in-app)
+    bool     startInRTMode   = false;
+    u32      startRTBounces  = 2u;
+    u32      startRTSPP      = 1u;
+    bool     startRTDenoise  = true;
+    bool     startFog        = false;
+    bool     startSSR        = false;
+    bool     startDoF        = false;
+    bool     startMotionBlur = true;   // good game default
+    bool     startColorGrade = true;   // uses identity LUT if no path provided
+    bool     startOptFx      = true;   // mild vignette + grain
+    bool     startFXAA       = true;
+
+    // Helper: check if a string_view has a given prefix (C++17 compatible).
+    auto hasPrefix = [](std::string_view s, std::string_view p) -> bool {
+        return s.size() >= p.size() && s.compare(0, p.size(), p) == 0;
+    };
+
     for (int i = 2; i < argc; ++i)
     {
-        if (argv[i] && std::string_view(argv[i]) == "--rt")
-            startInRTMode = true;
+        if (!argv[i]) continue;
+        const std::string_view arg(argv[i]);
+
+        if (arg == "--rt")                { startInRTMode   = true; }
+        else if (hasPrefix(arg, "--rt-bounces="))
+            startRTBounces = static_cast<u32>(std::atoi(argv[i] + 13));
+        else if (hasPrefix(arg, "--rt-spp="))
+            startRTSPP     = static_cast<u32>(std::atoi(argv[i] + 9));
+        else if (arg == "--rt-nodenoise") { startRTDenoise  = false; }
+        else if (arg == "--fog")          { startFog        = true;  }
+        else if (arg == "--ssr")          { startSSR        = true;  }
+        else if (arg == "--dof")          { startDoF        = true;  }
+        else if (arg == "--nomotionblur") { startMotionBlur = false; }
+        else if (arg == "--nocolorgrade") { startColorGrade = false; }
+        else if (arg == "--nooptfx")      { startOptFx      = false; }
+        else if (arg == "--nofxaa")       { startFXAA       = false; }
     }
 
     if (isDlevel)
@@ -1232,31 +1275,44 @@ int main(int argc, char* argv[])
             fpScene.cameraPos = fpCamPos;
             fpScene.cameraDir = camDir;
 
-            // ── Post-FX: disable for dlevel runtime ───────────────────────────
-            fpScene.fog.enabled = false;
-            fpScene.ssr.enabled = false;
-            fpScene.dof.enabled = false;
+            // ── Post-FX — driven by editor render settings passed via CLI args ──
+            // Fog, SSR, DoF: off by default; enabled if --fog/--ssr/--dof was passed.
+            fpScene.fog.enabled = startFog;
+            fpScene.ssr.enabled = startSSR;
+            fpScene.dof.enabled = startDoF;
 
-            fpScene.motionBlur.enabled    = true;
+            // Motion blur: on by default (good game feel); --nomotionblur disables.
+            fpScene.motionBlur.enabled      = startMotionBlur;
             fpScene.motionBlur.shutterAngle = 0.25f;
             fpScene.motionBlur.numSamples   = 8u;
 
-            fpScene.colorGrading.enabled   = true;
+            // Colour grading: on by default with the identity LUT (passthrough);
+            // --nocolorgrade disables entirely.
+            fpScene.colorGrading.enabled    = startColorGrade;
             fpScene.colorGrading.intensity  = 1.0f;
             fpScene.colorGrading.lutTexture = nullptr;
 
-            fpScene.optionalFx.enabled           = true;
-            fpScene.optionalFx.vignetteIntensity  = 0.30f;
-            fpScene.optionalFx.vignetteRadius     = 0.40f;
-            fpScene.optionalFx.grainAmount        = 0.03f;
-            fpScene.optionalFx.caAmount           = 0.0f;
+            // Optional FX (vignette, film grain, CA): mild defaults; --nooptfx disables.
+            fpScene.optionalFx.enabled          = startOptFx;
+            fpScene.optionalFx.vignetteIntensity = 0.30f;
+            fpScene.optionalFx.vignetteRadius    = 0.40f;
+            fpScene.optionalFx.grainAmount       = 0.03f;
+            fpScene.optionalFx.caAmount          = 0.0f;
 
-            fpScene.upscaling.mode = render::UpscalingMode::FXAA;
+            // FXAA: on by default; --nofxaa disables.
+            fpScene.upscaling.mode = startFXAA
+                ? render::UpscalingMode::FXAA
+                : render::UpscalingMode::None;
 
-            // RT mode (F6 toggle)
+            // RT mode (F6 toggles at runtime; --rt sets initial state)
             fpScene.renderMode = fpRTMode
                 ? render::RenderMode::RayTraced
                 : render::RenderMode::Rasterized;
+
+            // RT sub-settings: bounces, SPP, denoiser — synced from editor panel.
+            fpScene.rt.maxBounces      = startRTBounces;
+            fpScene.rt.samplesPerPixel = startRTSPP;
+            fpScene.rt.denoise         = startRTDenoise;
 
             // ── ECS entity rendering
             // spriteAnimationSystem advances UV offsets before billboard gather.
