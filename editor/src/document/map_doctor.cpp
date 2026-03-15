@@ -50,6 +50,12 @@ std::vector<MapIssue> diagnose(const world::WorldMapData& map)
             continue; // Per-wall checks are meaningless on a degenerate sector.
         }
 
+        // Build vertex list once; reused by multiple checks below.
+        std::vector<glm::vec2> verts;
+        verts.reserve(n);
+        for (const auto& wall : sector.walls)
+            verts.push_back(wall.p0);
+
         // ── 2. Per-wall checks ────────────────────────────────────────────────
         for (std::size_t wi = 0; wi < n; ++wi)
         {
@@ -96,22 +102,105 @@ std::vector<MapIssue> diagnose(const world::WorldMapData& map)
                             makeWallSel(sid, wi)
                         });
                     }
+                    else
+                    {
+                        // ── 2a. Portal geometry mismatch ──────────────────────
+                        // Reverse link exists — verify the wall edges are
+                        // geometrically aligned with the target sector boundary.
+                        const world::SectorId geomSec =
+                            geometry::findMatchingWall(sid, wi, map).first;
+                        if (geomSec != pid)
+                        {
+                            issues.push_back({
+                                std::format("Sector {} wall {}: portal references sector {} "
+                                            "but wall edge does not geometrically align with "
+                                            "that sector's boundary.",
+                                            si, wi, pid),
+                                makeWallSel(sid, wi)
+                            });
+                        }
+                    }
                 }
             }
         }
 
-        // ── 3. Self-intersecting polygon ──────────────────────────────────────
-        std::vector<glm::vec2> verts;
-        verts.reserve(n);
-        for (const auto& wall : sector.walls)
-            verts.push_back(wall.p0);
+        // ── 3. Floor/ceiling inversion ────────────────────────────────────────
+        if (sector.floorHeight >= sector.ceilHeight)
+        {
+            issues.push_back({
+                std::format("Sector {}: floor height ({:.2f}) must be less than "
+                            "ceiling height ({:.2f}).",
+                            si, sector.floorHeight, sector.ceilHeight),
+                makeSectorSel(sid)
+            });
+        }
 
+        // ── 4. Self-intersecting polygon ──────────────────────────────────────
         if (geometry::isSelfIntersecting(verts))
         {
             issues.push_back({
                 std::format("Sector {}: polygon is self-intersecting.", si),
                 makeSectorSel(sid)
             });
+        }
+
+        // ── 5. Winding order ──────────────────────────────────────────────────
+        if (geometry::signedArea(verts) < 0.0f)
+        {
+            issues.push_back({
+                std::format("Sector {}: polygon is wound clockwise (expected CCW).", si),
+                makeSectorSel(sid)
+            });
+        }
+
+        // ── 6. Duplicate non-adjacent vertices ────────────────────────────────
+        for (std::size_t wi = 0; wi < n; ++wi)
+        {
+            for (std::size_t wj = wi + 2; wj < n; ++wj)
+            {
+                if (wi == 0 && wj == n - 1) continue;  // adjacent wrap-around pair
+                const glm::vec2 delta = sector.walls[wi].p0 - sector.walls[wj].p0;
+                if (glm::dot(delta, delta) < 1e-6f)
+                {
+                    issues.push_back({
+                        std::format("Sector {}: walls {} and {} share the same vertex "
+                                    "position (duplicate non-adjacent vertex).",
+                                    si, wi, wj),
+                        makeSectorSel(sid)
+                    });
+                }
+            }
+        }
+    }
+
+    // ── 7. Sector overlaps ────────────────────────────────────────────────────
+    // O(n²) pass over all sector pairs.  Proper edge-edge intersection or full
+    // containment both count; shared portal boundaries do not.
+    for (std::size_t si = 0; si < map.sectors.size(); ++si)
+    {
+        const auto& secA = map.sectors[si];
+        if (secA.walls.size() < 3) continue;
+
+        std::vector<glm::vec2> vertsA;
+        vertsA.reserve(secA.walls.size());
+        for (const auto& w : secA.walls) vertsA.push_back(w.p0);
+
+        for (std::size_t sj = si + 1; sj < map.sectors.size(); ++sj)
+        {
+            const auto& secB = map.sectors[sj];
+            if (secB.walls.size() < 3) continue;
+
+            std::vector<glm::vec2> vertsB;
+            vertsB.reserve(secB.walls.size());
+            for (const auto& w : secB.walls) vertsB.push_back(w.p0);
+
+            if (geometry::polygonsOverlap(vertsA, vertsB))
+            {
+                issues.push_back({
+                    std::format("Sectors {} and {} have overlapping polygons.", si, sj),
+                    makeSectorSel(static_cast<world::SectorId>(si))
+                });
+            }
         }
     }
 
@@ -138,13 +227,14 @@ std::vector<WallHighlight> getWallHighlights(const world::WorldMapData& map)
             verts.push_back(wall.p0);
 
         const bool isSelfInt = geometry::isSelfIntersecting(verts);
+        const bool isCW      = geometry::signedArea(verts) < 0.0f;
 
         for (std::size_t wi = 0; wi < n; ++wi)
         {
             const auto& wall = sector.walls[wi];
             const glm::vec2 p1 = sector.walls[(wi + 1) % n].p0;
 
-            // Zero-length edge (takes priority over self-intersecting).
+            // Zero-length edge (takes priority over all other kinds).
             const glm::vec2 d = p1 - wall.p0;
             if (glm::dot(d, d) < 1e-6f)
             {
@@ -154,6 +244,9 @@ std::vector<WallHighlight> getWallHighlights(const world::WorldMapData& map)
 
             if (isSelfInt)
                 out.push_back({sid, wi, WallHighlightKind::SelfIntersecting});
+
+            if (isCW)
+                out.push_back({sid, wi, WallHighlightKind::WindingOrder});
 
             if (wall.portalSectorId != world::INVALID_SECTOR_ID)
             {
@@ -168,7 +261,16 @@ std::vector<WallHighlight> getWallHighlights(const world::WorldMapData& map)
                     for (const auto& pw : map.sectors[pid].walls)
                         if (pw.portalSectorId == sid) { hasBack = true; break; }
                     if (!hasBack)
+                    {
                         out.push_back({sid, wi, WallHighlightKind::MissingBackLink});
+                    }
+                    else
+                    {
+                        const world::SectorId geomSec =
+                            geometry::findMatchingWall(sid, wi, map).first;
+                        if (geomSec != pid)
+                            out.push_back({sid, wi, WallHighlightKind::PortalGeomMismatch});
+                    }
                 }
             }
         }

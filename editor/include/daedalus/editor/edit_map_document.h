@@ -200,6 +200,23 @@ public:
     [[nodiscard]] const std::string& assetRoot() const noexcept { return m_assetRoot; }
     void setAssetRoot(std::string root) { m_assetRoot = std::move(root); }
 
+    // ─── Viewport camera state ────────────────────────────────────────────────
+    // Persisted in the .emap sidecar so the 3D view is restored on reload.
+    // The main loop snapshots the live camera into this struct every frame so
+    // whatever save path fires (menu, Cmd+S, Save As) always captures it.
+    // Absent means "no saved state — viewport keeps its own defaults".
+
+    struct ViewportCameraState
+    {
+        glm::vec3 eye   = {0.0f, 5.0f, -12.0f};
+        float     yaw   = 0.0f;
+        float     pitch = -0.349f;
+    };
+
+    [[nodiscard]] const std::optional<ViewportCameraState>& viewportCamera() const noexcept
+        { return m_viewportCamera; }
+    void setViewportCamera(ViewportCameraState s) noexcept { m_viewportCamera = s; }
+
     // ─── Player start ────────────────────────────────────────────────────────────
 
     [[nodiscard]] std::optional<PlayerStart>&       playerStart()       noexcept { return m_playerStart; }
@@ -253,9 +270,10 @@ private:
     // Player start
     std::optional<PlayerStart> m_playerStart;
 
-    std::optional<world::Sector> m_clipboard;
-    std::filesystem::path        m_filePath;
-    std::string                  m_assetRoot;
+    std::optional<world::Sector>         m_clipboard;
+    std::filesystem::path                m_filePath;
+    std::string                          m_assetRoot;
+    std::optional<ViewportCameraState>   m_viewportCamera;
 
     bool m_dirty         = false;
     bool m_geometryDirty = false;

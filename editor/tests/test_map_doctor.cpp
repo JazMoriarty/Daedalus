@@ -154,3 +154,125 @@ TEST(MapDoctor, ConvexPolygonIsNotSelfIntersecting)
     map.sectors.push_back(makeSquare());
     EXPECT_FALSE(hasIssueContaining(diagnose(map), "self-intersecting"));
 }
+
+// ─── Winding order ──────────────────────────────────────────────────────────────
+
+TEST(MapDoctor, ClockwiseWindingReported)
+{
+    WorldMapData map;
+    Sector s;
+    // CW square: same vertices as makeSquare but in reverse order.
+    s.walls.push_back(Wall{.p0 = {0, 0}});
+    s.walls.push_back(Wall{.p0 = {0, 4}});
+    s.walls.push_back(Wall{.p0 = {4, 4}});
+    s.walls.push_back(Wall{.p0 = {4, 0}});
+    map.sectors.push_back(s);
+    EXPECT_TRUE(hasIssueContaining(diagnose(map), "clockwise"));
+}
+
+TEST(MapDoctor, CCWWindingIsClean)
+{
+    WorldMapData map;
+    map.sectors.push_back(makeSquare());
+    EXPECT_FALSE(hasIssueContaining(diagnose(map), "clockwise"));
+}
+
+// ─── Portal geometry mismatch ───────────────────────────────────────────────────
+
+TEST(MapDoctor, PortalGeomMismatchReported)
+{
+    WorldMapData map;
+    Sector s0 = makeSquare(4.0f, {0.0f, 0.0f});
+    Sector s1 = makeSquare(4.0f, {4.0f, 0.0f});
+    // s0 wall 0 (bottom edge: 0,0→4,0) links to s1 — geometrically wrong.
+    // s1 wall 3 (left edge: 4,4→4,0) links back — so the reverse link exists.
+    s0.walls[0].portalSectorId = 1;
+    s1.walls[3].portalSectorId = 0;
+    map.sectors.push_back(s0);
+    map.sectors.push_back(s1);
+    EXPECT_TRUE(hasIssueContaining(diagnose(map), "geometrically"));
+}
+
+TEST(MapDoctor, PortalGeomAlignedIsClean)
+{
+    WorldMapData map;
+    Sector s0 = makeSquare(4.0f, {0.0f, 0.0f});
+    Sector s1 = makeSquare(4.0f, {4.0f, 0.0f});
+    // Correct: s0 wall 1 (right edge: 4,0→4,4) ↔ s1 wall 3 (left edge: 4,4→4,0).
+    s0.walls[1].portalSectorId = 1;
+    s1.walls[3].portalSectorId = 0;
+    map.sectors.push_back(s0);
+    map.sectors.push_back(s1);
+    EXPECT_FALSE(hasIssueContaining(diagnose(map), "geometrically"));
+}
+
+// ─── Floor/ceiling inversion ─────────────────────────────────────────────────────
+
+TEST(MapDoctor, FloorAboveCeilingReported)
+{
+    WorldMapData map;
+    Sector s = makeSquare();
+    s.floorHeight = 4.0f;
+    s.ceilHeight  = 0.0f;
+    map.sectors.push_back(s);
+    EXPECT_TRUE(hasIssueContaining(diagnose(map), "floor"));
+}
+
+TEST(MapDoctor, FloorEqualsCeilingReported)
+{
+    WorldMapData map;
+    Sector s = makeSquare();
+    s.floorHeight = 2.0f;
+    s.ceilHeight  = 2.0f;
+    map.sectors.push_back(s);
+    EXPECT_TRUE(hasIssueContaining(diagnose(map), "floor"));
+}
+
+TEST(MapDoctor, ValidFloorCeilingIsClean)
+{
+    WorldMapData map;
+    map.sectors.push_back(makeSquare());  // default: floorHeight=0, ceilHeight=4
+    EXPECT_FALSE(hasIssueContaining(diagnose(map), "floor"));
+}
+
+// ─── Duplicate non-adjacent vertices ──────────────────────────────────────────────
+
+TEST(MapDoctor, DuplicateNonAdjacentVertexReported)
+{
+    WorldMapData map;
+    Sector s = makeSquare();
+    // Wall 2's p0 set to same position as wall 0's p0 — non-adjacent duplicate.
+    s.walls[2].p0 = s.walls[0].p0;
+    map.sectors.push_back(s);
+    EXPECT_TRUE(hasIssueContaining(diagnose(map), "duplicate"));
+}
+
+TEST(MapDoctor, UniqueVerticesAreClean)
+{
+    WorldMapData map;
+    map.sectors.push_back(makeSquare());
+    EXPECT_FALSE(hasIssueContaining(diagnose(map), "duplicate"));
+}
+
+// ─── Sector overlap ────────────────────────────────────────────────────────────
+
+TEST(MapDoctor, OverlappingSectorsReported)
+{
+    WorldMapData map;
+    map.sectors.push_back(makeSquare(4.0f, {0.0f, 0.0f}));
+    // Second square offset by (2,2) — overlaps first in the (2,2)→(4,4) region.
+    map.sectors.push_back(makeSquare(4.0f, {2.0f, 2.0f}));
+    EXPECT_TRUE(hasIssueContaining(diagnose(map), "overlap"));
+}
+
+TEST(MapDoctor, AdjacentSectorsDoNotOverlap)
+{
+    WorldMapData map;
+    Sector s0 = makeSquare(4.0f, {0.0f, 0.0f});
+    Sector s1 = makeSquare(4.0f, {4.0f, 0.0f});
+    s0.walls[1].portalSectorId = 1;
+    s1.walls[3].portalSectorId = 0;
+    map.sectors.push_back(s0);
+    map.sectors.push_back(s1);
+    EXPECT_FALSE(hasIssueContaining(diagnose(map), "overlap"));
+}

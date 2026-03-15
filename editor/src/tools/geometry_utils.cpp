@@ -109,6 +109,41 @@ float pointToSegmentDistSq(glm::vec2 p, glm::vec2 a, glm::vec2 b) noexcept
     return glm::dot(diff, diff);
 }
 
+// ─── polygonsOverlap ─────────────────────────────────────────────────────────
+
+bool polygonsOverlap(const std::vector<glm::vec2>& a,
+                     const std::vector<glm::vec2>& b) noexcept
+{
+    if (a.size() < 3 || b.size() < 3) return false;
+
+    const std::size_t na = a.size();
+    const std::size_t nb = b.size();
+
+    // 1. Proper edge-edge intersection (collinear/touching edges return false).
+    for (std::size_t i = 0; i < na; ++i)
+    {
+        for (std::size_t j = 0; j < nb; ++j)
+        {
+            if (segmentsIntersect(a[i], a[(i + 1) % na],
+                                  b[j], b[(j + 1) % nb]))
+                return true;
+        }
+    }
+
+    // 2. Full containment: one polygon's centroid lies inside the other.
+    //    Using centroids avoids false positives from shared boundary vertices.
+    glm::vec2 cA{0.f, 0.f}, cB{0.f, 0.f};
+    for (const auto& v : a) cA += v;
+    cA /= static_cast<float>(na);
+    for (const auto& v : b) cB += v;
+    cB /= static_cast<float>(nb);
+
+    if (pointInPolygon(cA, b)) return true;
+    if (pointInPolygon(cB, a)) return true;
+
+    return false;
+}
+
 // ─── findMatchingWall ─────────────────────────────────────────────────────────
 
 static constexpr float k_matchEpsilonSq = 0.01f * 0.01f;  // 1 cm squared

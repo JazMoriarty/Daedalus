@@ -39,10 +39,12 @@ struct MapIssue
 
 enum class WallHighlightKind : uint8_t
 {
-    SelfIntersecting, ///< Wall belongs to a self-intersecting sector.    (red)
-    ZeroLength,       ///< Wall has zero length.                          (red)
-    OrphanedPortal,   ///< Portal target sector does not exist.           (orange)
-    MissingBackLink,  ///< Portal has no matching reverse link.           (yellow)
+    SelfIntersecting,  ///< Wall belongs to a self-intersecting sector.    (red)
+    ZeroLength,        ///< Wall has zero length.                          (red)
+    OrphanedPortal,    ///< Portal target sector does not exist.           (orange)
+    MissingBackLink,   ///< Portal has no matching reverse link.           (yellow)
+    WindingOrder,      ///< Wall belongs to a CW-wound sector.             (magenta)
+    PortalGeomMismatch,///< Portal wall edge doesn't align with target.    (orange)
 };
 
 struct WallHighlight

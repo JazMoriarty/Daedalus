@@ -323,6 +323,9 @@ void Viewport2D::draw(EditMapDocument& doc,
     const glm::vec2 canvasMin{canvasMinV.x, canvasMinV.y};
     const glm::vec2 canvasMax{canvasMin.x + canvasSz.x, canvasMin.y + canvasSz.y};
 
+    // Cache canvas size for viewCenterMapPos() and fitToView().
+    m_lastCanvasSize = {canvasSz.x, canvasSz.y};
+
     // Center the view on first frame.
     if (m_firstFrame)
     {
@@ -452,9 +455,12 @@ void Viewport2D::draw(EditMapDocument& doc,
             case WallHighlightKind::SelfIntersecting:
                 col = IM_COL32(255, 60, 60, 210); break;   // red
             case WallHighlightKind::OrphanedPortal:
+            case WallHighlightKind::PortalGeomMismatch:
                 col = IM_COL32(255, 140, 0, 210); break;   // orange
             case WallHighlightKind::MissingBackLink:
                 col = IM_COL32(255, 220, 0, 210); break;   // yellow
+            case WallHighlightKind::WindingOrder:
+                col = IM_COL32(220, 80, 255, 210); break;  // magenta
             }
             dl->AddLine({p0s.x, p0s.y}, {p1s.x, p1s.y}, col, 2.5f);
         }
@@ -1060,21 +1066,20 @@ void Viewport2D::fitToView(const world::WorldMapData& map) noexcept
     const float padW = mapW * kPad + 1.0f;
     const float padH = mapH * kPad + 1.0f;
 
-    // We don’t know the canvas size here, so use a standard reference size
-    // that will be close enough for the first draw; the user can fine-tune.
-    constexpr float kRefW = 800.0f;
-    constexpr float kRefH = 600.0f;
+    // Use the cached canvas size so the fit is exact for the current panel size.
+    const float canvasW = m_lastCanvasSize.x;
+    const float canvasH = m_lastCanvasSize.y;
 
-    const float zoomX = kRefW  / (mapW + 2.0f * padW);
-    const float zoomY = kRefH  / (mapH + 2.0f * padH);
+    const float zoomX = canvasW / (mapW + 2.0f * padW);
+    const float zoomY = canvasH / (mapH + 2.0f * padH);
     m_zoom = std::clamp(std::min(zoomX, zoomY), 2.0f, 400.0f);
 
     // Pan so the map centre lands at the canvas centre.
     const float centreMapX = (minX + maxX) * 0.5f;
     const float centreMapY = (minY + maxY) * 0.5f;
     m_panOffset = {
-        kRefW * 0.5f - centreMapX * m_zoom,
-        kRefH * 0.5f - centreMapY * m_zoom
+        canvasW * 0.5f - centreMapX * m_zoom,
+        canvasH * 0.5f - centreMapY * m_zoom
     };
     m_firstFrame = false;  // suppress the default first-frame centering
 }

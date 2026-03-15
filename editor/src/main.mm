@@ -46,6 +46,7 @@
 #include "document/commands/cmd_set_player_start.h"
 #include "catalog/material_catalog.h"
 #include "panels/asset_browser_panel.h"
+#include "panels/splash_screen.h"
 #include "daedalus/world/dlevel_io.h"
 
 // stb_image (declaration only — implementation compiled once in asset_loader.cpp)
@@ -57,6 +58,7 @@
 #include <algorithm>
 #include <atomic>
 #include <filesystem>
+#include <fstream>
 #include <format>
 #include <functional>
 #include <memory>
@@ -74,6 +76,39 @@ static std::string executableDir()
 {
     const char* base = SDL_GetBasePath();
     return base ? base : ".";
+}
+
+// ─── Saved window geometry ────────────────────────────────────────────────────
+// Read before the window is created so it can be sized and positioned
+// correctly on the first frame — no flicker.
+
+struct SavedWindowGeometry
+{
+    int  w           = 1440;
+    int  h           = 900;
+    bool hasPosition = false;
+    int  x           = 0;
+    int  y           = 0;
+};
+
+[[nodiscard]] static SavedWindowGeometry readSavedWindowGeometry()
+{
+    SavedWindowGeometry g;
+    std::ifstream f("daedalusedit.ini");
+    if (!f.is_open()) return g;
+
+    bool gotX = false, gotY = false;
+    std::string line;
+    while (std::getline(f, line))
+    {
+        int v;
+        if      (sscanf(line.c_str(), "windowX=%d", &v) == 1) { g.x = v; gotX = true; }
+        else if (sscanf(line.c_str(), "windowY=%d", &v) == 1) { g.y = v; gotY = true; }
+        else if (sscanf(line.c_str(), "windowW=%d", &v) == 1 && v > 400) g.w = v;
+        else if (sscanf(line.c_str(), "windowH=%d", &v) == 1 && v > 300) g.h = v;
+    }
+    g.hasPosition = gotX && gotY;
+    return g;
 }
 
 // ─── File dialog ─────────────────────────────────────────────────────────────
@@ -203,7 +238,9 @@ static void drawMenuBar(EditMapDocument& doc,
 
             if (ImGui::MenuItem("Open\xe2\x80\xa6", "Cmd+O"))
             {
-                spawnFileDialog(&dlgState, "POSIX path of (choose file)");
+                const std::string mapsDir = executableDir() + "assets/maps";
+                spawnFileDialog(&dlgState,
+                    "POSIX path of (choose file default location (POSIX file \"" + mapsDir + "\"))");
                 dlgState.purpose = FileDialogPurpose::OpenMap;
             }
 
@@ -217,7 +254,7 @@ static void drawMenuBar(EditMapDocument& doc,
 
             ImGui::Separator();
             const bool hasSavePath = !doc.filePath().empty();
-            if (ImGui::MenuItem("Save", "Cmd+S", false, hasSavePath && doc.isDirty()))
+            if (ImGui::MenuItem("Save", "Cmd+S", false, hasSavePath))
                 (void)doc.saveToCurrentPath();  // failure already logged to OutputLog
 
             if (ImGui::MenuItem("Save As\xe2\x80\xa6", "Cmd+Shift+S"))
@@ -225,8 +262,10 @@ static void drawMenuBar(EditMapDocument& doc,
                 const std::string defaultName = doc.filePath().empty()
                     ? "untitled.dmap"
                     : doc.filePath().filename().string();
+                const std::string mapsDir = executableDir() + "assets/maps";
                 spawnFileDialog(&dlgState,
-                    "POSIX path of (choose file name default name \"" + defaultName + "\")");
+                    "POSIX path of (choose file name default name \"" + defaultName +
+                    "\" default location (POSIX file \"" + mapsDir + "\"))");
                 dlgState.purpose = FileDialogPurpose::SaveMap;
             }
 
@@ -365,8 +404,9 @@ static void drawMenuBar(EditMapDocument& doc,
 
 struct EditorPersistState
 {
-    std::string assetRoot;            // last-used asset root directory
-    bool        pendingApply = false; // true until the root has been applied
+    std::string  assetRoot;            // last-used asset root directory
+    bool         pendingApply = false; // true until the root has been applied
+    SDL_Window*  sdlWindow    = nullptr; // set after creation; queried by WriteAllFn
 };
 
 // ─── New Map dialog state ────────────────────────────────────────────────────
@@ -394,19 +434,24 @@ int main(int /*argc*/, char* /*argv*/[])
         return 1;
     }
 
-    constexpr int INIT_W = 1440;
-    constexpr int INIT_H = 900;
+    // Read saved window geometry before creating the window so it appears
+    // at the right size and position with no visible repositioning.
+    const SavedWindowGeometry savedWin = readSavedWindowGeometry();
 
     SDL_Window* window = SDL_CreateWindow("DaedalusEdit",
-                                          INIT_W, INIT_H,
-                                          SDL_WINDOW_METAL |
-                                          SDL_WINDOW_RESIZABLE);
+                                          savedWin.w, savedWin.h,
+                                          SDL_WINDOW_METAL    |
+                                          SDL_WINDOW_RESIZABLE|
+                                          SDL_WINDOW_HIDDEN);
     if (!window)
     {
         SDL_Log("SDL_CreateWindow failed: %s", SDL_GetError());
         SDL_Quit();
         return 1;
     }
+    if (savedWin.hasPosition)
+        SDL_SetWindowPosition(window, savedWin.x, savedWin.y);
+    SDL_ShowWindow(window);
 
     // ── Metal setup ───────────────────────────────────────────────────────────
     // Create a Metal view for the editor window (used by ImGui directly).
@@ -450,6 +495,10 @@ int main(int /*argc*/, char* /*argv*/[])
     // the INI file and calls our ReadLineFn.  State is accessed through UserData
     // (stateless lambdas convertible to plain function pointers).
     EditorPersistState persistState;
+    // Ensure the first-frame block always fires so we can apply the default
+    // asset root even when no INI exists yet.
+    persistState.pendingApply = true;
+    persistState.sdlWindow    = window;
     {
         ImGuiSettingsHandler h = {};
         h.TypeName   = "DaedalusEdit";
@@ -476,6 +525,16 @@ int main(int /*argc*/, char* /*argv*/[])
             const auto* s = static_cast<const EditorPersistState*>(handler->UserData);
             out->appendf("[%s][Data]\n", handler->TypeName);
             out->appendf("assetRoot=%s\n", s->assetRoot.c_str());
+            if (s->sdlWindow)
+            {
+                int x = 0, y = 0, w = 0, h = 0;
+                SDL_GetWindowPosition(s->sdlWindow, &x, &y);
+                SDL_GetWindowSize(s->sdlWindow, &w, &h);
+                out->appendf("windowX=%d\n", x);
+                out->appendf("windowY=%d\n", y);
+                out->appendf("windowW=%d\n", w);
+                out->appendf("windowH=%d\n", h);
+            }
             out->append("\n");
         };
         ImGui::AddSettingsHandler(&h);
@@ -486,7 +545,13 @@ int main(int /*argc*/, char* /*argv*/[])
     ImGui_ImplSDL3_InitForMetal(window);
     ImGui_ImplMetal_Init(mtlDevice);
 
-    // ── Editor state ──────────────────────────────────────────────────────────
+    // ── Splash screen ────────────────────────────────────────────────────────────────
+    // Must be initialised AFTER the ImGui context exists and the Metal device
+    // is configured — stb_image needs the texture pixel format to be set.
+    SplashScreen splash;
+    splash.init(device->nativeDevice(), executableDir());
+
+    // ── Editor state
     const std::string shaderLibPath = executableDir() + "/daedalus_shaders.metallib";
 
     EditMapDocument   doc;
@@ -523,12 +588,17 @@ int main(int /*argc*/, char* /*argv*/[])
     bool        lastDirty = false;
     std::string lastPath;
 
-    // ── Main loop ─────────────────────────────────────────────────────────────
+    // ── Main loop ────────────────────────────────────────────────────────────
     bool running = true;
+    Uint64 prevFrameNs = 0;  ///< Previous frame start time for delta-time.
     while (running)
     {
         // ── Frame timing: record start so we can cap at ~60 fps later ─────
         const Uint64 frameStartNs = SDL_GetTicksNS();
+        const float  dt = prevFrameNs
+            ? std::min(float(frameStartNs - prevFrameNs) / 1e9f, 0.05f)
+            : 0.016f;
+        prevFrameNs = frameStartNs;
 
         // ── Event processing ─────────────────────────────────────────────
         SDL_Event event;
@@ -1066,16 +1136,17 @@ int main(int /*argc*/, char* /*argv*/[])
                             // X — toggle grid snap on/off.
                             vp2d.setSnapEnabled(!vp2d.snapEnabled());
                         }
-                        else if (sc == SDL_SCANCODE_HOME)
+                        else if (sc == SDL_SCANCODE_HOME ||
+                                 (sc == SDL_SCANCODE_F && !vp3d.isHovered()))
                         {
                             vp2d.fitToView(doc.mapData());
                         }
                         else if (sc == SDL_SCANCODE_P && !vp3d.isHovered())
                         {
-                            // Place a point light at the last 2D-viewport cursor position.
-                            // Suppressed when the 3D viewport is hovered: P is reserved
-                            // there for snapping the camera to the player start.
-                            const glm::vec2 mp = vp2d.lastMouseMapPos();
+                            // Place a point light at the centre of the 2D view so it is
+                            // always visible.  Suppressed when the 3D viewport is hovered:
+                            // P is reserved there for snapping the camera to player start.
+                            const glm::vec2 mp = vp2d.viewCenterMapPos();
                             LightDef ld;
                             ld.position = {mp.x, 2.0f, mp.y};
                             doc.pushCommand(std::make_unique<CmdPlaceLight>(doc, ld));
@@ -1238,8 +1309,20 @@ int main(int /*argc*/, char* /*argv*/[])
         if (persistState.pendingApply)
         {
             persistState.pendingApply = false;
-            if (!persistState.assetRoot.empty() && doc.assetRoot().empty())
-                doc.setAssetRoot(persistState.assetRoot);
+            if (doc.assetRoot().empty())
+            {
+                if (!persistState.assetRoot.empty())
+                    doc.setAssetRoot(persistState.assetRoot);
+                else
+                {
+                    // No persisted root — default to the bundled textures folder
+                    // shipped next to the binary.  The user can always override
+                    // this via File > Set Asset Root.
+                    const std::string def = executableDir() + "assets/textures";
+                    if (std::filesystem::is_directory(def))
+                        doc.setAssetRoot(def);
+                }
+            }
         }
 
         // ── Asset catalog: rescan whenever doc's assetRoot changes ────────────────
@@ -1268,16 +1351,27 @@ int main(int /*argc*/, char* /*argv*/[])
             switch (dlgState.purpose)
             {
             case FileDialogPurpose::OpenMap:
-                if (!dlgPath.empty())
-                    (void)doc.loadFromFile(dlgPath);
+                if (!dlgPath.empty() && doc.loadFromFile(dlgPath))
+                {
+                    if (const auto& cam = doc.viewportCamera(); cam.has_value())
+                        vp3d.setCameraState(cam->eye, cam->yaw, cam->pitch);
+                }
                 break;
         case FileDialogPurpose::SaveMap:
                 if (!dlgPath.empty())
                 {
-                    // osascript's "choose file name" does not enforce a file
-                    // extension — append .dmap if the user omitted it.
                     std::filesystem::path p(dlgPath);
-                    if (p.extension() != ".dmap") p += ".dmap";
+                    // Strip any existing .dmap extension (case-insensitive),
+                    // then unconditionally re-apply it.  This prevents doubles
+                    // when the default name already contains the extension.
+                    {
+                        std::string ext = p.extension().string();
+                        std::transform(ext.begin(), ext.end(), ext.begin(),
+                                       [](unsigned char c){ return std::tolower(c); });
+                        if (ext == ".dmap")
+                            p = p.parent_path() / p.stem();
+                    }
+                    p += ".dmap";
                     (void)doc.saveToFile(p);
                 }
                 break;
@@ -1293,9 +1387,12 @@ int main(int /*argc*/, char* /*argv*/[])
             dlgState.purpose = FileDialogPurpose::None;
         }
 
+        // Snapshot 3D camera into doc every frame so any save path captures it.
+        doc.setViewportCamera({vp3d.eye(), vp3d.yaw(), vp3d.pitch()});
+
         // ── Menu bar ──────────────────────────────────────────────────────────
         drawMenuBar(doc, activeToolId, selectTool, drawSectorTool, vertexTool, activeTool,
-                    vp2d.gridStep(), vp2d.lastMouseMapPos(), nmDlg.open, helpPanel,
+                    vp2d.gridStep(), vp2d.viewCenterMapPos(), nmDlg.open, helpPanel,
                     dlgState);
 
         // ── Panels ────────────────────────────────────────────────────────────
@@ -1336,7 +1433,7 @@ int main(int /*argc*/, char* /*argv*/[])
         inspector.draw(doc, catalog, *device, *assetLoader, assetBrowser);
         assetBrowser.draw(catalog, *device, *assetLoader);
         renderPanel.draw(doc);
-        objBrowser.draw(doc, vp2d.lastMouseMapPos());
+        objBrowser.draw(doc, vp2d.viewCenterMapPos());
         layersPanel.draw(doc);
         outputLog.draw(doc);
         helpPanel.draw();
@@ -1381,7 +1478,11 @@ int main(int /*argc*/, char* /*argv*/[])
             ImGui::EndPopup();
         }
 
-        // ── Window title ──────────────────────────────────────────────────────
+        // ── Splash screen modal ─────────────────────────────────────────────
+        if (splash.isVisible())
+            splash.draw(dt);
+
+        // ── Window title ────────────────────────────────────────────────────
         {
             const bool        dirty   = doc.isDirty();
             const std::string curPath = doc.filePath().empty()
@@ -1423,6 +1524,11 @@ int main(int /*argc*/, char* /*argv*/[])
     }
 
     // ── Cleanup ───────────────────────────────────────────────────────────────
+    // Flush window geometry to the INI before tearing down ImGui, so the
+    // final position/size is always captured even if nothing else was dirty.
+    ImGui::MarkIniSettingsDirty();
+    ImGui::SaveIniSettingsToDisk("daedalusedit.ini");
+
     ImGui_ImplMetal_Shutdown();
     ImGui_ImplSDL3_Shutdown();
     ImGui::DestroyContext();

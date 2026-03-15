@@ -79,8 +79,17 @@ public:
     [[nodiscard]] bool isHovered() const noexcept { return m_isHovered; }
 
     /// Camera state accessors (used by Viewport2D for the fly-camera overlay).
-    [[nodiscard]] glm::vec3 eye() const noexcept { return m_eye; }
-    [[nodiscard]] float     yaw() const noexcept { return m_yaw; }
+    [[nodiscard]] glm::vec3 eye()   const noexcept { return m_eye;   }
+    [[nodiscard]] float     yaw()   const noexcept { return m_yaw;   }
+    [[nodiscard]] float     pitch() const noexcept { return m_pitch; }
+
+    /// Restore all three camera axes at once (called after emap load).
+    void setCameraState(glm::vec3 eye, float yaw, float pitch) noexcept
+    {
+        m_eye   = eye;
+        m_yaw   = yaw;
+        m_pitch = pitch;
+    }
 
     /// Accumulate raw mouse delta from SDL_EVENT_MOUSE_MOTION while captured.
     /// Called from the main event loop so all motion events within a frame are summed.

@@ -39,6 +39,12 @@ namespace daedalus::editor::geometry
                                           glm::vec2 a,
                                           glm::vec2 b) noexcept;
 
+/// Returns true if polygon `a` and polygon `b` have overlapping interior area.
+/// Handles partial overlap (edge-edge intersection) and full containment.
+/// Adjacent sectors that share only a boundary edge return false.
+[[nodiscard]] bool polygonsOverlap(const std::vector<glm::vec2>& a,
+                                   const std::vector<glm::vec2>& b) noexcept;
+
 /// Finds a wall in a different sector whose endpoints match the endpoints of
 /// wall wA of sector sA (within epsilon), in either winding order.
 /// Returns {matchSector, matchWallIndex}, or {INVALID_SECTOR_ID, 0} if none.

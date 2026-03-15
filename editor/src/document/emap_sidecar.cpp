@@ -110,7 +110,7 @@ namespace daedalus::editor
 namespace
 {
 
-constexpr int k_VERSION = 4;
+constexpr int k_VERSION = 6;
 
 // ─── Write helpers ────────────────────────────────────────────────────────────
 
@@ -491,11 +491,26 @@ saveEmap(const EditMapDocument& doc, const std::filesystem::path& emapPath)
             {"fx_grain_amount",       rs.optionalFx.grainAmount},
             // Upscaling
             {"up_fxaa", rs.upscaling.fxaaEnabled},
+            // Ray tracing (v5)
+            {"rt_enabled",  rs.rt.enabled},
+            {"rt_bounces",  rs.rt.maxBounces},
+            {"rt_spp",      rs.rt.samplesPerPixel},
+            {"rt_denoise",  rs.rt.denoise},
         };
     }
 
     // Asset root path for MaterialCatalog.
     root["asset_root"] = doc.assetRoot();
+
+    // Viewport camera state (v6).
+    if (const auto& cam = doc.viewportCamera(); cam.has_value())
+    {
+        root["viewport_camera"] = {
+            {"eye",   vec3ToJson(cam->eye)},
+            {"yaw",   cam->yaw},
+            {"pitch", cam->pitch},
+        };
+    }
 
     // Prefab library.
     {
@@ -560,9 +575,11 @@ loadEmap(EditMapDocument& doc, const std::filesystem::path& emapPath)
 
     try
     {
-        // Version guard.
+        // Version guard: accept any version up to the current schema version.
+        // Fields added in later versions are guarded by contains() below, so
+        // older files load cleanly with defaults for any new fields.
         const int version = root["version"].get<int>();
-        if (version != k_VERSION)
+        if (version < 1 || version > k_VERSION)
             return std::unexpected(EmapError::ParseError);
 
         // Scene settings.
@@ -630,6 +647,12 @@ loadEmap(EditMapDocument& doc, const std::filesystem::path& emapPath)
 
             // Upscaling.
             if (jr.contains("up_fxaa")) rs.upscaling.fxaaEnabled = jr["up_fxaa"].get<bool>();
+
+            // Ray tracing (v5).
+            if (jr.contains("rt_enabled"))  rs.rt.enabled         = jr["rt_enabled"].get<bool>();
+            if (jr.contains("rt_bounces"))  rs.rt.maxBounces      = jr["rt_bounces"].get<uint32_t>();
+            if (jr.contains("rt_spp"))      rs.rt.samplesPerPixel = jr["rt_spp"].get<uint32_t>();
+            if (jr.contains("rt_denoise"))  rs.rt.denoise         = jr["rt_denoise"].get<bool>();
         }
 
         // Asset root.
@@ -727,6 +750,17 @@ loadEmap(EditMapDocument& doc, const std::filesystem::path& emapPath)
                         pf.entities.push_back(entityFromJson(je));
                 doc.prefabs().push_back(std::move(pf));
             }
+        }
+
+        // Viewport camera state (v6).
+        if (root.contains("viewport_camera"))
+        {
+            const auto& jc = root["viewport_camera"];
+            EditMapDocument::ViewportCameraState cam;
+            if (jc.contains("eye"))   cam.eye   = vec3FromJson(jc["eye"]);
+            if (jc.contains("yaw"))   cam.yaw   = jc["yaw"].get<float>();
+            if (jc.contains("pitch")) cam.pitch = jc["pitch"].get<float>();
+            doc.setViewportCamera(cam);
         }
 
         // Sector layer assignments — stored as a parallel vector rebuilt here.

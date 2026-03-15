@@ -57,6 +57,7 @@ target_sources(DaedalusEdit PRIVATE
     src/document/emap_sidecar.cpp
     src/catalog/material_catalog.cpp
     src/panels/asset_browser_panel.cpp
+    src/panels/splash_screen.mm
 )
 
 target_include_directories(DaedalusEdit
@@ -91,8 +92,9 @@ if(DAEDALUS_PLATFORM_MACOS)
         ${COREGRAPHICS_FRAMEWORK}
     )
 
-    # Enable ARC for the Obj-C++ entry point.
+    # Enable ARC for all Obj-C++ source files.
     set_source_files_properties(src/main.mm PROPERTIES COMPILE_FLAGS "-fobjc-arc")
+    set_source_files_properties(src/panels/splash_screen.mm PROPERTIES COMPILE_FLAGS "-fobjc-arc")
 
     # Copy the .metallib next to the editor executable (same pattern as app/).
     set(METALLIB_EDITOR_COPY "${CMAKE_BINARY_DIR}/editor/daedalus_shaders.metallib")
@@ -114,6 +116,14 @@ if(DAEDALUS_PLATFORM_MACOS)
                 "${CMAKE_SOURCE_DIR}/assets"
                 "$<TARGET_FILE_DIR:DaedalusEdit>/assets"
         COMMENT "Copying shared assets to editor binary dir"
+    )
+
+    # Copy editor-private assets (not exposed to the material catalog).
+    add_custom_command(TARGET DaedalusEdit POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+                "${CMAKE_CURRENT_SOURCE_DIR}/assets"
+                "$<TARGET_FILE_DIR:DaedalusEdit>/editor_assets"
+        COMMENT "Copying editor-private assets to editor binary dir"
     )
 endif()
 

@@ -59,6 +59,16 @@ public:
     /// Used by main.mm when placing objects via keyboard shortcut.
     [[nodiscard]] glm::vec2 lastMouseMapPos() const noexcept { return m_lastMouseMapPos; }
 
+    /// Map-space position at the centre of the visible 2D canvas.
+    /// Use this for keyboard/panel-triggered object placement so the object
+    /// is always visible regardless of where the mouse currently is.
+    [[nodiscard]] glm::vec2 viewCenterMapPos() const noexcept
+    {
+        // Inverse of mapToScreen: mapPos = (screenOffset - panOffset) / zoom
+        // where screenOffset = canvasSize * 0.5 (relative to canvasMin).
+        return (m_lastCanvasSize * 0.5f - m_panOffset) / m_zoom;
+    }
+
     /// Fit pan and zoom so all sectors in `map` are visible.
     /// No-op if the map has no sectors.
     void fitToView(const world::WorldMapData& map) noexcept;
@@ -142,6 +152,7 @@ private:
     bool                       m_highlightsDirty = true; ///< Recompute on next draw.
 
     bool      m_firstFrame      = true;   ///< Center the view on first draw.
+    glm::vec2 m_lastCanvasSize  = {800.0f, 600.0f}; ///< Canvas pixel size, updated each draw().
     glm::vec2 m_lastMouseMapPos = {};     ///< Raw map position of the cursor (updated per frame).
 
     [[nodiscard]] glm::vec2 mapToScreen(glm::vec2 mapPos,
