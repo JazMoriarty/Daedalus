@@ -56,6 +56,7 @@ target_sources(DaedalusEdit PRIVATE
     src/panels/help_panel.cpp
     src/document/emap_sidecar.cpp
     src/catalog/material_catalog.cpp
+    src/catalog/model_catalog.cpp
     src/panels/asset_browser_panel.cpp
     src/panels/splash_screen.mm
 )

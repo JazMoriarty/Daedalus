@@ -30,6 +30,7 @@
 #include <cstddef>
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
 #include <memory>
 
 namespace daedalus::editor
@@ -777,24 +778,67 @@ void PropertyInspector::draw(EditMapDocument&      doc,
             ImGui::TextDisabled("Alignment");
         }
 
-        // ── Appearance ────────────────────────────────────────────────────────────────────
+        // ── Appearance ──────────────────────────────────────────────────────────────────────────────────
         ImGui::Spacing();
         ImGui::SeparatorText("Appearance");
         {
-            char pathBuf[512] = {};
-            std::strncpy(pathBuf, ed.assetPath.c_str(), 511);
-            ImGui::SetNextItemWidth(-1.0f);
-            ImGui::InputText("##easset", pathBuf, sizeof(pathBuf));
-            ImGui::SameLine();
-            ImGui::TextDisabled("Asset");
-            if (ImGui::IsItemDeactivatedAfterEdit() &&
-                std::string(pathBuf) != ed.assetPath)
+            if (ed.visualType == EntityVisualType::StaticMesh)
             {
-                EntityDef oldDef = ed;
-                EntityDef newDef = ed;
-                newDef.assetPath = pathBuf;
-                doc.pushCommand(std::make_unique<CmdSetEntityProps>(
-                    doc, ei, oldDef, newDef));
+                // Browse button + current filename display (mirroring the
+                // texture picker pattern used for sector / wall materials).
+                ImGui::Dummy(ImVec2(32, 32));
+                ImGui::SameLine();
+                ImGui::BeginGroup();
+                ImGui::TextDisabled("Model");
+                {
+                    const std::string fname =
+                        std::filesystem::path(ed.assetPath).filename().string();
+                    ImGui::TextDisabled("%s",
+                        fname.empty() ? "(none)" : fname.c_str());
+                }
+                if (ImGui::SmallButton("Browse##mesh"))
+                {
+                    const std::size_t capEi = ei;
+                    assetBrowser.openModelPicker(
+                        [&doc, capEi](const std::string& path)
+                        {
+                            auto& ents = doc.entities();
+                            if (capEi >= ents.size()) return;
+                            EntityDef oldDef = ents[capEi];
+                            EntityDef newDef = oldDef;
+                            newDef.assetPath = path;
+                            doc.pushCommand(std::make_unique<CmdSetEntityProps>(
+                                doc, capEi, oldDef, newDef));
+                        }, "Static Mesh");
+                }
+                ImGui::SameLine();
+                if (ImGui::SmallButton("X##mesh") && !ed.assetPath.empty())
+                {
+                    EntityDef oldDef = ed;
+                    EntityDef newDef = ed;
+                    newDef.assetPath.clear();
+                    doc.pushCommand(std::make_unique<CmdSetEntityProps>(
+                        doc, ei, oldDef, newDef));
+                }
+                ImGui::EndGroup();
+            }
+            else
+            {
+                char pathBuf[512] = {};
+                std::strncpy(pathBuf, ed.assetPath.c_str(), 511);
+                ImGui::SetNextItemWidth(-1.0f);
+                ImGui::InputText("##easset", pathBuf, sizeof(pathBuf));
+                ImGui::SameLine();
+                ImGui::TextDisabled("Asset");
+                if (ImGui::IsItemDeactivatedAfterEdit() &&
+                    std::string(pathBuf) != ed.assetPath)
+                {
+                    EntityDef oldDef = ed;
+                    EntityDef newDef = ed;
+                    newDef.assetPath = pathBuf;
+                    doc.pushCommand(std::make_unique<CmdSetEntityProps>(
+                        doc, ei, oldDef, newDef));
+                }
             }
 
             glm::vec4 tint = ed.tint;

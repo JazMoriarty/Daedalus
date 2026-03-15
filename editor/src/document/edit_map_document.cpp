@@ -56,7 +56,7 @@ void EditMapDocument::newMap()
     m_filePath.clear();
     m_dirty         = false;
     m_geometryDirty = true;
-    m_entityDirty   = false;
+    m_entityDirty   = true;   // Force entity cache rebuild to free any stale GPU entries.
     log("New map created.");
 }
 
@@ -81,7 +81,7 @@ bool EditMapDocument::loadFromFile(const std::filesystem::path& path)
     m_filePath      = path;
     m_dirty         = false;
     m_geometryDirty = true;
-    m_entityDirty   = false;
+    m_entityDirty   = true;   // Force entity cache rebuild so loaded entities appear in the 3D viewport.
 
     // Load editor-only state from sidecar (.emap).  A missing sidecar is not an
     // error — legacy maps simply use the defaults set above.

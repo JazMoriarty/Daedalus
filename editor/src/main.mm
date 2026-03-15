@@ -45,6 +45,7 @@
 #include "document/commands/cmd_delete_entity.h"
 #include "document/commands/cmd_set_player_start.h"
 #include "catalog/material_catalog.h"
+#include "catalog/model_catalog.h"
 #include "panels/asset_browser_panel.h"
 #include "panels/splash_screen.h"
 #include "daedalus/world/dlevel_io.h"
@@ -482,6 +483,15 @@ int main(int /*argc*/, char* /*argv*/[])
     metalLayer.maximumDrawableCount = 2;
     metalLayer.displaySyncEnabled   = NO;
 
+    // ── Working directory ─────────────────────────────────────────────────────
+    // Ensure relative paths (asset paths, INI, shaders) resolve from the
+    // executable's directory regardless of how the editor was launched.
+    {
+        std::error_code ec;
+        std::filesystem::current_path(std::filesystem::path(executableDir()), ec);
+        // Non-fatal: if this fails, relative paths may not resolve correctly.
+    }
+
     // ── ImGui ─────────────────────────────────────────────────────────────────
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
@@ -578,8 +588,21 @@ int main(int /*argc*/, char* /*argv*/[])
     HelpPanel           helpPanel;
     NewMapDialogState   nmDlg;
     MaterialCatalog     catalog;
+    ModelCatalog        modelCatalog;
     AssetBrowserPanel   assetBrowser;
     std::string         lastKnownAssetRoot;
+
+    // ── Model catalog: scan once at startup from the standard models directory.
+    // scan() silently returns if the root doesn't exist.
+    // Use modelRoot.parent_path().parent_path() as the base so we get a clean
+    // path without a trailing slash (SDL_GetBasePath returns one on macOS,
+    // which confuses std::filesystem::relative).
+    {
+        const std::filesystem::path modelRoot =
+            std::filesystem::path(executableDir()) / "assets" / "models";
+        modelCatalog.setRoot(modelRoot, modelRoot.parent_path().parent_path());
+        modelCatalog.scan();
+    }
 
     bool layoutBuilt = false;
 
@@ -1325,7 +1348,7 @@ int main(int /*argc*/, char* /*argv*/[])
             }
         }
 
-        // ── Asset catalog: rescan whenever doc's assetRoot changes ────────────────
+        // ── Asset catalog: rescan whenever doc's assetRoot changes ────────────────────────────
         // Triggered by: INI restore above, File > Set Asset Root, or loading a .dmap
         // that carries its own assetRoot.  Also persists the new root to the INI.
         {
@@ -1339,6 +1362,16 @@ int main(int /*argc*/, char* /*argv*/[])
                     catalog.scan();
                     persistState.assetRoot = ar;
                     ImGui::MarkIniSettingsDirty();
+
+                    // Also scan the sibling models directory.
+                    const std::filesystem::path modelRoot =
+                        std::filesystem::path(ar).parent_path() / "models";
+                    if (std::filesystem::is_directory(modelRoot))
+                    {
+                        modelCatalog.setRoot(modelRoot,
+                            modelRoot.parent_path().parent_path());
+                        modelCatalog.scan();
+                    }
                 }
             }
         }
@@ -1431,7 +1464,7 @@ int main(int /*argc*/, char* /*argv*/[])
 
         vp3d.draw(doc, *assetLoader, *device, *queue, catalog, assetBrowser);
         inspector.draw(doc, catalog, *device, *assetLoader, assetBrowser);
-        assetBrowser.draw(catalog, *device, *assetLoader);
+        assetBrowser.draw(catalog, *device, *assetLoader, modelCatalog);
         renderPanel.draw(doc);
         objBrowser.draw(doc, vp2d.viewCenterMapPos());
         layersPanel.draw(doc);

@@ -32,17 +32,29 @@ void OutputLog::draw(EditMapDocument& doc)
     {
         const LogEntry& entry = msgs[i];
 
+        ImGui::PushID(static_cast<int>(i));
+
         // Jump-to button for entries that carry a selection target.
         if (entry.jumpTo.has_value())
         {
-            ImGui::PushID(static_cast<int>(i));
             if (ImGui::SmallButton("\xe2\x86\x92"))  // UTF-8 right arrow →
                 doc.selection() = entry.jumpTo.value();
             ImGui::SameLine();
-            ImGui::PopID();
         }
 
-        ImGui::TextUnformatted(entry.message.c_str());
+        // Selectable text: the user can click to select and Cmd+C to copy.
+        // Use a zero-height selectable so it just wraps the text tightly.
+        ImGui::Selectable(entry.message.c_str(), false,
+                          ImGuiSelectableFlags_None, ImVec2(0, 0));
+        // Allow the user to copy on right-click via a context menu.
+        if (ImGui::BeginPopupContextItem("##logctx"))
+        {
+            if (ImGui::MenuItem("Copy"))
+                ImGui::SetClipboardText(entry.message.c_str());
+            ImGui::EndPopup();
+        }
+
+        ImGui::PopID();
     }
 
     // Auto-scroll when new messages arrive.
