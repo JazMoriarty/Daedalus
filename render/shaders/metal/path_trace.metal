@@ -118,7 +118,8 @@ inline SurfaceHit evaluate_surface(
     device const RTMaterialGPU*    materials,
     device const RTPrimitiveData*  primitives,
     array<texture2d<float>, MAX_RT_TEXTURES> textures,
-    sampler texSampler)
+    sampler texSampler,
+    float  pixelAngle)  // ray-cone half-angle per pixel; drives explicit mip LOD
 {
     SurfaceHit surf;
     surf.position = rayOrigin + rayDir * hitDist;
@@ -147,17 +148,47 @@ inline SurfaceHit evaluate_surface(
         interpN = -interpN;
     surf.geoNormal = interpN;
 
+    // ── Explicit mip LOD from ray cone ───────────────────────────────────────
+    // Metal compute kernels have no screen-space derivatives, so .sample() with
+    // a mipFilter sampler still defaults to LOD 0 — identical to nearest-mip.
+    // This causes severe texture aliasing (moiré, swimming) because every hit,
+    // regardless of surface distance or viewing angle, samples the highest-
+    // resolution mip.
+    //
+    // Fix: model the camera as a ray cone whose half-angle is pixelAngle
+    // (one pixel's angular extent at the vertical screen centre).  At hit
+    // distance d the cone's footprint on the surface has a world-space
+    // radius of d × pixelAngle / NdotV (glancing-angle correction).
+    // Converting to texels and taking log2 gives the correct mip level.
+    //
+    // pixelAngle = 2 × tan(fovY/2) / screenHeight
+    //            = 2 / (proj[1][1] × screenHeight)   (proj[1][1] = 1/tan(fovY/2))
+    //
+    // This is computed once per path_trace_main invocation and passed here.
+    float texLOD = 0.0f;
+    {
+        float NdotV = max(abs(dot(interpN, -rayDir)), 0.1f);
+        // Use the albedo texture dimensions as the reference; normal/emissive
+        // textures for the same material are typically the same resolution.
+        float texW = float(textures[mat.albedoTextureIndex].get_width());
+        float texH = float(textures[mat.albedoTextureIndex].get_height());
+        float footprint = hitDist * pixelAngle
+                        * max(texW * mat.uvScale.x, texH * mat.uvScale.y)
+                        / NdotV;
+        texLOD = max(0.0f, log2(footprint));
+    }
+
     // ── Sample textures ──────────────────────────────────────────────────────
 
     // Albedo: texture × tint.
-    float4 albedoSample = textures[mat.albedoTextureIndex].sample(texSampler, uv);
+    float4 albedoSample = textures[mat.albedoTextureIndex].sample(texSampler, uv, level(texLOD));
     surf.albedo = albedoSample.rgb * mat.tint.rgb;
 
     // Normal mapping: decode tangent-space normal, build TBN, transform.
     float3 shadingN = interpN;
     if (mat.normalTextureIndex != 0)
     {
-        float3 tangentNormal = textures[mat.normalTextureIndex].sample(texSampler, uv).xyz;
+        float3 tangentNormal = textures[mat.normalTextureIndex].sample(texSampler, uv, level(texLOD)).xyz;
         tangentNormal = tangentNormal * 2.0f - 1.0f;
 
         // Interpolate tangent.
@@ -174,7 +205,7 @@ inline SurfaceHit evaluate_surface(
 
     // Emissive.
     if (mat.emissiveTextureIndex != 0)
-        surf.emissive = textures[mat.emissiveTextureIndex].sample(texSampler, uv).rgb;
+        surf.emissive = textures[mat.emissiveTextureIndex].sample(texSampler, uv, level(texLOD)).rgb;
     else
         surf.emissive = float3(0.0f);
 
@@ -208,6 +239,13 @@ kernel void path_trace_main(
 {
     const uint2 screenSize = uint2(frame.screenSize.xy);
     if (gid.x >= screenSize.x || gid.y >= screenSize.y) return;
+
+    // ─── Pixel-cone half-angle ────────────────────────────────────────────────
+    // frame.proj[1][1] = 1/tan(fovY/2) for a column-major perspective matrix.
+    // pixelAngle is the angle subtended by one pixel at the screen centre.
+    // Passed to evaluate_surface so textures are sampled at the correct mip
+    // level for each hit distance rather than always defaulting to LOD 0.
+    const float pixelAngle = 2.0f / (frame.proj[1][1] * float(screenSize.y));
 
     // ─── G-buffer primary ray (pixel centre, deterministic) ──────────────────
     // The denoiser guide signals (depth, normal, motion vectors) must be stable
@@ -260,7 +298,7 @@ kernel void path_trace_main(
         origin, centerDir, centerHit.distance,
         centerHit.instance_id, centerHit.primitive_id,
         centerHit.triangle_barycentric_coord,
-        materials, primitives, textures, texSampler);
+        materials, primitives, textures, texSampler, pixelAngle);
 
     // ─── Auxiliary outputs (denoiser guide signals) ──────────────────────────
 
@@ -345,7 +383,7 @@ kernel void path_trace_main(
             origin, jDir, jHit.distance,
             jHit.instance_id, jHit.primitive_id,
             jHit.triangle_barycentric_coord,
-            materials, primitives, textures, texSampler);
+            materials, primitives, textures, texSampler, pixelAngle);
 
         float3 N         = surf.normal;
         float3 albedo    = surf.albedo;
@@ -488,7 +526,7 @@ kernel void path_trace_main(
                 bouncePos + bounceGeoN * 0.001f, bounceDir, bounceHit.distance,
                 bounceHit.instance_id, bounceHit.primitive_id,
                 bounceHit.triangle_barycentric_coord,
-                materials, primitives, textures, texSampler);
+                materials, primitives, textures, texSampler, pixelAngle);
 
             float3 newN      = bounceSurf.normal;
             float3 newAlbedo = bounceSurf.albedo;
