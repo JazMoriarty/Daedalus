@@ -1643,8 +1643,9 @@ void Viewport3D::draw(EditMapDocument&      doc,
                 if (ImGui::IsKeyPressed(ImGuiKey_Backspace, /*repeat=*/false))
                     pushUV({0.0f, 0.0f}, {1.0f, 1.0f}, 0.0f);
 
-                // P — pixel-perfect scale using the front material's native dimensions.
-                if (ImGui::IsKeyPressed(ImGuiKey_P, /*repeat=*/false))
+                // N — pixel-perfect scale using the front material's native dimensions.
+                // (P is reserved for snap-to-player-start; see navigation block above.)
+                if (ImGui::IsKeyPressed(ImGuiKey_N, /*repeat=*/false))
                 {
                     const MaterialEntry* entry = catalog.find(uvWall.frontMaterialId);
                     if (entry && entry->texWidth > 0 && entry->texHeight > 0)

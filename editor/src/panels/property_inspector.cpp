@@ -339,7 +339,7 @@ void PropertyInspector::draw(EditMapDocument&      doc,
             const float     uvWallLen = glm::length(uvP1 - uvP0);
             const float     uvWallHt  = sectors[sid].ceilHeight - sectors[sid].floorHeight;
 
-            // Pixel Perfect: scale to 1:1 pixel density using front material dims.
+            // Pixel Perfect (N in 3D viewport): scale to 1:1 pixel density using front material dims.
             {
                 const MaterialEntry* ppEntry = catalog.find(wall.frontMaterialId);
                 const bool hasDims = ppEntry && ppEntry->texWidth > 0 && ppEntry->texHeight > 0;
