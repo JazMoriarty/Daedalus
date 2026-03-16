@@ -16,14 +16,29 @@ constexpr std::array<std::string_view, 2> k_modelExts = { ".gltf", ".glb" };
 
 } // anonymous namespace
 
+// ─── setExtensions ───────────────────────────────────────────────────────────
+
+void ModelCatalog::setExtensions(std::initializer_list<std::string_view> exts)
+{
+    m_extensions.clear();
+    for (auto sv : exts)
+        m_extensions.emplace_back(sv);
+}
+
 // ─── isModelFile ─────────────────────────────────────────────────────────────
 
-bool ModelCatalog::isModelFile(const std::filesystem::path& p) noexcept
+bool ModelCatalog::isModelFile(const std::filesystem::path& p) const noexcept
 {
     std::string ext = p.extension().string();
     for (auto& c : ext)
         c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-    for (const auto& e : k_modelExts)
+    if (m_extensions.empty())
+    {
+        for (const auto& e : k_modelExts)
+            if (ext == e) return true;
+        return false;
+    }
+    for (const auto& e : m_extensions)
         if (ext == e) return true;
     return false;
 }

@@ -31,6 +31,7 @@
 #include <glm/gtc/constants.hpp>
 
 #include <algorithm>
+#include <cmath>
 #include <cstddef>
 #include <cstdio>
 #include <cstring>
@@ -92,7 +93,7 @@ static bool colorEditUndo(const char* label, float* col, int channels,
 // guaranteed by ImGui's single-active-item model.
 static bool dragFloatUndo(const char* label, float* v, float speed,
                            float v_min, float v_max, const char* fmt,
-                           ImGuiSliderFlags flags = 0)
+                           ImGuiSliderFlags flags = 0, float snapStep = 0.0f)
 {
     static ImGuiID s_id  = 0;
     static float   s_val = 0.0f;
@@ -100,7 +101,11 @@ static bool dragFloatUndo(const char* label, float* v, float speed,
     if (s_id == wid) *v = s_val;
     ImGui::DragFloat(label, v, speed, v_min, v_max, fmt, flags);
     if (ImGui::IsItemActive() || ImGui::IsItemEdited())
-        { s_id = wid; s_val = *v; }
+    {
+        if (snapStep > 0.0f && !ImGui::GetIO().KeyShift)
+            *v = std::round(*v / snapStep) * snapStep;
+        s_id = wid; s_val = *v;
+    }
     if (ImGui::IsItemDeactivatedAfterEdit())
         { if (s_id == wid) { *v = s_val; s_id = 0; } return true; }
     return false;
@@ -124,7 +129,7 @@ static bool dragFloat2Undo(const char* label, float* v, float speed,
 
 static bool dragFloat3Undo(const char* label, float* v, float speed,
                             float v_min, float v_max, const char* fmt,
-                            ImGuiSliderFlags flags = 0)
+                            ImGuiSliderFlags flags = 0, float snapStep = 0.0f)
 {
     static ImGuiID s_id     = 0;
     static float   s_val[3] = {};
@@ -132,7 +137,15 @@ static bool dragFloat3Undo(const char* label, float* v, float speed,
     if (s_id == wid) { v[0] = s_val[0]; v[1] = s_val[1]; v[2] = s_val[2]; }
     ImGui::DragFloat3(label, v, speed, v_min, v_max, fmt, flags);
     if (ImGui::IsItemActive() || ImGui::IsItemEdited())
-        { s_id = wid; s_val[0] = v[0]; s_val[1] = v[1]; s_val[2] = v[2]; }
+    {
+        if (snapStep > 0.0f && !ImGui::GetIO().KeyShift)
+        {
+            v[0] = std::round(v[0] / snapStep) * snapStep;
+            v[1] = std::round(v[1] / snapStep) * snapStep;
+            v[2] = std::round(v[2] / snapStep) * snapStep;
+        }
+        s_id = wid; s_val[0] = v[0]; s_val[1] = v[1]; s_val[2] = v[2];
+    }
     if (ImGui::IsItemDeactivatedAfterEdit())
         { if (s_id == wid) { v[0]=s_val[0]; v[1]=s_val[1]; v[2]=s_val[2]; s_id=0; } return true; }
     return false;
@@ -158,7 +171,9 @@ void PropertyInspector::draw(EditMapDocument&      doc,
                               MaterialCatalog&      catalog,
                               rhi::IRenderDevice&   device,
                               render::IAssetLoader& loader,
-                              AssetBrowserPanel&    assetBrowser)
+                              AssetBrowserPanel&    assetBrowser,
+                              ModelCatalog*         voxCatalog,
+                              float                 gridStep)
 {
     ImGui::Begin("Properties");
 
@@ -895,7 +910,8 @@ void PropertyInspector::draw(EditMapDocument&      doc,
 
             glm::vec3 pos = ed.position;
             ImGui::SetNextItemWidth(-1.0f);
-            bool posCommitted = dragFloat3Undo("##epos", &pos.x, 0.1f, 0.0f, 0.0f, "%.2f");
+            bool posCommitted = dragFloat3Undo("##epos", &pos.x, 0.1f, 0.0f, 0.0f, "%.2f",
+                                               0, gridStep);
             if (ImGui::IsItemActivated())
                 s_preDragEntity = ed;
             if (ImGui::IsItemActive() || ImGui::IsItemEdited())
@@ -911,7 +927,8 @@ void PropertyInspector::draw(EditMapDocument&      doc,
 
             float yawDeg = glm::degrees(ed.yaw);
             ImGui::SetNextItemWidth(-1.0f);
-            bool yawCommitted = dragFloatUndo("##eyaw", &yawDeg, 0.5f, 0.0f, 0.0f, "Yaw: %.1f\xc2\xb0");
+            bool yawCommitted = dragFloatUndo("##eyaw", &yawDeg, 0.5f, 0.0f, 0.0f, "Yaw: %.1f\xc2\xb0",
+                                              0, 5.0f);
             if (ImGui::IsItemActivated())
                 s_preDragEntity = ed;
             if (ImGui::IsItemActive() || ImGui::IsItemEdited())
@@ -924,7 +941,8 @@ void PropertyInspector::draw(EditMapDocument&      doc,
 
             float pitchDeg = glm::degrees(ed.pitch);
             ImGui::SetNextItemWidth(-1.0f);
-            bool pitchCommitted = dragFloatUndo("##epitch", &pitchDeg, 0.5f, 0.0f, 0.0f, "Pitch: %.1f\xc2\xb0");
+            bool pitchCommitted = dragFloatUndo("##epitch", &pitchDeg, 0.5f, 0.0f, 0.0f, "Pitch: %.1f\xc2\xb0",
+                                                0, 5.0f);
             if (ImGui::IsItemActivated())
                 s_preDragEntity = ed;
             if (ImGui::IsItemActive() || ImGui::IsItemEdited())
@@ -937,7 +955,8 @@ void PropertyInspector::draw(EditMapDocument&      doc,
 
             float rollDeg = glm::degrees(ed.roll);
             ImGui::SetNextItemWidth(-1.0f);
-            bool rollCommitted = dragFloatUndo("##eroll", &rollDeg, 0.5f, 0.0f, 0.0f, "Roll: %.1f\xc2\xb0");
+            bool rollCommitted = dragFloatUndo("##eroll", &rollDeg, 0.5f, 0.0f, 0.0f, "Roll: %.1f\xc2\xb0",
+                                               0, 5.0f);
             if (ImGui::IsItemActivated())
                 s_preDragEntity = ed;
             if (ImGui::IsItemActive() || ImGui::IsItemEdited())
@@ -1053,21 +1072,73 @@ void PropertyInspector::draw(EditMapDocument&      doc,
             }
             else
             {
-                char pathBuf[512] = {};
-                std::strncpy(pathBuf, ed.assetPath.c_str(), 511);
-                ImGui::SetNextItemWidth(-1.0f);
-                ImGui::InputText("##easset", pathBuf, sizeof(pathBuf));
+                // Browse-button UI for all non-StaticMesh entity types.
+                const bool isVoxel = (ed.visualType == EntityVisualType::VoxelObject);
+
+                ImGui::Dummy(ImVec2(32, 32));
                 ImGui::SameLine();
-                ImGui::TextDisabled("Asset");
-                if (ImGui::IsItemDeactivatedAfterEdit() &&
-                    std::string(pathBuf) != ed.assetPath)
+                ImGui::BeginGroup();
+                ImGui::TextDisabled("%s", isVoxel ? "Voxel Model" : "Texture");
+                {
+                    const std::string fname =
+                        std::filesystem::path(ed.assetPath).filename().string();
+                    ImGui::TextDisabled("%s", fname.empty() ? "(none)" : fname.c_str());
+                }
+
+                bool showedBrowse = false;
+                if (isVoxel)
+                {
+                    if (voxCatalog != nullptr)
+                    {
+                        if (ImGui::SmallButton("Browse##easset"))
+                        {
+                            const std::size_t capEi = ei;
+                            assetBrowser.openVoxPicker(
+                                [&doc, capEi](const std::string& path)
+                                {
+                                    auto& ents = doc.entities();
+                                    if (capEi >= ents.size()) return;
+                                    EntityDef oldDef = ents[capEi];
+                                    EntityDef newDef = oldDef;
+                                    newDef.assetPath = path;
+                                    doc.pushCommand(std::make_unique<CmdSetEntityProps>(
+                                        doc, capEi, oldDef, newDef));
+                                }, "Voxel Model");
+                        }
+                        showedBrowse = true;
+                    }
+                }
+                else
+                {
+                    if (ImGui::SmallButton("Browse##easset"))
+                    {
+                        const std::size_t capEi = ei;
+                        assetBrowser.openPicker(
+                            [&doc, &catalog, capEi](const UUID& uuid)
+                            {
+                                const MaterialEntry* entry = catalog.find(uuid);
+                                if (!entry) return;
+                                auto& ents = doc.entities();
+                                if (capEi >= ents.size()) return;
+                                EntityDef oldDef = ents[capEi];
+                                EntityDef newDef = oldDef;
+                                newDef.assetPath = entry->absPath.string();
+                                doc.pushCommand(std::make_unique<CmdSetEntityProps>(
+                                    doc, capEi, oldDef, newDef));
+                            }, "Texture");
+                    }
+                    showedBrowse = true;
+                }
+                if (showedBrowse) ImGui::SameLine();
+                if (ImGui::SmallButton("X##easset") && !ed.assetPath.empty())
                 {
                     EntityDef oldDef = ed;
                     EntityDef newDef = ed;
-                    newDef.assetPath = pathBuf;
+                    newDef.assetPath.clear();
                     doc.pushCommand(std::make_unique<CmdSetEntityProps>(
                         doc, ei, oldDef, newDef));
                 }
+                ImGui::EndGroup();
             }
 
             glm::vec4 tint = ed.tint;
@@ -1150,18 +1221,45 @@ void PropertyInspector::draw(EditMapDocument&      doc,
             ImGui::Spacing();
             ImGui::SeparatorText("Decal Material");
             {
-                const EntityDef oldDef = ed;
-                char  normalBuf[512]   = {};
-                std::strncpy(normalBuf, ed.decalMat.normalPath.c_str(), 511);
+        const EntityDef oldDef = ed;
                 float roughness = ed.decalMat.roughness;
                 float metalness = ed.decalMat.metalness;
                 float opacity   = ed.decalMat.opacity;
+                int   zIndex    = ed.decalMat.zIndex;
 
-                ImGui::SetNextItemWidth(-1.0f);
-                ImGui::InputText("##enorm", normalBuf, sizeof(normalBuf));
+                // Normal map — Browse / X buttons.
+                {
+                    const std::string fname =
+                        std::filesystem::path(ed.decalMat.normalPath).filename().string();
+                    ImGui::TextDisabled("Normal: %s",
+                        fname.empty() ? "(none)" : fname.c_str());
+                }
+                if (ImGui::SmallButton("Browse##enorm"))
+                {
+                    const std::size_t capEi = ei;
+                    assetBrowser.openPicker(
+                        [&doc, &catalog, capEi](const UUID& uuid)
+                        {
+                            const MaterialEntry* entry = catalog.find(uuid);
+                            if (!entry) return;
+                            auto& ents = doc.entities();
+                            if (capEi >= ents.size()) return;
+                            EntityDef oldD = ents[capEi];
+                            EntityDef newD = oldD;
+                            newD.decalMat.normalPath = entry->absPath.string();
+                            doc.pushCommand(std::make_unique<CmdSetEntityProps>(
+                                doc, capEi, oldD, newD));
+                        }, "Normal Map");
+                }
                 ImGui::SameLine();
-                ImGui::TextDisabled("Normal Map");
-                bool normChanged = ImGui::IsItemDeactivatedAfterEdit();
+                if (ImGui::SmallButton("X##enorm") && !ed.decalMat.normalPath.empty())
+                {
+                    EntityDef oldD = ed; EntityDef newD = ed;
+                    newD.decalMat.normalPath.clear();
+                    doc.pushCommand(std::make_unique<CmdSetEntityProps>(doc, ei, oldD, newD));
+                }
+
+                ImGui::Spacing();
 
                 ImGui::SetNextItemWidth(-1.0f);
                 bool roughChanged = dragFloatUndo("##erough", &roughness, 0.01f,
@@ -1175,13 +1273,17 @@ void PropertyInspector::draw(EditMapDocument&      doc,
                 bool opacChanged  = dragFloatUndo("##eopac",  &opacity,   0.01f,
                                                   0.0f, 1.0f, "Opacity: %.2f");
 
-                if (normChanged || roughChanged || metalChanged || opacChanged)
+                ImGui::SetNextItemWidth(-1.0f);
+                bool zIdxChanged  = dragIntUndo("##ezidx",  &zIndex,   1.0f,
+                                                0, 0, "Z-Index: %d");
+
+                if (roughChanged || metalChanged || opacChanged || zIdxChanged)
                 {
-                    EntityDef newDef           = oldDef;
-                    newDef.decalMat.normalPath = normalBuf;
-                    newDef.decalMat.roughness  = roughness;
-                    newDef.decalMat.metalness  = metalness;
-                    newDef.decalMat.opacity    = opacity;
+                    EntityDef newDef          = oldDef;
+                    newDef.decalMat.roughness = roughness;
+                    newDef.decalMat.metalness = metalness;
+                    newDef.decalMat.opacity   = opacity;
+                    newDef.decalMat.zIndex    = zIndex;
                     doc.pushCommand(std::make_unique<CmdSetEntityProps>(
                         doc, ei, oldDef, newDef));
                 }
@@ -1233,7 +1335,12 @@ void PropertyInspector::draw(EditMapDocument&      doc,
             ImGui::Spacing();
             ImGui::SeparatorText("Particle Emitter");
             {
-                const EntityDef oldDef     = ed;
+                // s_preDragParticle captures the entity state at the moment a
+                // drag begins (IsItemActivated).  Live mutations write directly
+                // to ed.particle.* so the 3D viewport updates every frame.
+                // The undo command is pushed on commit using this snapshot.
+                static EntityDef s_preDragParticle = {};
+
                 float     emissionRate     = ed.particle.emissionRate;
                 glm::vec3 emitDir          = ed.particle.emitDir;
                 float     coneHalfAngleDeg = glm::degrees(ed.particle.coneHalfAngle);
@@ -1247,79 +1354,153 @@ void PropertyInspector::draw(EditMapDocument&      doc,
                 float     sizeEnd          = ed.particle.sizeEnd;
                 float     drag             = ed.particle.drag;
                 glm::vec3 gravity          = ed.particle.gravity;
+                float     softRange        = ed.particle.softRange;
+                float     emissiveStart    = ed.particle.emissiveStart;
+                float     emissiveEnd      = ed.particle.emissiveEnd;
+                float     shadowDensity    = ed.particle.shadowDensity;
 
                 ImGui::SetNextItemWidth(-1.0f);
-                bool erChanged   = dragFloatUndo("##perate", &emissionRate, 0.1f,
-                                                  0.0f, 0.0f, "Emission Rate: %.1f/s");
+                bool erChanged = dragFloatUndo("##perate", &emissionRate, 0.1f,
+                                               0.0f, 0.0f, "Emission Rate: %.1f/s");
+                if (ImGui::IsItemActivated()) s_preDragParticle = ed;
+                if (ImGui::IsItemActive() || ImGui::IsItemEdited()) ed.particle.emissionRate = emissionRate;
 
                 ImGui::SetNextItemWidth(-1.0f);
                 bool edirChanged = dragFloat3Undo("##pedir", &emitDir.x, 0.01f,
                                                   0.0f, 0.0f, "%.2f");
+                if (ImGui::IsItemActivated()) s_preDragParticle = ed;
+                if (ImGui::IsItemActive() || ImGui::IsItemEdited())
+                {
+                    const float dlen = glm::length(emitDir);
+                    ed.particle.emitDir = (dlen > 1e-5f) ? emitDir / dlen : glm::vec3(0.0f, 1.0f, 0.0f);
+                }
 
                 ImGui::SetNextItemWidth(-1.0f);
                 bool coneChanged = dragFloatUndo("##pecone", &coneHalfAngleDeg, 0.5f,
-                                                  0.0f, 0.0f, "Cone: %.1f\xc2\xb0");
+                                                 0.0f, 0.0f, "Cone: %.1f\xc2\xb0");
+                if (ImGui::IsItemActivated()) s_preDragParticle = ed;
+                if (ImGui::IsItemActive() || ImGui::IsItemEdited()) ed.particle.coneHalfAngle = glm::radians(coneHalfAngleDeg);
 
                 ImGui::SetNextItemWidth(-1.0f);
                 bool sminChanged = dragFloatUndo("##pespmin", &speedMin, 0.1f,
-                                                  0.0f, 0.0f, "Speed Min: %.1f");
+                                                 0.0f, 0.0f, "Speed Min: %.1f");
+                if (ImGui::IsItemActivated()) s_preDragParticle = ed;
+                if (ImGui::IsItemActive() || ImGui::IsItemEdited()) ed.particle.speedMin = speedMin;
 
                 ImGui::SetNextItemWidth(-1.0f);
                 bool smaxChanged = dragFloatUndo("##pespmax", &speedMax, 0.1f,
-                                                  0.0f, 0.0f, "Speed Max: %.1f");
+                                                 0.0f, 0.0f, "Speed Max: %.1f");
+                if (ImGui::IsItemActivated()) s_preDragParticle = ed;
+                if (ImGui::IsItemActive() || ImGui::IsItemEdited()) ed.particle.speedMax = speedMax;
 
                 ImGui::SetNextItemWidth(-1.0f);
                 bool ltminChanged = dragFloatUndo("##peltmin", &lifetimeMin, 0.1f,
-                                                   0.0f, 0.0f, "Life Min: %.1f s");
+                                                  0.0f, 0.0f, "Life Min: %.1f s");
+                if (ImGui::IsItemActivated()) s_preDragParticle = ed;
+                if (ImGui::IsItemActive() || ImGui::IsItemEdited()) ed.particle.lifetimeMin = lifetimeMin;
 
                 ImGui::SetNextItemWidth(-1.0f);
                 bool ltmaxChanged = dragFloatUndo("##peltmax", &lifetimeMax, 0.1f,
-                                                   0.0f, 0.0f, "Life Max: %.1f s");
+                                                  0.0f, 0.0f, "Life Max: %.1f s");
+                if (ImGui::IsItemActivated()) s_preDragParticle = ed;
+                if (ImGui::IsItemActive() || ImGui::IsItemEdited()) ed.particle.lifetimeMax = lifetimeMax;
 
+                // Colors: IsItemActivated captures pre-state when the picker opens;
+                // always push the current picker value live so the viewport tracks it.
                 bool csChanged = colorEditUndo("Color Start##particle", &colorStart.x, 4);
+                if (ImGui::IsItemActivated()) s_preDragParticle = ed;
+                ed.particle.colorStart = colorStart;
 
-                bool ceChanged = colorEditUndo("Color End##particle",   &colorEnd.x, 4);
+                bool ceChanged = colorEditUndo("Color End##particle", &colorEnd.x, 4);
+                if (ImGui::IsItemActivated()) s_preDragParticle = ed;
+                ed.particle.colorEnd = colorEnd;
 
                 ImGui::SetNextItemWidth(-1.0f);
-                bool ssChanged   = dragFloatUndo("##peszstart", &sizeStart, 0.01f,
-                                                  0.0f, 0.0f, "Size Start: %.3f m");
+                bool ssChanged = dragFloatUndo("##peszstart", &sizeStart, 0.01f,
+                                               0.0f, 0.0f, "Size Start: %.3f m");
+                if (ImGui::IsItemActivated()) s_preDragParticle = ed;
+                if (ImGui::IsItemActive() || ImGui::IsItemEdited()) ed.particle.sizeStart = sizeStart;
 
                 ImGui::SetNextItemWidth(-1.0f);
-                bool seChanged   = dragFloatUndo("##peszend", &sizeEnd, 0.01f,
-                                                  0.0f, 0.0f, "Size End: %.3f m");
+                bool seChanged = dragFloatUndo("##peszend", &sizeEnd, 0.01f,
+                                              0.0f, 0.0f, "Size End: %.3f m");
+                if (ImGui::IsItemActivated()) s_preDragParticle = ed;
+                if (ImGui::IsItemActive() || ImGui::IsItemEdited()) ed.particle.sizeEnd = sizeEnd;
 
                 ImGui::SetNextItemWidth(-1.0f);
                 bool dragChanged = dragFloatUndo("##pedrag", &drag, 0.01f,
-                                                  0.0f, 0.0f, "Drag: %.2f");
+                                                 0.0f, 0.0f, "Drag: %.2f");
+                if (ImGui::IsItemActivated()) s_preDragParticle = ed;
+                if (ImGui::IsItemActive() || ImGui::IsItemEdited()) ed.particle.drag = drag;
 
                 ImGui::SetNextItemWidth(-1.0f);
                 bool gravChanged = dragFloat3Undo("##pegrav", &gravity.x, 0.1f,
-                                                   0.0f, 0.0f, "%.1f");
+                                                  0.0f, 0.0f, "%.1f");
+                if (ImGui::IsItemActivated()) s_preDragParticle = ed;
+                if (ImGui::IsItemActive() || ImGui::IsItemEdited()) ed.particle.gravity = gravity;
+
+                ImGui::SetNextItemWidth(-1.0f);
+                bool softChanged = dragFloatUndo("##pesoftrange", &softRange, 0.05f,
+                                                 0.0f, 0.0f, "Soft Range: %.2f m");
+                if (ImGui::IsItemActivated()) s_preDragParticle = ed;
+                if (ImGui::IsItemActive() || ImGui::IsItemEdited()) ed.particle.softRange = softRange;
+
+                ImGui::Spacing();
+                ImGui::SeparatorText("Emissive / Lighting");
+
+                ImGui::SetNextItemWidth(-1.0f);
+                bool emStartChanged = dragFloatUndo("##peemstart", &emissiveStart, 0.05f,
+                                                    0.0f, 0.0f, "Emissive Start: %.2f");
+                if (ImGui::IsItemActivated()) s_preDragParticle = ed;
+                if (ImGui::IsItemActive() || ImGui::IsItemEdited()) ed.particle.emissiveStart = emissiveStart;
+
+                ImGui::SetNextItemWidth(-1.0f);
+                bool emEndChanged = dragFloatUndo("##peemend", &emissiveEnd, 0.05f,
+                                                  0.0f, 0.0f, "Emissive End: %.2f");
+                if (ImGui::IsItemActivated()) s_preDragParticle = ed;
+                if (ImGui::IsItemActive() || ImGui::IsItemEdited()) ed.particle.emissiveEnd = emissiveEnd;
+
+                // Checkbox: instantaneous — capture pre-state locally and push
+                // its own command immediately so undo is always correct.
+                {
+                    bool emitsLight = ed.particle.emitsLight;
+                    const EntityDef preCheck = ed;
+                    if (ImGui::Checkbox("Emits Light##pe", &emitsLight) &&
+                        emitsLight != preCheck.particle.emitsLight)
+                    {
+                        ed.particle.emitsLight = emitsLight;
+                        EntityDef newDef = ed;
+                        doc.pushCommand(std::make_unique<CmdSetEntityProps>(
+                            doc, ei, preCheck, newDef));
+                    }
+                }
+
+                ImGui::Spacing();
+                ImGui::SeparatorText("Shadow Volume (RT)");
+
+                ImGui::SetNextItemWidth(-1.0f);
+                bool shadowDensityChanged = dragFloatUndo(
+                    "##peshadowdensity", &shadowDensity, 0.1f,
+                    0.0f, 0.0f, "Shadow Density: %.2f");
+                if (ImGui::IsItemActivated()) s_preDragParticle = ed;
+                if (ImGui::IsItemActive() || ImGui::IsItemEdited()) ed.particle.shadowDensity = shadowDensity;
 
                 if (erChanged || edirChanged || coneChanged ||
                     sminChanged || smaxChanged || ltminChanged || ltmaxChanged ||
                     csChanged || ceChanged || ssChanged || seChanged ||
-                    dragChanged || gravChanged)
+                    dragChanged || gravChanged || softChanged ||
+                    emStartChanged || emEndChanged ||
+                    shadowDensityChanged)
                 {
-                    EntityDef newDef = oldDef;
-                    newDef.particle.emissionRate  = emissionRate;
-                    const float len = glm::length(emitDir);
-                    newDef.particle.emitDir       = (len > 1e-5f)
-                        ? emitDir / len
+                    // ed.particle.* already holds the final live-mutated values;
+                    // re-apply normalization-dependent fields to be safe.
+                    EntityDef newDef = ed;
+                    const float dlen = glm::length(newDef.particle.emitDir);
+                    newDef.particle.emitDir = (dlen > 1e-5f)
+                        ? newDef.particle.emitDir / dlen
                         : glm::vec3(0.0f, 1.0f, 0.0f);
-                    newDef.particle.coneHalfAngle = glm::radians(coneHalfAngleDeg);
-                    newDef.particle.speedMin      = speedMin;
-                    newDef.particle.speedMax      = speedMax;
-                    newDef.particle.lifetimeMin   = lifetimeMin;
-                    newDef.particle.lifetimeMax   = lifetimeMax;
-                    newDef.particle.colorStart    = colorStart;
-                    newDef.particle.colorEnd      = colorEnd;
-                    newDef.particle.sizeStart     = sizeStart;
-                    newDef.particle.sizeEnd       = sizeEnd;
-                    newDef.particle.drag          = drag;
-                    newDef.particle.gravity       = gravity;
                     doc.pushCommand(std::make_unique<CmdSetEntityProps>(
-                        doc, ei, oldDef, newDef));
+                        doc, ei, s_preDragParticle, newDef));
                 }
             }
         }

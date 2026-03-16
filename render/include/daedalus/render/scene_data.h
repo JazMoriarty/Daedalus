@@ -42,7 +42,7 @@ struct alignas(16) FrameGPU
     f32 time;
     f32 deltaTime;
     f32 frameIndex;
-    f32 pad0;
+    f32 isRTMode;  ///< 1.0 in path-trace (RT) mode, 0.0 in raster mode.
 
     // TAA jitter (in UV space, [-0.5, 0.5])
     glm::vec2 jitter;
@@ -146,7 +146,7 @@ struct alignas(16) LightBufferHeader
 
 // ─── ParticleGPU ─────────────────────────────────────────────────────────────────────────────────────────────
 // Per-particle state written by emit, read+written by simulate, read by vertex.
-// 64 bytes, 16-byte aligned so arrays index cleanly.
+// 80 bytes, 16-byte aligned so arrays index cleanly.
 //
 // Layout:
 //   [0]  pos      float3  world-space position
@@ -158,6 +158,8 @@ struct alignas(16) LightBufferHeader
 //   [13] rot      float   billboard rotation (radians, around camera-facing axis)
 //   [14] frameIdx uint    current atlas frame index (advanced by simulate)
 //   [15] flags    uint    bit 0 = alive; reserved
+//   [16] emissive float   per-particle emissive intensity (interpolated by simulate)
+//   [17-19] ePad  float×3 padding to maintain 16-byte alignment
 
 struct alignas(16) ParticleGPU
 {
@@ -170,8 +172,10 @@ struct alignas(16) ParticleGPU
     f32       rot;
     u32       frameIdx;
     u32       flags;    ///< bit 0: alive
+    f32       emissive; ///< Per-particle emissive intensity (interpolated over lifetime by simulate).
+    f32       ePad[3];  ///< Padding to maintain 16-byte alignment → 80 bytes total.
 };
-static_assert(sizeof(ParticleGPU) == 64, "ParticleGPU must be 64 bytes");
+static_assert(sizeof(ParticleGPU) == 80, "ParticleGPU must be 80 bytes");
 
 // ─── ParticleEmitterConstantsGPU ───────────────────────────────────────────────────────────────────────
 // Uploaded once per emitter per frame (compute + vertex + fragment).
@@ -211,9 +215,9 @@ struct alignas(16) ParticleEmitterConstantsGPU
     f32       velocityStretch;  ///< Scale quad along velocity: stretch = 1 + |vel|*factor
 
     f32       softRange;        ///< Depth fade distance for soft particles (world units)
-    f32       pad0;
-    f32       pad1;
-    f32       pad2;
+    f32       emissiveStart;    ///< Emissive multiplier at birth (1 = fully self-lit, 0 = scene-lit only).
+    f32       emissiveEnd;      ///< Emissive multiplier at death.
+    f32       pad2;             ///< Reserved padding.
 };
 static_assert(sizeof(ParticleEmitterConstantsGPU) == 160,
               "ParticleEmitterConstantsGPU must be 160 bytes");
@@ -482,5 +486,49 @@ struct alignas(16) SVGFConstantsGPU
     f32 pad1 = 0.0f;
 };
 static_assert(sizeof(SVGFConstantsGPU) == 32, "SVGFConstantsGPU must be 32 bytes");
+
+// ─── ParticleShadowVolumeGPU ───────────────────────────────────────────────────────────────────
+// Per-shadow-volume AABB + absorption + emission used by path_trace_main.
+// Matches ParticleShadowVolumeGPU in common.h exactly.
+//
+// Layout (48 bytes):
+//   [0-2]  worldMin          f32×3   AABB minimum in world space
+//   [3]    shadowDensity     f32     Beer-Lambert absorption coefficient σ
+//   [4-6]  worldMax          f32×3   AABB maximum in world space
+//   [7]    emissiveIntensity f32     > 0 enables volumetric emission; was pad
+//   [8-10] emissiveColor     f32×3   RGB emissive radiance tint
+//   [11]   _pad              f32
+
+struct alignas(16) ParticleShadowVolumeGPU
+{
+    glm::vec3 worldMin;
+    f32       shadowDensity     = 0.0f;         ///< Absorption coefficient σ (user-tunable).
+    glm::vec3 worldMax;
+    f32       emissiveIntensity = 0.0f;         ///< Emissive scale; > 0 enables volume emission.
+    glm::vec3 emissiveColor     = glm::vec3(0.0f);  ///< RGB emissive radiance tint.
+    f32       _pad              = 0.0f;
+};
+static_assert(sizeof(ParticleShadowVolumeGPU) == 48,
+              "ParticleShadowVolumeGPU must be 48 bytes");
+
+// ─── ParticleDensityBuildConstantsGPU ────────────────────────────────────────────────
+// Per-emitter constants for the three density build passes (clear, build, resolve).
+// Matches ParticleDensityBuildConstants in common.h exactly.
+//
+// Layout (32 bytes):
+//   [0-2]  worldMin      f32×3   AABB minimum in world space
+//   [3]    maxParticles  u32     particle pool capacity
+//   [4-6]  worldMax      f32×3   AABB maximum in world space
+//   [7]    gridSize      u32     always 32 (DENSITY_GRID_SIZE)
+
+struct alignas(16) ParticleDensityBuildConstantsGPU
+{
+    glm::vec3 worldMin;
+    u32       maxParticles = 0;
+    glm::vec3 worldMax;
+    u32       gridSize = 32u;  ///< Density grid voxels per axis.
+};
+static_assert(sizeof(ParticleDensityBuildConstantsGPU) == 32,
+              "ParticleDensityBuildConstantsGPU must be 32 bytes");
 
 } // namespace daedalus::render

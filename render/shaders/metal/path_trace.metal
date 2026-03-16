@@ -216,7 +216,164 @@ inline SurfaceHit evaluate_surface(
     return surf;
 }
 
-// ─── path_trace_main ─────────────────────────────────────────────────────────
+// ─── Particle shadow transmittance ───────────────────────────────────────────
+
+/// Ray-AABB intersection.  Returns (tEnter, tExit).  No hit when tEnter > tExit.
+inline float2 aabb_intersect(float3 ro, float3 rd, float3 boxMin, float3 boxMax)
+{
+    float3 invDir = 1.0f / rd;
+    float3 t0 = (boxMin - ro) * invDir;
+    float3 t1 = (boxMax - ro) * invDir;
+    float3 tMin = min(t0, t1);
+    float3 tMax = max(t0, t1);
+    float tEnter = max(max(tMin.x, tMin.y), tMin.z);
+    float tExit  = min(min(tMax.x, tMax.y), tMax.z);
+    return float2(tEnter, tExit);
+}
+
+/// Beer-Lambert transmittance of a ray through all active density shadow volumes.
+/// Returns T in [0, 1].  Short-circuits immediately when no volumes exist (zero overhead).
+inline float compute_particle_transmittance(
+    float3 rayOrigin,
+    float3 rayDir,
+    float  rayMaxDist,
+    uint   shadowVolumeCount,
+    device const ParticleShadowVolumeGPU* shadowVolumes,
+    array<texture3d<float>, MAX_PARTICLE_SHADOW_EMITTERS> densityTextures,
+    sampler densitySampler)
+{
+    if (shadowVolumeCount == 0u) return 1.0f;
+
+    float T = 1.0f;
+    const int kMarchSteps = 16;
+
+    for (uint i = 0; i < shadowVolumeCount; ++i)
+    {
+        float2 hit = aabb_intersect(rayOrigin, rayDir,
+                                    float3(shadowVolumes[i].worldMin),
+                                    float3(shadowVolumes[i].worldMax));
+
+        // Miss: no intersection, behind ray origin, or beyond ray max distance.
+        if (hit.x > hit.y || hit.y < 0.0f || hit.x > rayMaxDist) continue;
+
+        float tStart = max(hit.x, 0.0f);
+        float tEnd   = min(hit.y, rayMaxDist);
+        float stride = (tEnd - tStart) / float(kMarchSteps);
+
+        float3 volSize = float3(shadowVolumes[i].worldMax) - float3(shadowVolumes[i].worldMin);
+        float  opticalDepth = 0.0f;
+
+        for (int s = 0; s < kMarchSteps; ++s)
+        {
+            float  t   = tStart + (float(s) + 0.5f) * stride;
+            float3 pos = rayOrigin + rayDir * t;
+            float3 uvw = clamp((pos - float3(shadowVolumes[i].worldMin)) / volSize,
+                               float3(0.001f), float3(0.999f));
+            float  dens = densityTextures[i].sample(densitySampler, uvw).r;
+            opticalDepth += dens * stride;
+        }
+
+        T *= exp(-shadowVolumes[i].shadowDensity * opticalDepth);
+    }
+    return T;
+}
+
+/// Volumetric emission from particle density volumes onto a surface point.
+/// For each active emissive volume, shoots one hard-occlusion shadow ray toward
+/// the closest point on the volume AABB (not the centroid) so surfaces near the
+/// edge of a cloud receive emission even when the centroid is outside their
+/// hemisphere.  The density integral still marches toward the centroid so the
+/// full cloud depth is sampled consistently.
+/// Returns the total incident emissive radiance (L_e × NdotL) contributed to
+/// the surface, ready to be multiplied by albedo at the call site.
+/// Called at every primary hit and at each indirect bounce hit so particles
+/// illuminate floor, ceiling, walls, and other objects in all directions.
+inline float3 compute_particle_emission(
+    float3 surfPos,
+    float3 surfNormal,
+    uint   shadowVolumeCount,
+    device const ParticleShadowVolumeGPU*                   shadowVolumes,
+    array<texture3d<float>, MAX_PARTICLE_SHADOW_EMITTERS>   densityTextures,
+    sampler                                                  densitySampler,
+    instance_acceleration_structure                          tlas)
+{
+    if (shadowVolumeCount == 0u) return float3(0.0f);
+
+    float3 Le = float3(0.0f);
+    const int kMarchSteps = 8;
+
+    for (uint i = 0; i < shadowVolumeCount; ++i)
+    {
+        if (shadowVolumes[i].emissiveIntensity <= 0.0f) continue;
+
+        float3 volMin   = float3(shadowVolumes[i].worldMin);
+        float3 volMax   = float3(shadowVolumes[i].worldMax);
+        float3 centroid = 0.5f * (volMin + volMax);
+
+        // centroid direction: used for the density march so we always sample
+        // through the full cloud depth regardless of approach angle.
+        float3 toCentroid = centroid - surfPos;
+        float  dist       = length(toCentroid);
+        if (dist < 0.001f) continue;
+        float3 centerDir  = toCentroid / dist;
+
+        // Closest-point direction: used for NdotL and the shadow ray.
+        // A surface adjacent to the volume whose normal faces away from the
+        // centroid can still have the nearest AABB face in its front hemisphere,
+        // removing the strong directional bias of the centroid-only approach.
+        float3 closestPt   = clamp(surfPos, volMin, volMax);
+        float3 toClosest   = closestPt - surfPos;
+        float  closestDist = length(toClosest);
+
+        // If we are inside the volume (closestDist ≈ 0) fall back to centroid.
+        float3 sampleDir     = (closestDist > 0.001f) ? (toClosest / closestDist) : centerDir;
+        float  shadowMaxDist = (closestDist > 0.001f) ? closestDist : dist;
+
+        float NdotL = max(dot(surfNormal, sampleDir), 0.0f);
+        if (NdotL <= 0.0f) continue;
+
+        // Hard geometry occlusion along the closest-point direction.
+        ray shadowRay;
+        shadowRay.origin       = surfPos + surfNormal * 0.001f;
+        shadowRay.direction    = sampleDir;
+        shadowRay.min_distance = 0.001f;
+        shadowRay.max_distance = shadowMaxDist;
+
+        intersector<instancing> emIsect;
+        emIsect.accept_any_intersection(true);
+        if (emIsect.intersect(shadowRay, tlas).type != intersection_type::none) continue;
+
+        // Density integral marches toward the centroid for consistent sampling.
+        float2 hit = aabb_intersect(surfPos, centerDir, volMin, volMax);
+        if (hit.x > hit.y || hit.y < 0.0f || hit.x > dist) continue;
+
+        float  tStart = max(hit.x, 0.0f);
+        float  tEnd   = min(hit.y, dist);
+        float  stride = (tEnd - tStart) / float(kMarchSteps);
+        float3 volSize = volMax - volMin;
+
+        float integral = 0.0f;
+        for (int s = 0; s < kMarchSteps; ++s)
+        {
+            float  t   = tStart + (float(s) + 0.5f) * stride;
+            float3 pos = surfPos + centerDir * t;
+            float3 uvw = clamp((pos - volMin) / volSize, float3(0.001f), float3(0.999f));
+            integral  += densityTextures[i].sample(densitySampler, uvw).r * stride;
+        }
+
+        // Accumulate: emissive radiance × density integral × falloff × NdotL.
+        // dist is always the centroid distance so falloff is stable regardless
+        // of whether we approached from the near or far side of the volume.
+        const float kScale = 5.0f;
+        float atten = 1.0f / (dist + 1.0f);
+        Le += float3(shadowVolumes[i].emissiveColor)
+            * shadowVolumes[i].emissiveIntensity
+            * integral * atten * NdotL * kScale;
+    }
+    return Le;
+}
+
+// ─── path_trace_main ───────────────────────────────────────────────
 
 kernel void path_trace_main(
     constant FrameConstants&    frame       [[buffer(0)]],
@@ -228,12 +385,15 @@ kernel void path_trace_main(
     device const RTPrimitiveData*  primitives [[buffer(6)]],
     device const SpotLightGPU*  spotLights    [[buffer(7)]],
     device const uint&          spotLightCount [[buffer(8)]],
+    device const uint&                        shadowVolumeCount [[buffer(9)]],
+    device const ParticleShadowVolumeGPU*     shadowVolumes     [[buffer(10)]],
     texture2d<float, access::write> outHDR    [[texture(0)]],
     texture2d<float, access::write> outNormal [[texture(1)]],
     texture2d<float, access::write> outDepth  [[texture(2)]],
     texture2d<float, access::write> outMotion [[texture(3)]],
     texture2d<float, access::write> outAlbedo [[texture(4)]],
     array<texture2d<float>, MAX_RT_TEXTURES> textures [[texture(5)]],
+    array<texture3d<float>, MAX_PARTICLE_SHADOW_EMITTERS> densityTextures [[texture(101)]],
     sampler texSampler [[sampler(0)]],
     uint2 gid [[thread_position_in_grid]])
 {
@@ -289,7 +449,12 @@ kernel void path_trace_main(
         outHDR.write(float4(sky, 1.0f), gid);
         outAlbedo.write(float4(1.0f), gid);  // sky: albedo = white → remodulation is a no-op
         outNormal.write(float4(0.0f), gid);
-        outDepth.write(float4(1.0f, 0.0f, 0.0f, 0.0f), gid);
+        // Write far-plane linear distance so the particle depth test treats sky as
+        // "infinitely far".  Using 1.0 (1 m) caused every particle >1 m from the
+        // camera to be discarded in RT mode.  The SVGF relative depth check
+        // (|cur-prev|/cur > 0.1) still correctly identifies sky/geometry boundaries.
+        float skyLinearDepth = frame.proj[3][2] / (1.0f - frame.proj[2][2]);  // = far plane
+        outDepth.write(float4(skyLinearDepth, 0.0f, 0.0f, 0.0f), gid);
         outMotion.write(float4(0.0f), gid);
         return;
     }
@@ -411,9 +576,12 @@ kernel void path_trace_main(
             shadowIsect.accept_any_intersection(true);
             if (shadowIsect.intersect(shadowRay, tlas).type == intersection_type::none)
             {
+                float T = compute_particle_transmittance(
+                    shadowRay.origin, sunDir, 1e20f,
+                    shadowVolumeCount, shadowVolumes, densityTextures, texSampler);
                 float3 sunRadiance = frame.sunColor.xyz * frame.sunColor.w;
                 radiance += cook_torrance(N, V, sunDir, albedo, roughness, metalness)
-                          * sunRadiance;
+                          * sunRadiance * T;
             }
         }
 
@@ -447,8 +615,13 @@ kernel void path_trace_main(
             intersector<instancing> shadowIsect;
             shadowIsect.accept_any_intersection(true);
             if (shadowIsect.intersect(shadowRay, tlas).type == intersection_type::none)
+            {
+                float T = compute_particle_transmittance(
+                    shadowRay.origin, L, dist - 0.002f,
+                    shadowVolumeCount, shadowVolumes, densityTextures, texSampler);
                 radiance += cook_torrance(N, V, L, albedo, roughness, metalness)
-                          * lColor * attenuation;
+                          * lColor * attenuation * T;
+            }
         }
 
         // ── Spot lights ───────────────────────────────────────────────────────
@@ -488,11 +661,23 @@ kernel void path_trace_main(
             intersector<instancing> shadowIsect;
             shadowIsect.accept_any_intersection(true);
             if (shadowIsect.intersect(shadowRay, tlas).type == intersection_type::none)
+            {
+                float T = compute_particle_transmittance(
+                    shadowRay.origin, L, dist - 0.002f,
+                    shadowVolumeCount, shadowVolumes, densityTextures, texSampler);
                 radiance += cook_torrance(N, V, L, albedo, roughness, metalness)
-                          * sColor * sInt * cone * atten;
+                          * sColor * sInt * cone * atten * T;
+            }
         }
 
-        // ── Indirect bounces ──────────────────────────────────────────────────
+        // ── Particle volume emission (primary hit) ──────────────────────
+        // Illuminate this surface from any visible emissive particle density
+        // volumes.  Affects all geometry: floor, ceiling, walls, objects.
+        radiance += albedo * compute_particle_emission(
+            surf.position, N,
+            shadowVolumeCount, shadowVolumes, densityTextures, texSampler, tlas);
+
+        // ── Indirect bounces ──────────────────────────────────────────────
         float3 throughput   = float3(1.0f);
         float3 bouncePos    = surf.position;
         float3 bounceGeoN   = surf.geoNormal;
@@ -553,12 +738,22 @@ kernel void path_trace_main(
                 sIsect.accept_any_intersection(true);
                 if (sIsect.intersect(shadowRay, tlas).type == intersection_type::none)
                 {
+                    float T = compute_particle_transmittance(
+                        shadowRay.origin, sunDir, 1e20f,
+                        shadowVolumeCount, shadowVolumes, densityTextures, texSampler);
                     float3 sunRad = frame.sunColor.xyz * frame.sunColor.w;
-                    radiance += throughput * newAlbedo * sunRad * sunNdotL / PI;
+                    radiance += throughput * newAlbedo * sunRad * sunNdotL / PI * T;
                 }
             }
 
             radiance += throughput * bounceSurf.emissive;
+
+            // Particle volume emission at this bounce surface.
+            // Carries the same emissive cloud illumination to all geometry
+            // reached by indirect paths (floor lit by ceiling bounce, etc.).
+            radiance += throughput * newAlbedo * compute_particle_emission(
+                bounceSurf.position, newN,
+                shadowVolumeCount, shadowVolumes, densityTextures, texSampler, tlas);
 
             bouncePos    = bounceSurf.position;
             bounceGeoN   = bounceSurf.geoNormal;

@@ -248,6 +248,19 @@ void FrameRenderer::createPSOs(IRenderDevice& device, const std::string& lib)
         m_decalPSO = device.createRenderPipeline(d);
     }
 
+    // ── Decal albedo injection (compute, RT mode only) ────────────────────────────
+    // In RT mode the G-buffer is not populated for deferred decal blending.
+    // Instead, inject decal albedo directly into m_rtAlbedo (the path tracer's
+    // first-hit albedo buffer) after SVGF and before RTRemodulate so decals
+    // receive full path-traced irradiance without any extra render passes.
+    {
+        auto csDecalInject = loadCS("decal_albedo_inject_main");
+        ComputePipelineDescriptor d;
+        d.computeShader = csDecalInject.get();
+        d.debugName     = "DecalAlbedoInject";
+        m_decalAlbedoInjectPSO = device.createComputePipeline(d);
+    }
+
     // ── TAA ───────────────────────────────────────────────────────────────────
     {
         RenderPipelineDescriptor d;
@@ -880,7 +893,7 @@ void FrameRenderer::renderFrame(IRenderDevice& device,
     frame.time       = scene.time;
     frame.deltaTime  = scene.deltaTime;
     frame.frameIndex = static_cast<f32>(m_frameIndex);
-    frame.pad0       = 0.0f;
+    frame.isRTMode   = willUseRT ? 1.0f : 0.0f;
     frame.jitter     = jitterPx;  // zero in RT mode
     frame.pad1       = glm::vec2(0.0f);
 
@@ -1347,8 +1360,11 @@ void FrameRenderer::renderFrame(IRenderDevice& device,
             });
     }
 
-    // Decal draw list (reference valid through m_graph.execute below)
-    const std::vector<DecalDraw>& decalDraws = scene.decalDraws;
+    // Decal draw list — sorted by zIndex ascending so lower-index decals composite first (appear underneath).
+    std::vector<DecalDraw> sortedDecalDraws(scene.decalDraws.begin(), scene.decalDraws.end());
+    std::sort(sortedDecalDraws.begin(), sortedDecalDraws.end(),
+        [](const DecalDraw& a, const DecalDraw& b) noexcept { return a.zIndex < b.zIndex; });
+    const std::vector<DecalDraw>& decalDraws = sortedDecalDraws;
     const Viewport    vp{ 0.0f, 0.0f, static_cast<f32>(swapW), static_cast<f32>(swapH) };
     const ScissorRect sc{ 0, 0, swapW, swapH };
 
@@ -1423,6 +1439,21 @@ void FrameRenderer::renderFrame(IRenderDevice& device,
             IPipeline*              pSvgfPrevCopy     = m_svgfPrevCopyPSO.get();
             ITexture*               svgfPrevDepthTex  = m_svgfPrevDepthTex.get();
             ITexture*               svgfPrevNormalTex = m_svgfPrevNormalTex.get();
+            IPipeline*              pDecalInjPSO      = m_decalAlbedoInjectPSO.get();
+
+            // Density shadow volume resources (Passes RT.0 / RT.0b / RT.0c).
+            IPipeline* pDensityClear   = m_particleDensityClearPSO.get();
+            IPipeline* pDensityBuild   = m_particleDensityBuildPSO.get();
+            IPipeline* pDensityResolve = m_particleDensityResolvePSO.get();
+            IBuffer*   shadowVolumeBuf = m_particleShadowBuf.get();
+            ITexture*  fallbackDensity = m_fallbackDensityTex.get();
+            std::array<ITexture*, k_maxParticleShadowEmitters> densityTexRawArr{};
+            std::array<IBuffer*,  k_maxParticleShadowEmitters> atomicBufRawArr{};
+            for (u32 i = 0; i < k_maxParticleShadowEmitters; ++i)
+            {
+                densityTexRawArr[i] = m_particleDensityTex[i].get();
+                atomicBufRawArr[i]  = m_particleDensityAtomicBuf[i].get();
+            }
 
             // Unique VB/IB buffers for useResource residency declarations.
             auto uniqueBufs = m_rtSceneManager->uniqueBuffers();
@@ -1444,6 +1475,115 @@ void FrameRenderer::renderFrame(IRenderDevice& device,
                 rtTextures[0] = fallbackAlbedo;
             while (rtTextures.size() < kMaxRTTextures)
                 rtTextures.push_back(fallbackAlbedo);
+
+            // ── Collect particle shadow emitters + build density data ─────────
+            // Up to k_maxParticleShadowEmitters emitters with hasShadowVolume==true
+            // each get one density slot (RT.0/RT.0b/RT.0c passes added below).
+
+            struct ShadowEmitterSlot
+            {
+                const ParticleEmitterDraw* draw;
+                u32                        slotIdx;
+            };
+
+            std::vector<ShadowEmitterSlot> shadowSlots;
+            {
+                u32 slot = 0;
+                for (const ParticleEmitterDraw& ed : scene.particleEmitters)
+                {
+                    if (!ed.hasShadowVolume || !ed.pool) continue;
+                    if (slot >= k_maxParticleShadowEmitters) break;
+                    shadowSlots.push_back({ &ed, slot++ });
+                }
+            }
+
+            // Upload shadow-volume descriptor buffer (CPU → GPU, single-buffered).
+            {
+                const u32 shadowCount = static_cast<u32>(shadowSlots.size());
+                void* base = shadowVolumeBuf->map();
+                std::memcpy(base, &shadowCount, sizeof(u32));
+                const u32 pad3[3] = {};
+                std::memcpy(static_cast<char*>(base) + 4, pad3, sizeof(pad3));
+                auto* gpuVols = reinterpret_cast<ParticleShadowVolumeGPU*>(
+                    static_cast<char*>(base) + 16);
+                for (const ShadowEmitterSlot& s : shadowSlots)
+                {
+                    const ParticleEmitterDraw& ed = *s.draw;
+                    gpuVols[s.slotIdx].worldMin          = ed.shadowVolumeMin;
+                    gpuVols[s.slotIdx].shadowDensity     = ed.shadowDensity;
+                    gpuVols[s.slotIdx].worldMax          = ed.shadowVolumeMax;
+                    gpuVols[s.slotIdx].emissiveIntensity = ed.emissiveIntensity;
+                    gpuVols[s.slotIdx].emissiveColor     = ed.emissiveColor;
+                    gpuVols[s.slotIdx]._pad              = 0.0f;
+                }
+                shadowVolumeBuf->unmap();
+            }
+
+            // Build density texture pointer vector (fallback for unused slots).
+            std::vector<ITexture*> densityTextures(k_maxParticleShadowEmitters, fallbackDensity);
+            for (const ShadowEmitterSlot& s : shadowSlots)
+                densityTextures[s.slotIdx] = densityTexRawArr[s.slotIdx];
+
+            // ── Passes RT.0/RT.0b/RT.0c — Density build (before PathTrace) ───
+            // For each active shadow emitter: Clear → Build → Resolve.
+            for (const ShadowEmitterSlot& s : shadowSlots)
+            {
+                ParticleDensityBuildConstantsGPU densConst;
+                densConst.worldMin    = s.draw->shadowVolumeMin;
+                densConst.maxParticles = s.draw->pool->maxParticles;
+                densConst.worldMax    = s.draw->shadowVolumeMax;
+                densConst.gridSize    = k_densityGridSize;
+
+                IBuffer*  atomicBuf  = atomicBufRawArr[s.slotIdx];
+                ITexture* densityTex = densityTexRawArr[s.slotIdx];
+                IBuffer*  stateBuf   = s.draw->pool->stateBuffer.get();
+
+                // RT.0 — DensityClear: zero the atomic accumulation buffer.
+                {
+                    constexpr u32 kBufLen = k_densityGridSize * k_densityGridSize * k_densityGridSize;
+                    RGComputePassDesc p;
+                    p.name    = "DensityClear";
+                    p.execute = [=](IComputePassEncoder* enc)
+                    {
+                        enc->setComputePipeline(pDensityClear);
+                        enc->setBuffer(atomicBuf, 0, 0);               // atomicBuf  buffer(0)
+                        enc->setBytes(&kBufLen, sizeof(kBufLen), 1);   // bufLen     buffer(1)
+                        enc->dispatch(kBufLen, 1, 1);
+                    };
+                    m_graph.addComputePass(std::move(p));
+                }
+
+                // RT.0b — DensityBuild: splat alive particles into atomic buffer.
+                {
+                    RGComputePassDesc p;
+                    p.name    = "DensityBuild";
+                    p.execute = [=](IComputePassEncoder* enc)
+                    {
+                        enc->useResource(stateBuf, ResourceUsage::Read);
+                        enc->setComputePipeline(pDensityBuild);
+                        enc->setBytes(&densConst, sizeof(densConst), 0);  // c          buffer(0)
+                        enc->setBuffer(stateBuf,  0, 1);                  // particles  buffer(1)
+                        enc->setBuffer(atomicBuf, 0, 2);                  // atomicBuf  buffer(2)
+                        enc->dispatch(densConst.maxParticles, 1, 1);
+                    };
+                    m_graph.addComputePass(std::move(p));
+                }
+
+                // RT.0c — DensityResolve: normalise → R16Float density texture.
+                {
+                    RGComputePassDesc p;
+                    p.name    = "DensityResolve";
+                    p.execute = [=](IComputePassEncoder* enc)
+                    {
+                        enc->setComputePipeline(pDensityResolve);
+                        enc->setBuffer(atomicBuf, 0, 0);                    // atomicBuf  buffer(0)
+                        enc->setBytes(&densConst, sizeof(densConst), 1);    // c          buffer(1)
+                        enc->setTexture(densityTex, 0);                     // densityTex texture(0)
+                        enc->dispatch(k_densityGridSize, k_densityGridSize, k_densityGridSize);
+                    };
+                    m_graph.addComputePass(std::move(p));
+                }
+            }
 
             // SVGF history ping-pong — same pattern as TAA.
             const u32   rtCurr      = m_frameIndex & 1;
@@ -1486,6 +1626,9 @@ void FrameRenderer::renderFrame(IRenderDevice& device,
                     enc->setTexture(gMotionTex,    3);           // outMotion          texture(3)
                     enc->setTexture(rtAlbedoTex,   4);           // outAlbedo          texture(4)
                     enc->setTextures(rtTextures,   5);           // textures[]         texture(5+)
+                    enc->setBuffer(shadowVolumeBuf, 0, 9);       // shadowVolumeCount  buffer(9)
+                    enc->setBuffer(shadowVolumeBuf, 16, 10);      // shadowVolumes[]    buffer(10)
+                    enc->setTextures(densityTextures, 101);       // densityTextures[]  texture(101+)
                     enc->setSampler(repeatSamp, 0);              // texSampler         sampler(0)
 
                     // Diagnostic: confirm the dispatch actually fires.
@@ -1674,7 +1817,40 @@ void FrameRenderer::renderFrame(IRenderDevice& device,
                 }
             }
 
-            // ── Pass RT.5 — Albedo remodulation ─────────────────────────────
+            // ── Pass RT.2.5 — Decal albedo injection (compute, RT mode only) ───────
+            // Blend each decal's colour into m_rtAlbedo before remodulation.
+            // RTRemodulate then multiplies irradiance × patched albedo, so decals
+            // receive the same path-traced lighting as the underlying surface.
+            // Sorted by zIndex ascending so lower-index decals appear underneath.
+            for (const DecalDraw& draw : decalDraws)
+            {
+                DecalConstantsGPU dc;
+                dc.model     = draw.modelMatrix;
+                dc.invModel  = draw.invModelMatrix;
+                dc.roughness = draw.roughness;
+                dc.metalness = draw.metalness;
+                dc.opacity   = draw.opacity;
+                dc.pad       = 0.0f;
+
+                ITexture* decalAlbTex = draw.albedoTexture;
+
+                RGComputePassDesc inj;
+                inj.name    = "DecalAlbedoInject";
+                inj.execute = [=](IComputePassEncoder* enc)
+                {
+                    enc->setComputePipeline(pDecalInjPSO);
+                    enc->setBuffer (frameBuf,     0, 0);       // FrameConstants  buffer(0)
+                    enc->setBytes  (&dc, sizeof(dc), 1);       // DecalConstants  buffer(1)
+                    enc->setTexture(gDepthCopyTex,   0);       // gDepthCopy      texture(0)
+                    enc->setTexture(rtAlbedoTex,     1);       // rtAlbedo r/w    texture(1)
+                    enc->setTexture(decalAlbTex,     2);       // decal albedo    texture(2)
+                    enc->setSampler(linSamp,         0);       // sampler(0)
+                    enc->dispatch  (swapW, swapH, 1);
+                };
+                m_graph.addComputePass(std::move(inj));
+            }
+
+            // ── Pass RT.5 — Albedo remodulation ───────────────────────────────────
             // Multiply (denoised or raw) demodulated irradiance by primary-hit
             // albedo to restore texture colour.  Reads from svgfCurrTex (which
             // now holds the demodulated irradiance saved BEFORE remodulation)
@@ -2132,11 +2308,41 @@ void FrameRenderer::renderFrame(IRenderDevice& device,
         m_graph.addRenderPass(std::move(p));
     }
 
+    // ─────────────────────────────────────────────────────────────────────────
+    // Pass 6.6 — Fog composite (compute)  [only if fog.enabled]
+    // In-place: reads hdrTex and writes back fogged result to the same texture.
+    // Placed after particles so all opaque + transparent + particle HDR content
+    // is fogged before TAA accumulates the final frame.
+    // ─────────────────────────────────────────────────────────────────────────
+    if (scene.fog.enabled)
+    {
+        RGComputePassDesc p;
+        p.name    = "FogComposite";
+        p.execute = [=](IComputePassEncoder* enc)
+        {
+            enc->setComputePipeline(pFogComposite);
+            enc->setTexture (hdrTex,             0);           // hdrTex          (read_write)
+            enc->setTexture (froxelIntegrateTex, 1);           // froxelIntegrate (read/sample)
+            enc->setTexture (gDepthCopyTex,      2);           // gDepthCopy      (read)
+            enc->setBuffer  (frameBuf,  0,        0);          // FrameConstants  buffer(0)
+            enc->setBytes   (&fogConst, sizeof(fogConst), 1);  // VolumetricFogConstants  buffer(1)
+            enc->setSampler (linSamp,             0);          // sampler(0): linear clamp
+            enc->dispatch   (swapW, swapH, 1);
+        };
+        m_graph.addComputePass(std::move(p));
+    }
+
+    } // end raster path (else-branch of rtMode)
+
+
     // ──────────────────────────────────────────────────────────────────────────────────────────────────────
-    // Pass 6.5 — Particles (compute: emit + simulate + compact; render: drawIndirect)
-    // For each emitter: run 3 serial compute passes on the GPU then one GPU-driven
-    // render pass.  Blends additively (premultiplied alpha) into the HDR buffer.
-    // The depth buffer from Pass 6 is used for soft-particle depth fade.
+    // Pass 6.5 — Particles
+    // Runs in both raster and RT modes.  The compute passes update particle state
+    // every frame regardless of render mode.  The depth buffer behaviour differs:
+    //   Raster: loadDepth=true  — depth-test particles against the G-buffer depth.
+    //   RT    : loadDepth=false — gDepthId is unpopulated; clear to 1.0 so all
+    //           particles pass the depth test (gDepthCopyTex still provides correct
+    //           linearised depth for the soft-particle fade).
     // ──────────────────────────────────────────────────────────────────────────────────────────────────────
     for (const ParticleEmitterDraw& emDraw : scene.particleEmitters)
     {
@@ -2151,12 +2357,12 @@ void FrameRenderer::renderFrame(IRenderDevice& device,
         emConst.maxParticles  = pool->maxParticles;
 
         // Raw pointers for lambda capture (lifetimes owned by pool + emDraw).
-        IBuffer*  stateBuf   = pool->stateBuffer.get();
-        IBuffer*  deadBuf    = pool->deadList.get();
-        IBuffer*  aliveABuf  = pool->aliveListA.get();
-        IBuffer*  aliveBBuf  = pool->aliveListB.get();
+        IBuffer*  stateBuf    = pool->stateBuffer.get();
+        IBuffer*  deadBuf     = pool->deadList.get();
+        IBuffer*  aliveABuf   = pool->aliveListA.get();
+        IBuffer*  aliveBBuf   = pool->aliveListB.get();
         IBuffer*  indirectBuf = pool->indirectArgs.get();
-        ITexture* atlasTex   = emDraw.atlasTexture;
+        ITexture* atlasTex    = emDraw.atlasTexture;
 
         const u32 maxP  = pool->maxParticles;
         const u32 spawn = emConst.spawnThisFrame;
@@ -2222,8 +2428,8 @@ void FrameRenderer::renderFrame(IRenderDevice& device,
             dp.colorOutputs[0]  = hdrId;
             dp.colorOutputCount = 1;
             dp.depthOutput      = gDepthId;
-            dp.loadColors       = true;  // blend into existing HDR
-            dp.loadDepth        = true;  // test against opaque G-buffer depth
+            dp.loadColors       = true;    // blend into existing HDR
+            dp.loadDepth        = !rtMode; // raster: test vs G-buffer; RT: clear to 1.0 (no G-buffer depth)
             dp.execute = [=](IRenderPassEncoder* enc)
             {
                 enc->setViewport(vp);
@@ -2231,50 +2437,24 @@ void FrameRenderer::renderFrame(IRenderDevice& device,
                 enc->setRenderPipeline(pPartRender);
 
                 // Vertex stage
-                enc->setVertexBuffer(frameBuf,   0, 0);           // FrameConstants     buffer(0)
-                enc->setVertexBytes (&emConst, sizeof(emConst), 1); // EmitterConstants buffer(1)
-                enc->setVertexBuffer(stateBuf,   0, 2);           // stateBuffer        buffer(2)
-                enc->setVertexBuffer(aliveABuf,  0, 3);           // aliveListA         buffer(3)
-                enc->setVertexBuffer(aliveBBuf,  0, 4);           // aliveListB         buffer(4)
+                enc->setVertexBuffer(frameBuf,   0, 0);             // FrameConstants     buffer(0)
+                enc->setVertexBytes (&emConst, sizeof(emConst), 1); // EmitterConstants   buffer(1)
+                enc->setVertexBuffer(stateBuf,   0, 2);             // stateBuffer        buffer(2)
+                enc->setVertexBuffer(aliveABuf,  0, 3);             // aliveListA         buffer(3)
+                enc->setVertexBuffer(aliveBBuf,  0, 4);             // aliveListB         buffer(4)
 
                 // Fragment stage
-                enc->setFragmentBuffer (frameBuf,       0, 0);    // FrameConstants     buffer(0)
-                enc->setFragmentBytes  (&emConst, sizeof(emConst), 1); // EmitterConst buffer(1)
-                enc->setFragmentTexture(atlasTex,          0);    // atlas              texture(0)
-                enc->setFragmentTexture(gDepthCopyTex,     1);    // soft particle depth texture(1)
-                enc->setFragmentSampler(linSamp,           0);    // sampler(0)
+                enc->setFragmentBuffer (frameBuf,       0, 0);      // FrameConstants     buffer(0)
+                enc->setFragmentBytes  (&emConst, sizeof(emConst), 1); // EmitterConst    buffer(1)
+                enc->setFragmentTexture(atlasTex,          0);      // atlas              texture(0)
+                enc->setFragmentTexture(gDepthCopyTex,     1);      // soft particle depth texture(1)
+                enc->setFragmentSampler(linSamp,           0);      // sampler(0)
 
                 enc->drawIndirect(indirectBuf, 0);
             };
             m_graph.addRenderPass(std::move(dp));
         }
     }
-
-    // ─────────────────────────────────────────────────────────────────────────
-    // Pass 6.6 — Fog composite (compute)  [only if fog.enabled]
-    // In-place: reads hdrTex and writes back fogged result to the same texture.
-    // Placed after particles so all opaque + transparent + particle HDR content
-    // is fogged before TAA accumulates the final frame.
-    // ─────────────────────────────────────────────────────────────────────────
-    if (scene.fog.enabled)
-    {
-        RGComputePassDesc p;
-        p.name    = "FogComposite";
-        p.execute = [=](IComputePassEncoder* enc)
-        {
-            enc->setComputePipeline(pFogComposite);
-            enc->setTexture (hdrTex,             0);           // hdrTex          (read_write)
-            enc->setTexture (froxelIntegrateTex, 1);           // froxelIntegrate (read/sample)
-            enc->setTexture (gDepthCopyTex,      2);           // gDepthCopy      (read)
-            enc->setBuffer  (frameBuf,  0,        0);          // FrameConstants  buffer(0)
-            enc->setBytes   (&fogConst, sizeof(fogConst), 1);  // VolumetricFogConstants  buffer(1)
-            enc->setSampler (linSamp,             0);          // sampler(0): linear clamp
-            enc->dispatch   (swapW, swapH, 1);
-        };
-        m_graph.addComputePass(std::move(p));
-    }
-
-    } // end raster path (else-branch of rtMode)
 
     // ──────────────────────────────────────────────────────────────────────────────
     // Pass 7 — TAA
@@ -2710,11 +2890,110 @@ void FrameRenderer::lazyInitRT(IRenderDevice& device)
         m_svgfPrevCopyPSO = device.createComputePipeline(d);
     }
 
+    // Particle density shadow volume PSOs.
+    {
+        auto cs = loadCS("particle_density_clear_main");
+        ComputePipelineDescriptor d;
+        d.computeShader        = cs.get();
+        d.debugName            = "ParticleDensityClear";
+        m_particleDensityClearPSO = device.createComputePipeline(d);
+    }
+    {
+        auto cs = loadCS("particle_density_build_main");
+        ComputePipelineDescriptor d;
+        d.computeShader        = cs.get();
+        d.debugName            = "ParticleDensityBuild";
+        m_particleDensityBuildPSO = device.createComputePipeline(d);
+    }
+    {
+        auto cs = loadCS("particle_density_resolve_main");
+        ComputePipelineDescriptor d;
+        d.computeShader          = cs.get();
+        d.debugName              = "ParticleDensityResolve";
+        m_particleDensityResolvePSO = device.createComputePipeline(d);
+    }
+
     // Allocate screen-size RT/SVGF persistent textures at the current resolution.
     recreateRTTextures(device, m_width, m_height);
 
+    // Allocate density shadow volume resources (fixed-size, not resolution-dependent).
+    recreateParticleDensityResources(device);
+
     // RT scene manager.
     m_rtSceneManager = std::make_unique<RTSceneManager>();
+}
+
+// ─── recreateParticleDensityResources ────────────────────────────────────────
+// Allocates (or reallocates) the four per-emitter density 3D textures, the
+// four corresponding u32[32768] atomic accumulation buffers, the 144-byte
+// shadow-volume descriptor buffer, and the all-zeros fallback density texture.
+// These are fixed-size (32^3 grid) and never need to change on resize.
+
+void FrameRenderer::recreateParticleDensityResources(IRenderDevice& device)
+{
+    // u32[32768] atomic accumulation buffer per emitter slot.
+    // 32^3 = 32768 u32 values.  Layout matches DENSITY_GRID_SIZE in common.h.
+    constexpr u32 kAtomicBufSize = k_densityGridSize * k_densityGridSize * k_densityGridSize
+                                   * static_cast<u32>(sizeof(u32));  // 128 KiB
+
+    for (u32 i = 0; i < k_maxParticleShadowEmitters; ++i)
+    {
+        // 3D density texture: R32Float 32x32x32, ShaderRead + ShaderWrite.
+        {
+            TextureDescriptor d;
+            d.width     = k_densityGridSize;
+            d.height    = k_densityGridSize;
+            d.depth     = k_densityGridSize;
+            d.format    = TextureFormat::R32Float;
+            d.usage     = TextureUsage::ShaderRead | TextureUsage::ShaderWrite;
+            d.debugName = (i == 0) ? "ParticleDensity0"
+                        : (i == 1) ? "ParticleDensity1"
+                        : (i == 2) ? "ParticleDensity2"
+                                   : "ParticleDensity3";
+            m_particleDensityTex[i] = device.createTexture(d);
+        }
+        // Atomic accumulation buffer: u32[32768], Storage access.
+        {
+            BufferDescriptor d;
+            d.size      = kAtomicBufSize;
+            d.usage     = BufferUsage::Storage;
+            d.debugName = (i == 0) ? "DensityAtomic0"
+                        : (i == 1) ? "DensityAtomic1"
+                        : (i == 2) ? "DensityAtomic2"
+                                   : "DensityAtomic3";
+            m_particleDensityAtomicBuf[i] = device.createBuffer(d);
+        }
+    }
+
+    // Shadow-volume descriptor buffer:
+    // [0]  u32  count (how many active shadow emitters this frame)
+    // [4]  u32[3] padding
+    // [16] ParticleShadowVolumeGPU[4]   (48 bytes each -> 192 bytes)
+    // Total: 16 + 192 = 208 bytes.
+    {
+        constexpr u32 kShadowBufSize = 16u + k_maxParticleShadowEmitters * 48u;
+        BufferDescriptor d;
+        d.size      = kShadowBufSize;
+        d.usage     = BufferUsage::Storage | BufferUsage::Uniform;
+        d.debugName = "ParticleShadowVolumes";
+        m_particleShadowBuf = device.createBuffer(d);
+    }
+
+    // Fallback density texture: 32^3 R32Float all-zeros.
+    // Bound for unused emitter slots so the shader always reads 0 transmittance.
+    {
+        const u32 kPixels = k_densityGridSize * k_densityGridSize * k_densityGridSize;
+        std::vector<f32> zeros(kPixels, 0.0f);
+        TextureDescriptor d;
+        d.width     = k_densityGridSize;
+        d.height    = k_densityGridSize;
+        d.depth     = k_densityGridSize;
+        d.format    = TextureFormat::R32Float;
+        d.usage     = TextureUsage::ShaderRead;
+        d.initData  = zeros.data();
+        d.debugName = "FallbackDensity";
+        m_fallbackDensityTex = device.createTexture(d);
+    }
 }
 
 // ─── recreateRTTextures ───────────────────────────────────────────────────────

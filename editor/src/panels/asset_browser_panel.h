@@ -40,10 +40,12 @@ public:
     AssetBrowserPanel& operator=(const AssetBrowserPanel&) = delete;
 
     /// Draw the dockable browser panel (both categories, picker banner, etc.).
+    /// Pass a non-null @p voxCatalog to enable the Voxels category/tab.
     void draw(MaterialCatalog&      catalog,
               rhi::IRenderDevice&   device,
               render::IAssetLoader& loader,
-              ModelCatalog&         modelCatalog);
+              ModelCatalog&         modelCatalog,
+              ModelCatalog*         voxCatalog = nullptr);
 
     // ─── Texture picker mode ────────────────────────────────────────────────
 
@@ -58,13 +60,19 @@ public:
     /// picker mode ends automatically.
     void openModelPicker(ModelPickCallback cb, std::string label = "");
 
+    // ─── Voxel picker mode ──────────────────────────────────────────────────
+
+    /// Activate picker mode showing the Voxels category.  Callback receives
+    /// the absolute path string of the selected .vox file.
+    void openVoxPicker(ModelPickCallback cb, std::string label = "");
+
     [[nodiscard]] bool isPickerOpen() const noexcept { return m_pickerOpen; }
 
     /// Dismiss the picker without selection (e.g. Escape key).
     void closePicker() noexcept;
 
 private:
-    enum class Mode { Textures, Models };
+    enum class Mode { Textures, Models, Voxels };
 
     Mode         m_mode         = Mode::Textures;
     bool         m_pickerOpen   = false;
@@ -79,11 +87,16 @@ private:
     std::string       m_modelSelectedFolder;
     ModelPickCallback m_modelPickerCallback;
 
+    // Voxel picker state (reuses m_modelPickerCallback — mutually exclusive with model picker)
+    std::string  m_voxSelectedFolder;
+
     // Draw helpers
     void drawThumbnailGrid(MaterialCatalog&    catalog,
                            rhi::IRenderDevice& device,
                            bool                isPicker);
-    void drawModelGrid(ModelCatalog& modelCatalog, bool isPicker);
+    /// @p selectedFolder is a per-mode folder filter string (passed by reference so the
+    /// sidebar selection persists across frames).
+    void drawModelGrid(ModelCatalog& modelCatalog, bool isPicker, std::string& selectedFolder);
 };
 
 } // namespace daedalus::editor

@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <limits>
 #include <memory>
 #include <vector>
@@ -143,6 +144,7 @@ void SelectTool::onMouseDown(EditMapDocument& doc,
         }
 
         // Normal click: replace selection and start sector drag.
+        fprintf(stderr, "[sel] DESELECT (empty-space click) mapX=%.2f mapZ=%.2f\n", mapX, mapZ);
         sel.clear();
         if (hit != world::INVALID_SECTOR_ID)
         {

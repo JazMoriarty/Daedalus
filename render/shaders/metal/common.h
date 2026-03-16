@@ -33,7 +33,7 @@ struct FrameConstants      // buffer(0), vertex + fragment + compute
     float  time;
     float  deltaTime;
     float  frameIndex;
-    float  pad0;
+    float  isRTMode;  // 1.0 in path-trace (RT) mode, 0.0 in raster mode
 
     float2 jitter;
     float2 pad1;
@@ -182,7 +182,7 @@ inline float3 cook_torrance(float3 N, float3 V, float3 L,
 // ─── Particle GPU structs ──────────────────────────────────────────────────────────────────────────────────────────────────
 // Must match scene_data.h exactly.
 
-struct ParticleGPU                  // 64 bytes per particle
+struct ParticleGPU                  // 80 bytes per particle
 {
     // packed_float3 = 12 bytes (matches glm::vec3); plain float3 would be 16
     // and break the C++ / MSL struct layout match.
@@ -195,6 +195,8 @@ struct ParticleGPU                  // 64 bytes per particle
     float  rot;
     uint   frameIdx;
     uint   flags;     // bit 0 = alive
+    float  emissive;  // per-particle emissive intensity (interpolated over lifetime)
+    float  ePad[3];   // padding → 80 bytes total
 };
 
 struct ParticleEmitterConstants     // buffer(0) in all particle shaders, 160 bytes
@@ -231,8 +233,8 @@ struct ParticleEmitterConstants     // buffer(0) in all particle shaders, 160 by
     float  velocityStretch;
 
     float  softRange;
-    float  pad0;
-    float  pad1;
+    float  emissiveStart;   // emissive multiplier at birth (1 = fully self-lit, 0 = scene-lit)
+    float  emissiveEnd;     // emissive multiplier at death
     float  pad2;
 };
 
@@ -463,6 +465,35 @@ inline float luminance(float3 c)
 {
     return dot(c, float3(0.2126f, 0.7152f, 0.0722f));
 }
+
+// ─── Particle shadow volume density ─────────────────────────────────────────
+// Constants and structs for density build + resolve passes and path tracer.
+// Must match scene_data.h ParticleShadowVolumeGPU + ParticleDensityBuildConstantsGPU.
+
+constant uint DENSITY_GRID_SIZE           = 32;    ///< Voxels per axis.
+constant uint DENSITY_ATOMIC_SCALE        = 1024;  ///< Fixed-point mantissa for atomic accumulation.
+constant uint DENSITY_NORMALIZE_COUNT     = 8;     ///< Particles per voxel → density = 1.0.
+constant uint MAX_PARTICLE_SHADOW_EMITTERS = 4;    ///< Hard limit; matches frame_renderer.h.
+
+/// Per-shadow-volume AABB + absorption + emission.  48 bytes.
+struct ParticleShadowVolumeGPU
+{
+    packed_float3 worldMin;
+    float         shadowDensity;       ///< Beer-Lambert absorption σ (user-tunable).
+    packed_float3 worldMax;
+    float         emissiveIntensity;   ///< > 0 enables volumetric emission onto surfaces.
+    packed_float3 emissiveColor;       ///< RGB emissive radiance tint.
+    float         _pad;
+};
+
+/// Per-emitter constants for the three density build passes.  32 bytes.
+struct ParticleDensityBuildConstants
+{
+    packed_float3 worldMin;
+    uint          maxParticles;
+    packed_float3 worldMax;
+    uint          gridSize;  ///< Always DENSITY_GRID_SIZE (32).
+};
 
 // ─── ACES tone mapping ───────────────────────────────────────────────────────
 

@@ -92,6 +92,7 @@ struct DecalMaterialParams
     float       roughness  = 0.5f;    ///< Roughness written into G-buffer RT1.b.
     float       metalness  = 0.0f;    ///< Metalness written into G-buffer RT1.a.
     float       opacity    = 1.0f;    ///< Global fade multiplier (0 = invisible, 1 = full).
+    int         zIndex     = 0;       ///< Sort order when multiple decals overlap (lower = renders first, underneath).
 };
 
 // ─── ParticleEmitterParams ───────────────────────────────────────────────────
@@ -99,19 +100,24 @@ struct DecalMaterialParams
 
 struct ParticleEmitterParams
 {
-    float     emissionRate  = 10.0f;                          ///< Particles per second.
+    float     emissionRate  = 20.0f;                          ///< Particles per second.
     glm::vec3 emitDir       = glm::vec3(0.0f, 1.0f, 0.0f);  ///< Central spawn direction (normalised).
     float     coneHalfAngle = glm::radians(15.0f);            ///< Velocity cone half-angle (radians).
-    float     speedMin      = 1.0f;   ///< Minimum initial speed (m/s).
-    float     speedMax      = 3.0f;   ///< Maximum initial speed (m/s).
+    float     speedMin      = 2.0f;   ///< Minimum initial speed (m/s).
+    float     speedMax      = 5.0f;   ///< Maximum initial speed (m/s).
     float     lifetimeMin   = 1.0f;   ///< Minimum particle lifetime (s).
     float     lifetimeMax   = 3.0f;   ///< Maximum particle lifetime (s).
     glm::vec4 colorStart    = glm::vec4(1.0f);                          ///< RGBA tint at birth.
     glm::vec4 colorEnd      = glm::vec4(1.0f, 1.0f, 1.0f, 0.0f);      ///< RGBA tint at death.
-    float     sizeStart     = 0.1f;   ///< Billboard half-size at birth (metres).
-    float     sizeEnd       = 0.05f;  ///< Billboard half-size at death (metres).
+    float     sizeStart     = 0.25f;  ///< Billboard half-size at birth (metres).
+    float     sizeEnd       = 0.1f;   ///< Billboard half-size at death (metres).
     float     drag          = 0.0f;   ///< Linear velocity damping coefficient (0 = none).
-    glm::vec3 gravity       = glm::vec3(0.0f, -9.81f, 0.0f); ///< Per-emitter gravity vector.
+    glm::vec3 gravity       = glm::vec3(0.0f, -2.0f, 0.0f);  ///< Per-emitter gravity vector.
+    float     softRange     = 0.0f;   ///< Depth fade distance for soft particles (0 = disabled).
+    float     emissiveStart = 1.0f;  ///< Emissive multiplier at birth (1 = fully self-lit, 0 = scene-lit only).
+    float     emissiveEnd   = 0.0f;  ///< Emissive multiplier at death.
+    bool      emitsLight    = false; ///< When true, inject a dynamic point light at the emitter origin each frame.
+    float shadowDensity = 0.0f; ///< Beer-Lambert absorption coefficient for density shadow volumes (RT mode only). 0 = no shadow cost.
 };
 
 // ─── EntityPhysicsProps ─────────────────────────────────────────────────────────

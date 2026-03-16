@@ -589,12 +589,14 @@ int main(int /*argc*/, char* /*argv*/[])
     NewMapDialogState   nmDlg;
     MaterialCatalog     catalog;
     ModelCatalog        modelCatalog;
+    ModelCatalog        voxCatalog;
     AssetBrowserPanel   assetBrowser;
     std::string         lastKnownAssetRoot;
 
     // ── Model catalog: scan once at startup from the standard models directory.
+    // ── Vox catalog: scan once at startup from assets/voxels/.
     // scan() silently returns if the root doesn't exist.
-    // Use modelRoot.parent_path().parent_path() as the base so we get a clean
+    // Use root.parent_path().parent_path() as the base so we get a clean
     // path without a trailing slash (SDL_GetBasePath returns one on macOS,
     // which confuses std::filesystem::relative).
     {
@@ -602,6 +604,13 @@ int main(int /*argc*/, char* /*argv*/[])
             std::filesystem::path(executableDir()) / "assets" / "models";
         modelCatalog.setRoot(modelRoot, modelRoot.parent_path().parent_path());
         modelCatalog.scan();
+    }
+    {
+        const std::filesystem::path voxRoot =
+            std::filesystem::path(executableDir()) / "assets" / "voxels";
+        voxCatalog.setRoot(voxRoot, voxRoot.parent_path().parent_path());
+        voxCatalog.setExtensions({".vox"});
+        voxCatalog.scan();
     }
 
     bool layoutBuilt = false;
@@ -676,7 +685,10 @@ int main(int /*argc*/, char* /*argv*/[])
                         else if (activeToolId == ActiveTool::DrawSector)
                             drawSectorTool.cancel();
                         else
+                        {
+                            SDL_Log("[main] sel.clear from Escape key");
                             doc.selection().clear();
+                        }
                     }
                     // Tool shortcuts suppressed while mouselook is active.
                     else if (!vp3d.isMouseCaptured())
@@ -1363,7 +1375,7 @@ int main(int /*argc*/, char* /*argv*/[])
                     persistState.assetRoot = ar;
                     ImGui::MarkIniSettingsDirty();
 
-                    // Also scan the sibling models directory.
+                    // Also scan the sibling models and voxels directories.
                     const std::filesystem::path modelRoot =
                         std::filesystem::path(ar).parent_path() / "models";
                     if (std::filesystem::is_directory(modelRoot))
@@ -1372,6 +1384,11 @@ int main(int /*argc*/, char* /*argv*/[])
                             modelRoot.parent_path().parent_path());
                         modelCatalog.scan();
                     }
+                    const std::filesystem::path voxRoot =
+                        std::filesystem::path(ar).parent_path() / "voxels";
+                    voxCatalog.setRoot(voxRoot, voxRoot.parent_path().parent_path());
+                    voxCatalog.setExtensions({".vox"});
+                    voxCatalog.scan();
                 }
             }
         }
@@ -1464,8 +1481,9 @@ int main(int /*argc*/, char* /*argv*/[])
 
         vp3d.draw(doc, *assetLoader, *device, *queue, catalog, assetBrowser,
                   vp2d.isEntityRotating(), vp2d.rotatingEntityIdx());
-        inspector.draw(doc, catalog, *device, *assetLoader, assetBrowser);
-        assetBrowser.draw(catalog, *device, *assetLoader, modelCatalog);
+        inspector.draw(doc, catalog, *device, *assetLoader, assetBrowser,
+                        &voxCatalog, vp2d.gridStep());
+        assetBrowser.draw(catalog, *device, *assetLoader, modelCatalog, &voxCatalog);
         renderPanel.draw(doc);
         objBrowser.draw(doc, vp2d.viewCenterMapPos());
         layersPanel.draw(doc);

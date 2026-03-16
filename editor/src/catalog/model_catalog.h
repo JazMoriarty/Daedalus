@@ -46,7 +46,11 @@ public:
 
     [[nodiscard]] const std::filesystem::path& root() const noexcept { return m_root; }
 
-    /// Scan (or re-scan) the root directory for .gltf / .glb files.
+    /// Set the file extensions to match during scan (e.g. {"\"vox\""}). 
+    /// If empty, defaults to {.gltf, .glb}.
+    void setExtensions(std::initializer_list<std::string_view> exts);
+
+    /// Scan (or re-scan) the root directory for model files.
     /// Clears any previously discovered entries.
     void scan();
 
@@ -57,8 +61,9 @@ private:
     std::filesystem::path   m_root;
     std::filesystem::path   m_base;
     std::vector<ModelEntry> m_entries;
+    std::vector<std::string> m_extensions;  ///< If empty, defaults to {.gltf, .glb}.
 
-    static bool isModelFile(const std::filesystem::path& p) noexcept;
+    bool isModelFile(const std::filesystem::path& p) const noexcept;
 };
 
 } // namespace daedalus::editor

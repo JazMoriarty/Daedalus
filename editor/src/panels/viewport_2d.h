@@ -179,7 +179,8 @@ private:
 
     void drawEntities(ImDrawList* dl,
                       const EditMapDocument& doc,
-                      glm::vec2 canvasMin) const;
+                      glm::vec2 canvasMin,
+                      std::size_t hoveredEntityIdx) const;
 };
 
 } // namespace daedalus::editor

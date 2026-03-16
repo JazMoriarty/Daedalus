@@ -110,7 +110,7 @@ namespace daedalus::editor
 namespace
 {
 
-constexpr int k_VERSION = 6;
+constexpr int k_VERSION = 8;
 
 // ─── Write helpers ────────────────────────────────────────────────────────────
 
@@ -179,6 +179,7 @@ nlohmann::json vec2ToJson(const glm::vec2& v)
         {"decal_roughness",   ed.decalMat.roughness},
         {"decal_metalness",   ed.decalMat.metalness},
         {"decal_opacity",     ed.decalMat.opacity},
+        {"decal_z_index",     ed.decalMat.zIndex},
         // Component stubs
         {"physics_shape",        static_cast<uint32_t>(ed.physics.shape)},
         {"physics_is_static",    ed.physics.isStatic},
@@ -209,6 +210,11 @@ nlohmann::json vec2ToJson(const glm::vec2& v)
         {"particle_size_end",        ed.particle.sizeEnd},
         {"particle_drag",            ed.particle.drag},
         {"particle_gravity",         vec3ToJson(ed.particle.gravity)},
+        {"particle_soft_range",      ed.particle.softRange},
+        {"particle_emissive_start",  ed.particle.emissiveStart},
+        {"particle_emissive_end",    ed.particle.emissiveEnd},
+        {"particle_emits_light",     ed.particle.emitsLight},
+        {"particle_shadow_density",  ed.particle.shadowDensity},
     };
 }
 
@@ -241,6 +247,8 @@ nlohmann::json vec2ToJson(const glm::vec2& v)
     ed.decalMat.roughness  = je["decal_roughness"].get<float>();
     ed.decalMat.metalness  = je["decal_metalness"].get<float>();
     ed.decalMat.opacity    = je["decal_opacity"].get<float>();
+    ed.decalMat.zIndex     = je.contains("decal_z_index")
+                             ? je["decal_z_index"].get<int>() : 0;
     // Component stubs
     ed.physics.shape        = static_cast<CollisionShape>(je["physics_shape"].get<uint32_t>());
     ed.physics.isStatic     = je["physics_is_static"].get<bool>();
@@ -268,6 +276,16 @@ nlohmann::json vec2ToJson(const glm::vec2& v)
     ed.particle.sizeEnd        = je["particle_size_end"].get<float>();
     ed.particle.drag           = je["particle_drag"].get<float>();
     ed.particle.gravity        = vec3FromJson(je["particle_gravity"]);
+    ed.particle.softRange      = je.contains("particle_soft_range")
+                                 ? je["particle_soft_range"].get<float>() : 0.0f;
+    ed.particle.emissiveStart  = je.contains("particle_emissive_start")
+                                 ? je["particle_emissive_start"].get<float>() : 1.0f;
+    ed.particle.emissiveEnd    = je.contains("particle_emissive_end")
+                                 ? je["particle_emissive_end"].get<float>()   : 0.0f;
+    ed.particle.emitsLight     = je.contains("particle_emits_light")
+                                 ? je["particle_emits_light"].get<bool>()     : false;
+    ed.particle.shadowDensity  = je.contains("particle_shadow_density")
+                                 ? je["particle_shadow_density"].get<float>() : 0.0f;
     return ed;
 }
 

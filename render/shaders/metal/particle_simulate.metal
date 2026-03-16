@@ -106,6 +106,7 @@ kernel void particle_emit(
     p.rot      = randf(seed) * 2.0 * M_PI_F;
     p.frameIdx = frame;
     p.flags    = 1u;  // alive
+    p.emissive = em.emissiveStart;  // born at full emissive; interpolated later by simulate
     state[idx] = p;
 
     // Push idx onto write alive list.
@@ -175,6 +176,7 @@ kernel void particle_simulate(
     float t       = 1.0 - p.life / max(p.maxLife, 0.0001);
     p.color       = mix(em.colorStart, em.colorEnd, t);
     p.size        = mix(em.sizeStart,  em.sizeEnd,  t);
+    p.emissive    = mix(em.emissiveStart, em.emissiveEnd, t);
 
     // Advance atlas frame.
     if (em.atlasFrameRate > 0.0)

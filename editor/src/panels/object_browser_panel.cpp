@@ -103,7 +103,7 @@ void ObjectBrowserPanel::draw(EditMapDocument& doc, glm::vec2 cursorMapPos)
         {
             EntityDef ed;
             ed.visualType = EntityVisualType::ParticleEmitter;
-            ed.position   = {cursorMapPos.x, 0.0f, cursorMapPos.y};
+            ed.position   = {cursorMapPos.x, 0.5f, cursorMapPos.y};
             doc.pushCommand(std::make_unique<CmdPlaceEntity>(doc, ed));
         }
 

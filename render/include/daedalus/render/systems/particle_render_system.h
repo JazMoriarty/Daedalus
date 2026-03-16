@@ -87,7 +87,7 @@ inline void particleRenderSystem(daedalus::World& world,
             c.atlasFrameRate  = emitter.atlasFrameRate;
             c.velocityStretch = emitter.velocityStretch;
             c.softRange       = emitter.softRange;
-            c.pad0 = c.pad1 = c.pad2 = 0.0f;
+            c.pad2 = 0.0f;
 
             scene.particleEmitters.push_back(draw);
         });

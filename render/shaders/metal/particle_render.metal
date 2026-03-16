@@ -52,10 +52,11 @@ struct PartVertOut
 {
     float4 clipPos  [[position]];
     float2 uv;
-    float4 color;        // HDR tint (rgb) + opacity (a), already life-interpolated by simulate
-    float  emissive;     // emissiveScale from constants (passed to fragment)
-    float  softRange;    // em.softRange
-    float  particleZ;    // view-space depth of this particle (for soft compare)
+    float4 color;             // HDR tint (rgb) + opacity (a), already life-interpolated by simulate
+    float  emissive;          // emissiveScale from constants (passed to fragment)
+    float  softRange;         // em.softRange
+    float  particleZ;         // view-space depth (raster mode depth compare)
+    float  particleLinearDist; // radial camera distance (RT mode depth compare)
 };
 
 // ─── Depth linearization helper ───────────────────────────────────────────────
@@ -140,16 +141,19 @@ vertex PartVertOut particle_vert(
     float2 atlaUV = float2((float(col) + cellUV.x) / float(cols),
                            (float(row) + cellUV.y) / float(rows));
 
-    // ── Pass-through view-space Z for soft particle compare ───────────────────
+    // ── Pass-through depth values for soft particle compare ──────────────────
+    // particleZ       : view-space depth — used in raster mode.
+    // particleLinearDist: radial camera distance — used in RT mode.
     float particleViewZ = ndcToViewZ(clipPos.z / clipPos.w, frame.proj);
 
     PartVertOut out;
-    out.clipPos     = clipPos;
-    out.uv          = atlaUV;
-    out.color       = p.color;
-    out.emissive    = em.emissiveScale;
-    out.softRange   = em.softRange;
-    out.particleZ   = particleViewZ;
+    out.clipPos          = clipPos;
+    out.uv               = atlaUV;
+    out.color            = p.color;
+    out.emissive         = p.emissive * em.emissiveScale;  // per-particle emissive × global multiplier
+    out.softRange        = em.softRange;
+    out.particleZ        = particleViewZ;
+    out.particleLinearDist = length(worldPos - float3(frame.cameraPos.xyz));
     return out;
 }
 
@@ -168,26 +172,61 @@ fragment float4 particle_frag(
     float3 albedo    = texSample.rgb;
     float  texAlpha  = texSample.a;
 
-    // ── Soft particle fade ────────────────────────────────────────────────────
-    // Compare the view-space Z of this fragment vs the opaque depth behind it.
-    // Particles very close to opaque geometry fade out to avoid hard intersections.
-    float softFade = 1.0;
-    if (em.softRange > 0.0)
+    // ── Depth test & soft particle fade ──────────────────────────────────────
+    // The depth copy texture carries different values depending on render mode:
+    //   Raster: NDC depth [0,1] from the G-buffer depth-copy pass.
+    //   RT    : linear world-space camera distance (metres) from path_trace.metal.
+    // We branch on frame.isRTMode and work in the appropriate space so that
+    // both the hard occlusion discard and the soft fade use consistent units.
+    float2 screenUV     = in.clipPos.xy / frame.screenSize.xy;
+    float  opaqueDepth;    // opaque surface depth in the comparison space
+    float  particleDepth;  // this particle's depth in the same space
+
+    if (frame.isRTMode > 0.5f)
     {
-        float2 screenUV   = in.clipPos.xy / frame.screenSize.xy;
-        float  opaqueNDC  = depthCopy.sample(clampSamp, screenUV).r;
-        float  opaqueZ    = ndcToViewZ(opaqueNDC, frame.proj);
-        float  zDiff      = abs(opaqueZ - in.particleZ);
-        softFade          = saturate(zDiff / em.softRange);
+        // RT mode: depth texture stores linear (radial) camera distance.
+        // Compare directly — both values are in world-space metres.
+        opaqueDepth   = depthCopy.sample(clampSamp, screenUV).r;
+        particleDepth = in.particleLinearDist;
+    }
+    else
+    {
+        // Raster mode: depth texture stores NDC depth → convert to view-space Z.
+        float opaqueNDC = depthCopy.sample(clampSamp, screenUV).r;
+        opaqueDepth     = ndcToViewZ(opaqueNDC, frame.proj);
+        particleDepth   = in.particleZ;
+    }
+
+    // Hard occlusion: discard particles that are behind opaque geometry.
+    // The 0.01 m bias avoids z-fighting at contact points.
+    if (particleDepth > opaqueDepth + 0.01f) { discard_fragment(); }
+
+    // Soft fade: gradually fade particles close to an opaque surface
+    // to avoid a hard geometric intersection seam.
+    float softFade = 1.0f;
+    if (em.softRange > 0.0f)
+    {
+        float zDiff = abs(opaqueDepth - particleDepth);
+        softFade    = saturate(zDiff / em.softRange);
     }
 
     // ── Alpha ─────────────────────────────────────────────────────────────────
     float alpha = in.color.a * texAlpha * softFade;
 
-    // ── HDR emissive color (premultiplied) ────────────────────────────────────
-    // The particle color already has life-based tint baked in by simulate.
-    // emissiveScale amplifies into HDR range.
-    float3 hdrColor = albedo * in.color.rgb * in.emissive * alpha;
+    // ── Scene lighting ────────────────────────────────────────────────────────
+    // Camera-facing billboard: normal always points toward the viewer.
+    float3 N        = -frame.cameraDir.xyz;
+    float  sunNdotL = max(dot(N, frame.sunDirection.xyz), 0.0f);
+    float3 sunLight = frame.sunColor.xyz * frame.sunColor.w * sunNdotL;
+    float3 ambient  = frame.ambientColor.xyz;
+    float3 sceneLight = sunLight + ambient;
+
+    // ── Emissive blend ────────────────────────────────────────────────────────
+    // in.emissive = p.emissive * em.emissiveScale (per-particle × global multiplier).
+    // At emissive=1: fully self-lit (classic additive look).
+    // At emissive=0: fully scene-lit (particle receives sun + ambient as albedo).
+    float  litFactor = saturate(1.0f - in.emissive);
+    float3 hdrColor  = albedo * in.color.rgb * (in.emissive + litFactor * sceneLight) * alpha;
 
     // Premultiplied alpha output: dst blend = One / OneMinusSrcAlpha.
     return float4(hdrColor, alpha);

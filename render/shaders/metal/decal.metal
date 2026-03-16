@@ -138,3 +138,54 @@ fragment DecalFragOut decal_frag(
     out.normalRoughMet = float4(octN * 0.5 + 0.5, decal.roughness, alpha);
     return out;
 }
+
+// ─── RT composite variant ─────────────────────────────────────────────────────
+// Used when the main render pass is path-traced (RT mode).
+// The G-buffer is not available in RT mode, so decal albedo is blended directly
+// into the HDR render target (premultiplied alpha, One / OneMinusSrcAlpha).
+// Same OBB projection and position reconstruction as the raster variant.
+// Lighting is not re-applied — acceptable approximation for editor RT preview.
+//
+// Resource bindings (reuses decal_vert vertex shader):
+//   buffer(0)  = FrameConstants
+//   buffer(1)  = DecalConstants
+//   texture(0) = gDepthCopy  (R32Float, written by RT path)
+//   texture(1) = decal albedo (RGBA8Unorm)
+//   sampler(0) = linear-repeat
+
+fragment float4 decal_rt_composite_frag(
+    DecalVertOut             in         [[stage_in]],
+    texture2d<float>         gDepthCopy [[texture(0)]],
+    texture2d<float>         albedoTex  [[texture(1)]],
+    sampler                  samp       [[sampler(0)]],
+    constant FrameConstants& frame      [[buffer(0)]],
+    constant DecalConstants& decal      [[buffer(1)]])
+{
+    float2 screenUV = in.position.xy * frame.screenSize.zw;
+
+    constexpr sampler depthSamp(filter::nearest,
+                                mip_filter::none,
+                                address::clamp_to_edge);
+    float depth = gDepthCopy.sample(depthSamp, screenUV).r;
+
+    // Sky pixels have no surface to project onto.
+    if (depth >= 0.9999f) { discard_fragment(); }
+
+    float3 worldPos  = reconstruct_world_pos(depth, screenUV, frame.invViewProj);
+    float4 localPos4 = decal.invModel * float4(worldPos, 1.0);
+    float3 local     = localPos4.xyz / localPos4.w;
+
+    // Discard fragments whose underlying surface lies outside the decal OBB.
+    if (any(abs(local) > float3(0.5))) { discard_fragment(); }
+
+    // Project local XZ → decal UV (same convention as raster variant).
+    float2 uv = float2(local.x + 0.5, 0.5 - local.z);
+
+    float4 albedoSample = albedoTex.sample(samp, uv);
+    float  alpha        = albedoSample.a * decal.opacity;
+
+    if (alpha < 0.01) { discard_fragment(); }
+
+    // Premultiplied alpha output: src = One, dst = OneMinusSrcAlpha.
+    return float4(albedoSample.rgb * alpha, alpha);
+}

@@ -6,7 +6,11 @@
 //   1.   Shadow depth   (render, depth-only from sun POV — 2048×2048)
 //   2.   G-buffer       (render, depth + colour in one pass)
 //   2.4  DepthCopy      (compute, Depth32Float → R32Float — breaks decal feedback loop)
-//   2.5  Decal          (render, alpha-blend into G-buffer RT0+RT1)
+//   2.5  Decal          (render, alpha-blend into G-buffer RT0+RT1; raster mode)
+//   2.5r DecalAlbedoInject (compute, inject decal albedo into m_rtAlbedo; RT mode only)
+//   RT.0 DensityClear    (compute, zero uint[32768] atomic buf per shadow emitter; RT mode)
+//   RT.0b DensityBuild   (compute, splat particles into atomic buf per emitter; RT mode)
+//   RT.0c DensityResolve (compute, resolve atomic buf -> R16Float 3D density tex; RT mode)
 //   3.   SSAO           (compute)
 //   3b.  SSAOBlur       (compute, bilateral 5×5 depth-aware filter)
 //   3c.  FogScatter     (compute, scatter lights into 160×90×64 froxel grid; only if fog.enabled)
@@ -92,7 +96,8 @@ private:
 
     std::unique_ptr<rhi::IPipeline> m_gbufferPSO;
     std::unique_ptr<rhi::IPipeline> m_shadowDepthPSO;
-    std::unique_ptr<rhi::IPipeline> m_decalPSO;     ///< Pass 2.5: alpha-blend into G-buffer RT0+RT1.
+    std::unique_ptr<rhi::IPipeline> m_decalPSO;             ///< Pass 2.5:  alpha-blend into G-buffer RT0+RT1 (raster).
+    std::unique_ptr<rhi::IPipeline> m_decalAlbedoInjectPSO; ///< Pass 2.5r: inject decal albedo into m_rtAlbedo (compute, RT mode only).
     std::unique_ptr<rhi::IPipeline> m_ssaoPSO;
     std::unique_ptr<rhi::IPipeline> m_ssaoBlurPSO;
     std::unique_ptr<rhi::IPipeline> m_lightingPSO;
@@ -232,6 +237,26 @@ private:
     std::unique_ptr<rhi::ITexture>   m_svgfPrevNormalTex; ///< Previous-frame encoded normal for SVGF disocclusion.
     bool m_rtInitialized = false;
 
+    // -- Particle density shadow volumes (RT-only) ----------------------------
+    // One 32x32x32 R32Float density texture + one u32[32768] atomic buffer per
+    // emitter slot.  Built each frame from the previous frame's stateBuffer
+    // before the PathTrace dispatch.  m_fallbackDensityTex is a 32x32x32
+    // all-zeros texture bound for unused emitter slots.
+
+    static constexpr u32 k_maxParticleShadowEmitters = 4;
+    static constexpr u32 k_densityGridSize           = 32;
+
+    std::array<std::unique_ptr<rhi::ITexture>, k_maxParticleShadowEmitters> m_particleDensityTex;
+    std::array<std::unique_ptr<rhi::IBuffer>,  k_maxParticleShadowEmitters> m_particleDensityAtomicBuf;
+    /// [offset 0] u32 count + u32x3 pad + [offset 16] ParticleShadowVolumeGPU[4] = 144 bytes.
+    std::unique_ptr<rhi::IBuffer>  m_particleShadowBuf;
+    /// 32x32x32 R32Float all-zeros -- bound for unused density slots.
+    std::unique_ptr<rhi::ITexture> m_fallbackDensityTex;
+
+    std::unique_ptr<rhi::IPipeline> m_particleDensityClearPSO;    ///< Compute: zero atomic buf.
+    std::unique_ptr<rhi::IPipeline> m_particleDensityBuildPSO;    ///< Compute: splat particles.
+    std::unique_ptr<rhi::IPipeline> m_particleDensityResolvePSO;  ///< Compute: resolve -> R16Float tex.
+
     // ─── Frame state ──────────────────────────────────────────────────────────
 
     /// Per-frame CPU/GPU sync fence.  Signalled when the main frame command buffer
@@ -262,7 +287,12 @@ private:
     /// Lazy-create RT PSOs and persistent SVGF textures on first RT frame.
     void lazyInitRT(rhi::IRenderDevice& device);
 
-    /// (Re)allocate all screen-size RT/SVGF persistent textures at resolution w×h.
+    /// Allocate per-emitter density 3D textures, atomic accumulation buffers,
+    /// shadow-volume descriptor buffer, and fallback density texture.
+    /// Called once from lazyInitRT() on the first RT frame.
+    void recreateParticleDensityResources(rhi::IRenderDevice& device);
+
+    /// (Re)allocate all screen-size RT/SVGF persistent textures at resolution w
     /// Called by lazyInitRT() on first use and by resize() whenever the viewport
     /// dimensions change while RT mode is active (or has been used this session).
     void recreateRTTextures(rhi::IRenderDevice& device, u32 w, u32 h);

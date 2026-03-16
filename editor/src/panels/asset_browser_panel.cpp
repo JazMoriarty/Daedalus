@@ -31,6 +31,15 @@ void AssetBrowserPanel::openModelPicker(ModelPickCallback cb, std::string label)
     m_mode                = Mode::Models;
 }
 
+void AssetBrowserPanel::openVoxPicker(ModelPickCallback cb, std::string label)
+{
+    m_modelPickerCallback = std::move(cb);
+    m_pickerLabel         = std::move(label);
+    m_pickerOpen          = true;
+    m_wantFocus           = true;
+    m_mode                = Mode::Voxels;
+}
+
 void AssetBrowserPanel::closePicker() noexcept
 {
     m_pickerOpen          = false;
@@ -126,15 +135,16 @@ void AssetBrowserPanel::drawThumbnailGrid(MaterialCatalog&    catalog,
 // ─── drawModelGrid ───────────────────────────────────────────────────────────────────────────
 // Model list — used by both the browser panel and model picker.
 
-void AssetBrowserPanel::drawModelGrid(ModelCatalog& modelCatalog, bool isPicker)
+void AssetBrowserPanel::drawModelGrid(ModelCatalog& modelCatalog, bool isPicker,
+                                       std::string&  selectedFolder)
 {
     for (std::size_t i = 0; i < modelCatalog.entries().size(); ++i)
     {
         const ModelEntry& entry = modelCatalog.entries()[i];
 
         // Apply folder filter.
-        if (!m_modelSelectedFolder.empty() &&
-            entry.folderPath != m_modelSelectedFolder)
+        if (!selectedFolder.empty() &&
+            entry.folderPath != selectedFolder)
             continue;
 
         ImGui::PushID(static_cast<int>(i));
@@ -142,13 +152,13 @@ void AssetBrowserPanel::drawModelGrid(ModelCatalog& modelCatalog, bool isPicker)
         const bool clicked = ImGui::Selectable(entry.displayName.c_str());
 
         if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("%s", entry.relPath.string().c_str());
+            ImGui::SetTooltip("%s", entry.absPath.string().c_str());
 
         ImGui::PopID();
 
         if (clicked && isPicker && m_modelPickerCallback)
         {
-            m_modelPickerCallback(entry.relPath.string());
+            m_modelPickerCallback(entry.absPath.string());
             closePicker();
         }
     }
@@ -159,7 +169,8 @@ void AssetBrowserPanel::drawModelGrid(ModelCatalog& modelCatalog, bool isPicker)
 void AssetBrowserPanel::draw(MaterialCatalog&      catalog,
                                rhi::IRenderDevice&   device,
                                render::IAssetLoader& loader,
-                               ModelCatalog&         modelCatalog)
+                               ModelCatalog&         modelCatalog,
+                               ModelCatalog*         voxCatalog)
 {
     (void)loader;  // available for future reload-on-change
     // ── Dockable browser window ───────────────────────────────────────────────────
@@ -192,6 +203,7 @@ void AssetBrowserPanel::draw(MaterialCatalog&      catalog,
     {
         const bool texActive = (m_mode == Mode::Textures);
         const bool modActive = (m_mode == Mode::Models);
+        const bool voxActive = (m_mode == Mode::Voxels);
 
         if (texActive)
             ImGui::PushStyleColor(ImGuiCol_Button,
@@ -208,6 +220,17 @@ void AssetBrowserPanel::draw(MaterialCatalog&      catalog,
         if (ImGui::SmallButton("Models"))
             { m_mode = Mode::Models; m_modelSelectedFolder.clear(); }
         if (modActive) ImGui::PopStyleColor();
+
+        if (voxCatalog != nullptr)
+        {
+            ImGui::SameLine();
+            if (voxActive)
+                ImGui::PushStyleColor(ImGuiCol_Button,
+                                      ImGui::GetStyleColorVec4(ImGuiCol_ButtonActive));
+            if (ImGui::SmallButton("Voxels"))
+                { m_mode = Mode::Voxels; m_voxSelectedFolder.clear(); }
+            if (voxActive) ImGui::PopStyleColor();
+        }
     }
     ImGui::EndDisabled();
     ImGui::Separator();
@@ -249,7 +272,7 @@ void AssetBrowserPanel::draw(MaterialCatalog&      catalog,
             ImGui::EndChild();
         }
     }
-    else  // Mode::Models
+    else if (m_mode == Mode::Models)
     {
         if (modelCatalog.empty())
         {
@@ -282,7 +305,44 @@ void AssetBrowserPanel::draw(MaterialCatalog&      catalog,
 
             // ── Right pane: model list
             ImGui::BeginChild("##models", ImVec2(0.0f, 0.0f), ImGuiChildFlags_None);
-            drawModelGrid(modelCatalog, /*isPicker=*/m_pickerOpen);
+            drawModelGrid(modelCatalog, /*isPicker=*/m_pickerOpen, m_modelSelectedFolder);
+            ImGui::EndChild();
+        }
+    }
+    else if (m_mode == Mode::Voxels)
+    {
+        if (voxCatalog == nullptr || voxCatalog->empty())
+        {
+            ImGui::TextDisabled("No voxel assets found.");
+            ImGui::TextDisabled(
+                "Place .vox files in assets/voxels/ next to the binary.");
+        }
+        else
+        {
+            // ── Left pane: folder tree
+            ImGui::BeginChild(
+                "##vfolders",
+                ImVec2(std::min(150.0f, ImGui::GetContentRegionAvail().x * 0.25f), 0.0f),
+                ImGuiChildFlags_Borders | ImGuiChildFlags_ResizeX);
+
+            if (ImGui::Selectable("All##vfold", m_voxSelectedFolder.empty()))
+                m_voxSelectedFolder.clear();
+
+            std::set<std::string> folders;
+            for (const auto& e : voxCatalog->entries())
+                if (!e.folderPath.empty()) folders.insert(e.folderPath);
+            for (const auto& folder : folders)
+            {
+                if (ImGui::Selectable(folder.c_str(),
+                                      m_voxSelectedFolder == folder))
+                    m_voxSelectedFolder = folder;
+            }
+            ImGui::EndChild();
+            ImGui::SameLine();
+
+            // ── Right pane: voxel list
+            ImGui::BeginChild("##voxels", ImVec2(0.0f, 0.0f), ImGuiChildFlags_None);
+            drawModelGrid(*voxCatalog, /*isPicker=*/m_pickerOpen, m_voxSelectedFolder);
             ImGui::EndChild();
         }
     }

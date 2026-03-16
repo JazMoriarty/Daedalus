@@ -88,7 +88,8 @@ private:
 
     bool                        m_dirty = true;
     std::vector<EntityGpuEntry> m_entries;
-    std::vector<float>          m_animTimes;  ///< Per-entity elapsed time for animation (seconds).
+    std::vector<float>          m_animTimes;         ///< Per-entity elapsed time for animation (seconds).
+    std::vector<float>          m_spawnAccumulators; ///< Fractional particle spawn accumulator per entity.
 
     // Shared unit-quad geometry reused by all billboard types.
     std::unique_ptr<rhi::IBuffer> m_quadVBO;

@@ -8,6 +8,7 @@ namespace daedalus::editor
 
 class EditMapDocument;
 class MaterialCatalog;
+class ModelCatalog;
 class AssetBrowserPanel;
 
 class PropertyInspector
@@ -20,7 +21,9 @@ public:
               MaterialCatalog&      catalog,
               rhi::IRenderDevice&   device,
               render::IAssetLoader& loader,
-              AssetBrowserPanel&    assetBrowser);
+              AssetBrowserPanel&    assetBrowser,
+              ModelCatalog*         voxCatalog = nullptr,
+              float                 gridStep   = 1.0f);
 };
 
 } // namespace daedalus::editor

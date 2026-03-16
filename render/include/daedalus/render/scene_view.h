@@ -128,6 +128,7 @@ struct DecalDraw
     f32 roughness = 0.5f;
     f32 metalness = 0.0f;
     f32 opacity   = 1.0f;  ///< Global fade multiplier applied on top of texture alpha.
+    int zIndex    = 0;     ///< Sort order (lower renders first; lower-index decals appear underneath).
 };
 
 // ─── VolumetricFogParams ────────────────────────────────────────────────────────────────────
@@ -157,6 +158,18 @@ struct ParticleEmitterDraw
     /// Fully packed constants uploaded to all particle shaders this frame.
     /// particleRenderSystem() fills this from the ECS component + TransformComponent.
     ParticleEmitterConstantsGPU constants;
+
+    /// When true, FrameRenderer builds a 32×32×32 density volume for this
+    /// emitter each frame and includes it in the path tracer's shadow volume
+    /// list (RT mode only).  Set by entity_gpu_cache when shadowDensity > 0.
+    bool      hasShadowVolume  = false;
+    glm::vec3 shadowVolumeMin  = glm::vec3(0.0f);  ///< World-space AABB minimum.
+    glm::vec3 shadowVolumeMax  = glm::vec3(0.0f);  ///< World-space AABB maximum.
+    f32       shadowDensity    = 0.0f;  ///< Beer-Lambert absorption σ (path tracer only).
+    /// Volumetric emission: how much light the particle cloud sheds onto surrounding
+    /// geometry in RT mode.  Derived from the emitter's birth colour and emissiveStart.
+    glm::vec3 emissiveColor    = glm::vec3(0.0f);  ///< RGB emissive radiance tint.
+    f32       emissiveIntensity = 0.0f;             ///< Emissive scale factor.
 };
 
 // ─── DoFParams ────────────────────────────────────────────────────────────────────────────────────────────────

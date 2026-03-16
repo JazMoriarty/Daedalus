@@ -200,14 +200,30 @@ void EntityGpuCache::loadEntry(EntityGpuEntry&       entry,
 
     case EntityVisualType::ParticleEmitter:
     {
-        if (def.assetPath.empty()) break;
-        auto atlas = loader.loadTexture(device, def.assetPath, /*sRGB=*/true);
-        if (!atlas)
+        // Try to load the user-specified atlas texture.
+        if (!def.assetPath.empty())
         {
-            doc.log("EntityGpuCache: failed to load particle atlas: " + def.assetPath);
-            break;
+            auto atlas = loader.loadTexture(device, def.assetPath, /*sRGB=*/true);
+            if (atlas)
+                entry.albedoTex = std::move(*atlas);
+            else
+                doc.log("EntityGpuCache: failed to load particle atlas: " + def.assetPath);
         }
-        entry.albedoTex   = std::move(*atlas);
+
+        // Fall back to a 1x1 white texture so the emitter renders without an atlas.
+        if (!entry.albedoTex)
+        {
+            rhi::TextureDescriptor td;
+            td.width     = 1u;
+            td.height    = 1u;
+            td.format    = rhi::TextureFormat::RGBA8Unorm;
+            td.usage     = rhi::TextureUsage::ShaderRead;
+            const uint8_t white[4] = {255, 255, 255, 255};
+            td.initData  = white;
+            td.debugName = "ParticleDefaultAtlas";
+            entry.albedoTex = device.createTexture(td);
+        }
+
         entry.particlePool = render::createParticlePool(device, k_maxParticles);
         entry.loaded       = true;
         break;
@@ -228,6 +244,7 @@ void EntityGpuCache::rebuild(render::IAssetLoader&         loader,
 
     m_entries.resize(entities.size());
     m_animTimes.resize(entities.size(), 0.0f);
+    m_spawnAccumulators.resize(entities.size(), 0.0f);
 
     for (std::size_t i = 0; i < entities.size(); ++i)
     {
@@ -242,9 +259,10 @@ void EntityGpuCache::rebuild(render::IAssetLoader&         loader,
             continue;
         }
 
-        // Reset GPU resources, reload, and reset animation timer.
-        entry         = {};
-        m_animTimes[i] = 0.0f;
+        // Reset GPU resources, reload, and reset per-entity timers.
+        entry                   = {};
+        m_animTimes[i]          = 0.0f;
+        m_spawnAccumulators[i]  = 0.0f;
         loadEntry(entry, def, loader, device, doc);
     }
 
@@ -409,6 +427,7 @@ void EntityGpuCache::populateSceneView(render::SceneView&            scene,
             decal.roughness      = def.decalMat.roughness;
             decal.metalness      = def.decalMat.metalness;
             decal.opacity        = def.decalMat.opacity;
+            decal.zIndex         = def.decalMat.zIndex;
 
             scene.decalDraws.push_back(decal);
             break;
@@ -440,7 +459,12 @@ void EntityGpuCache::populateSceneView(render::SceneView&            scene,
             c.drag           = p.drag;
             c.gravity        = p.gravity;
             c.maxParticles   = k_maxParticles;
-            c.spawnThisFrame = static_cast<unsigned>(p.emissionRate * scene.deltaTime);
+            // Accumulate fractional spawns so low emission rates still spawn
+            // particles over time instead of always truncating to 0.
+            m_spawnAccumulators[i] += p.emissionRate * scene.deltaTime;
+            const unsigned toSpawn  = static_cast<unsigned>(m_spawnAccumulators[i]);
+            m_spawnAccumulators[i] -= static_cast<float>(toSpawn);
+            c.spawnThisFrame        = toSpawn;
             c.frameIndex     = scene.frameIndex;
             c.aliveListFlip  = entry.particlePool->aliveListFlip;
             c.atlasSize      = { static_cast<float>(def.anim.cols),
@@ -449,7 +473,39 @@ void EntityGpuCache::populateSceneView(render::SceneView&            scene,
             c.turbulenceScale = 0.0f;
             c.emissiveScale   = 1.0f;
             c.velocityStretch = 0.0f;
-            c.softRange       = 0.5f;
+            c.softRange       = p.softRange;
+            c.emissiveStart   = p.emissiveStart;
+            c.emissiveEnd     = p.emissiveEnd;
+
+            // If this emitter is flagged as a light emitter, inject a dynamic
+            // point light at the emitter origin.  Intensity is derived from the
+            // birth-emissive multiplier so the "lights off" slider kills the light too.
+            if (p.emitsLight)
+            {
+                render::PointLight pl;
+                pl.position  = def.position;
+                pl.color     = glm::vec3(p.colorStart);
+                pl.radius    = 5.0f;
+                pl.intensity = p.emissiveStart * 10.0f;
+                scene.pointLights.push_back(pl);
+            }
+
+            // Shadow volume (RT mode only): derive a world-space AABB large enough
+            // to contain the oldest, fastest, largest possible particle.
+            // extent = max travel distance + half the birth billboard radius.
+            if (p.shadowDensity > 0.0f)
+            {
+                const float extent        = p.speedMax * p.lifetimeMax + p.sizeStart * 0.5f;
+                emitter.hasShadowVolume  = true;
+                emitter.shadowVolumeMin  = def.position - glm::vec3(extent);
+                emitter.shadowVolumeMax  = def.position + glm::vec3(extent);
+                emitter.shadowDensity    = p.shadowDensity;
+                // Derive emissive emission from birth colour + emissive multiplier.
+                // Used by the RT path tracer to illuminate surrounding geometry
+                // (floor, ceiling, walls, objects) from the glowing particle cloud.
+                emitter.emissiveColor     = glm::vec3(p.colorStart);
+                emitter.emissiveIntensity = p.emissiveStart;
+            }
 
             scene.particleEmitters.push_back(std::move(emitter));
             break;

@@ -16,11 +16,14 @@
 #include "document/commands/cmd_rotate_sector.h"
 
 #include "imgui.h"
+#include "imgui_internal.h"  // GImGui->ActiveId, GImGui->ActiveIdWindow, DockTabIsVisible
 
 #include <glm/glm.hpp>
 #include <glm/gtc/constants.hpp>
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
+#include <limits>
 #include <vector>
 
 namespace {
@@ -223,7 +226,8 @@ void Viewport2D::drawSectors(ImDrawList*            dl,
 
 void Viewport2D::drawEntities(ImDrawList*            dl,
                                const EditMapDocument& doc,
-                               glm::vec2              canvasMin) const
+                               glm::vec2              canvasMin,
+                               std::size_t            hoveredEntityIdx) const
 {
     constexpr float kIconR = 7.0f;
 
@@ -258,9 +262,13 @@ void Viewport2D::drawEntities(ImDrawList*            dl,
         // Centre dot.
         dl->AddCircleFilled(spi, 2.0f, IM_COL32(255, 255, 255, 200));
 
-        // Selection ring.
+        // Hover ring (white) shown when the cursor is over the icon but not selected.
+        if (ei == hoveredEntityIdx && !selected)
+            dl->AddCircle(spi, kIconR + 4.0f, IM_COL32(255, 255, 255, 160), 24, 1.5f);
+
+        // Selection ring (yellow).
         if (selected)
-            dl->AddCircle(spi, kIconR + 4.0f, IM_COL32(255, 255, 255, 200), 24, 1.5f);
+            dl->AddCircle(spi, kIconR + 4.0f, IM_COL32(255, 200, 0, 220), 24, 1.5f);
 
         // Direction arrow — yaw=0 points toward +Z (down in top-down view).
         // Brightens when selected so it's easy to read.
@@ -329,8 +337,26 @@ void Viewport2D::draw(EditMapDocument& doc,
                        VertexTool*      vertexTool)
 {
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
-    ImGui::Begin("2D Viewport");
+    const bool windowOpen = ImGui::Begin("2D Viewport");
     ImGui::PopStyleVar();
+
+    // Guard 1: Begin() returns false when the window is a non-active docked tab
+    // (SkipItems=true).  Skip ALL drawing and input in that case.
+    //
+    // Guard 2: During the tab-switch transition frame, ImGui sets
+    // HiddenFramesCannotSkipItems=1 (to allow auto-sizing), which keeps
+    // SkipItems=false and causes Begin() to return true even though the tab is
+    // not yet visually shown.  DockTabIsVisible is the authoritative flag: it
+    // is false whenever the window is not the selected tab in its dock node,
+    // regardless of SkipItems.  We must also skip input in that case.
+    ImGuiWindow* const selfWin = ImGui::GetCurrentWindow();
+    const bool tabVisible = !selfWin->DockIsActive || selfWin->DockTabIsVisible;
+
+    if (!windowOpen || !tabVisible)
+    {
+        ImGui::End();
+        return;
+    }
 
     // Reserve the canvas.
     ImVec2 canvasSz = ImGui::GetContentRegionAvail();
@@ -422,14 +448,26 @@ void Viewport2D::draw(EditMapDocument& doc,
         }
     }
 
-    // Invisible interaction target.
-    ImGui::InvisibleButton("canvas2d", canvasSz,
-                           ImGuiButtonFlags_MouseButtonLeft  |
-                           ImGuiButtonFlags_MouseButtonRight |
-                           ImGuiButtonFlags_MouseButtonMiddle);
-
-    const bool hovered = ImGui::IsItemHovered();
-    const bool active  = ImGui::IsItemActive();
+    // Canvas hover detection: check if the mouse is within our content region AND
+    // our window is actually the one ImGui considers hovered (respects docking z-order).
+    // We do NOT use InvisibleButton — that's a widget meant for UI elements, not
+    // entire viewport canvases. InvisibleButton fights the docking system because it
+    // claims input based on geometric rect overlap, ignoring window z-order.
+    //
+    // CRITICAL: Use ChildWindows flag to ensure we're truly the hovered window,
+    // not just geometrically under the mouse. This prevents stealing clicks from
+    // Properties and other docked panels.
+    const bool mouseInCanvas = ImGui::IsMouseHoveringRect(canvasMinV, 
+                                   ImVec2(canvasMax.x, canvasMax.y));
+    const bool hovered = mouseInCanvas && 
+                         ImGui::IsWindowHovered(ImGuiHoveredFlags_ChildWindows | 
+                                                 ImGuiHoveredFlags_AllowWhenBlockedByActiveItem);
+    
+    // Active state: we're processing a drag that started in this canvas.
+    // Track this manually since we no longer have InvisibleButton's IsItemActive().
+    const bool active = hovered || m_panActive || m_entityDragActive || 
+                        m_lightDragActive || m_entityRotActive || m_psDragActive || 
+                        m_psRotActive || m_rectSelActive;
 
     // ── Draw background + grid ────────────────────────────────────────────────
     ImDrawList* dl = ImGui::GetWindowDrawList();
@@ -484,7 +522,27 @@ void Viewport2D::draw(EditMapDocument& doc,
         }
     }
 
-    drawEntities(dl, doc, canvasMin);
+    // Compute which entity (if any) the cursor is hovering over.
+    std::size_t hoveredEntityIdx = std::numeric_limits<std::size_t>::max();
+    if (hovered)
+    {
+        constexpr float kHitRSq = 10.0f * 10.0f;
+        const auto& entities = doc.entities();
+        for (std::size_t ei = 0; ei < entities.size(); ++ei)
+        {
+            const EntityDef& ed = entities[ei];
+            const auto  sp = mapToScreen({ed.position.x, ed.position.z}, canvasMin);
+            const float dx = mousePosV.x - sp.x;
+            const float dy = mousePosV.y - sp.y;
+            if (dx * dx + dy * dy <= kHitRSq)
+            {
+                hoveredEntityIdx = ei;
+                break;
+            }
+        }
+    }
+
+    drawEntities(dl, doc, canvasMin, hoveredEntityIdx);
 
     // Ask the draw tool to render its overlay.
     if (drawTool)
@@ -657,8 +715,30 @@ void Viewport2D::draw(EditMapDocument& doc,
 
     // ── Mouse input ──────────────────────────────────────────────────────────────────
     // (mousePosV, mouseMapRaw, shiftHeld, doSnap, mouseMap computed at top of draw())
+    //
+    // Guard: suppress canvas input if a widget in another window currently owns
+    // the drag (e.g. dragging a DragFloat in Properties while the cursor briefly
+    // crosses back onto the canvas).
+    const bool otherWindowOwnsActiveDrag =
+        (ImGui::IsMouseDown(ImGuiMouseButton_Left) &&
+         GImGui->ActiveId != 0 &&
+         GImGui->ActiveIdWindow != nullptr &&
+         GImGui->ActiveIdWindow != ImGui::GetCurrentWindow());
 
-    if (hovered)
+    // CRITICAL: Check if ImGui has an active item (widget being interacted with)
+    // OR if the mouse is hovering a widget that will consume the click.
+    // We must NOT check WantCaptureMouse alone - it's true whenever the mouse is
+    // over ANY ImGui window, including our own viewport canvas.
+    // Instead, check if there's an actual widget (button, slider, etc.) claiming input.
+    //
+    // Use HoveredIdPreviousFrame because on the click frame, HoveredId is cleared
+    // before we process input, but PreviousFrame still tells us what was hovered.
+    const bool imguiWidgetActive = (GImGui->ActiveId != 0 && 
+                                     GImGui->ActiveIdWindow != ImGui::GetCurrentWindow());
+    const bool imguiWidgetHovered = (GImGui->HoveredIdPreviousFrame != 0);
+    const bool imguiBlockingInput = imguiWidgetActive || imguiWidgetHovered;
+
+    if (hovered && !otherWindowOwnsActiveDrag && !imguiBlockingInput)
     {
         // Zoom with scroll wheel.
         const float wheel = ImGui::GetIO().MouseWheel;
@@ -755,8 +835,8 @@ void Viewport2D::draw(EditMapDocument& doc,
                         const float dy = mousePosV.y - sp.y;
                         if (dx * dx + dy * dy <= kHitR * kHitR)
                         {
-                            SelectionState& sel = doc.selection();
-                            sel.clear();
+                    SelectionState& sel = doc.selection();
+                    sel.clear();
                             sel.type       = SelectionType::PlayerStart;
                             hitPlayerStart = true;
                             // Start translate drag.
@@ -884,68 +964,72 @@ void Viewport2D::draw(EditMapDocument& doc,
                 if (!handled)
                     activeTool->onMouseDown(doc, mouseMapRaw.x, mouseMapRaw.y, 1);
             }
-            if (ImGui::IsMouseReleased(ImGuiMouseButton_Left))
+        }
+    }
+
+    // LMB release: commit any in-progress canvas drag even if the mouse left the canvas
+    // (e.g. released over the Properties panel).  Previously gated on hovered, which left
+    // drag flags dangling and caused spurious deselection on the next Properties click.
+    if (ImGui::IsMouseReleased(ImGuiMouseButton_Left))
+    {
+        if (m_psDragActive)
+        {
+            // Commit the player start move if position actually changed.
+            if (doc.playerStart().has_value())
             {
-                if (m_psDragActive)
+                const PlayerStart& finalPs = *doc.playerStart();
+                if (finalPs.position != m_psDragOrigin)
                 {
-                    // Commit the player start move if position actually changed.
-                    if (doc.playerStart().has_value())
-                    {
-                        const PlayerStart& finalPs = *doc.playerStart();
-                        if (finalPs.position != m_psDragOrigin)
-                        {
-                            PlayerStart oldPs = finalPs;
-                            oldPs.position    = m_psDragOrigin;
-                            doc.pushCommand(std::make_unique<CmdSetPlayerStart>(
-                                doc,
-                                std::make_optional(oldPs),
-                                std::make_optional(finalPs)));
-                        }
-                    }
-                    m_psDragActive = false;
-                }
-                else if (m_entityDragActive)
-                {
-                    // Commit drag as a command if position actually changed.
-                    const glm::vec3 finalPos = doc.entities()[m_entityDragIdx].position;
-                    if (finalPos != m_entityDragOrigin)
-                        doc.pushCommand(std::make_unique<CmdMoveEntity>(
-                            doc, m_entityDragIdx, m_entityDragOrigin, finalPos));
-                    m_entityDragActive = false;
-                }
-                else if (m_lightDragActive)
-                {
-                    const auto& lights = doc.lights();
-                    if (m_lightDragIdx < lights.size())
-                    {
-                        const glm::vec3 finalPos = lights[m_lightDragIdx].position;
-                        if (finalPos != m_lightDragOrigin)
-                            doc.pushCommand(std::make_unique<CmdMoveLight>(
-                                doc, m_lightDragIdx, m_lightDragOrigin, finalPos));
-                    }
-                    m_lightDragActive = false;
-                }
-                else if (m_rectSelActive)
-                {
-                    m_rectSelActive = false;
-                    // Only dispatch if the drag was larger than a trivial nudge.
-                    constexpr float kMinDragMapSq = 0.1f;  // map units²
-                    const glm::vec2 d = m_rectSelCurrent - m_rectSelAnchor;
-                    if (glm::dot(d, d) > kMinDragMapSq)
-                    {
-                        const glm::vec2 minC {std::min(m_rectSelAnchor.x, m_rectSelCurrent.x),
-                                              std::min(m_rectSelAnchor.y, m_rectSelCurrent.y)};
-                        const glm::vec2 maxC {std::max(m_rectSelAnchor.x, m_rectSelCurrent.x),
-                                              std::max(m_rectSelAnchor.y, m_rectSelCurrent.y)};
-                        activeTool->onRectSelect(doc, minC, maxC);
-                    }
-                    // else: trivial click — onMouseDown already ran and cleared selection.
-                }
-                else
-                {
-                    activeTool->onMouseUp(doc, mouseMap.x, mouseMap.y, 0);
+                    PlayerStart oldPs = finalPs;
+                    oldPs.position    = m_psDragOrigin;
+                    doc.pushCommand(std::make_unique<CmdSetPlayerStart>(
+                        doc,
+                        std::make_optional(oldPs),
+                        std::make_optional(finalPs)));
                 }
             }
+            m_psDragActive = false;
+        }
+        else if (m_entityDragActive)
+        {
+            // Commit drag as a command if position actually changed.
+            const glm::vec3 finalPos = doc.entities()[m_entityDragIdx].position;
+            if (finalPos != m_entityDragOrigin)
+                doc.pushCommand(std::make_unique<CmdMoveEntity>(
+                    doc, m_entityDragIdx, m_entityDragOrigin, finalPos));
+            m_entityDragActive = false;
+        }
+        else if (m_lightDragActive)
+        {
+            const auto& lights = doc.lights();
+            if (m_lightDragIdx < lights.size())
+            {
+                const glm::vec3 finalPos = lights[m_lightDragIdx].position;
+                if (finalPos != m_lightDragOrigin)
+                    doc.pushCommand(std::make_unique<CmdMoveLight>(
+                        doc, m_lightDragIdx, m_lightDragOrigin, finalPos));
+            }
+            m_lightDragActive = false;
+        }
+        else if (m_rectSelActive)
+        {
+            m_rectSelActive = false;
+            // Only dispatch if the drag was larger than a trivial nudge.
+            constexpr float kMinDragMapSq = 0.1f;  // map units²
+            const glm::vec2 d = m_rectSelCurrent - m_rectSelAnchor;
+            if (glm::dot(d, d) > kMinDragMapSq && activeTool)
+            {
+                const glm::vec2 minC {std::min(m_rectSelAnchor.x, m_rectSelCurrent.x),
+                                      std::min(m_rectSelAnchor.y, m_rectSelCurrent.y)};
+                const glm::vec2 maxC {std::max(m_rectSelAnchor.x, m_rectSelCurrent.x),
+                                      std::max(m_rectSelAnchor.y, m_rectSelCurrent.y)};
+                activeTool->onRectSelect(doc, minC, maxC);
+            }
+            // else: trivial click — onMouseDown already ran and cleared selection.
+        }
+        else if (activeTool && m_pendingPlacement == PendingPlacement::None)
+        {
+            activeTool->onMouseUp(doc, mouseMap.x, mouseMap.y, 0);
         }
     }
 

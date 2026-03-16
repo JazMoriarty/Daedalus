@@ -132,14 +132,15 @@ void appendWallQuad(
     const float nx = -tz;
     const float nz =  tx;
 
-    // UV: u runs along wall length, v runs up the wall.
-    // Wall height.
+    // UV: u runs along wall length.
+    // v: Metal uses (0,0)=top-left, so v=0 = texture top, increasing downward.
+    // Assign v=0 to the ceiling (world top) so the texture appears right-side-up.
     const float height = yCeil - yFloor;
 
     const float u0 = 0.0f / uScale + uOff;
     const float u1 = len  / uScale + uOff;
-    const float v0 = 0.0f   / vScale + vOff;
-    const float v1 = height / vScale + vOff;
+    const float v0 = height / vScale + vOff;  // floor vertices  → texture bottom
+    const float v1 = 0.0f   / vScale + vOff;  // ceiling vertices → texture top
 
     // Apply UV rotation around the UV origin (0,0).
     // When uvRotation == 0, cosR=1 / sinR=0 and the expressions reduce to the
