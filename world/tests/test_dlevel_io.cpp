@@ -1,6 +1,7 @@
 // test_dlevel_io.cpp
 // Unit tests for .dlevel binary serialisation round-trip.
-// Covers v3 entity fields (script + audio) and v4 visual descriptor fields.
+// Covers v3 entity fields (script + audio), v4 visual descriptor fields,
+// and v5 extended particle fields.
 
 #include "daedalus/world/dlevel_io.h"
 
@@ -254,27 +255,39 @@ TEST_F(DlevelIOTest, EntityV4VisualRoundTrip)
         original.entities.push_back(e);
     }
 
-    // ── Entity 7: ParticleEmitter ─────────────────────────────────────────────
+    // ── Entity 7: ParticleEmitter ─────────────────────────────────
     {
         LevelEntity e;
-        e.name                  = "ParticleEmitterEnt";
-        e.position              = {8.0f, 0.0f, 0.0f};
-        e.visualType            = LevelEntityVisualType::ParticleEmitter;
-        e.assetPath             = "textures/spark.png";
-        e.tint                  = {1.0f, 0.8f, 0.4f, 1.0f};
-        e.particleEmissionRate  = 50.0f;
-        e.particleEmitDir       = {0.1f, 1.0f, 0.0f};
-        e.particleConeHalfAngle = 0.3f;
-        e.particleSpeedMin      = 2.0f;
-        e.particleSpeedMax      = 5.0f;
-        e.particleLifetimeMin   = 0.5f;
-        e.particleLifetimeMax   = 2.0f;
-        e.particleColorStart    = {1.0f, 0.9f, 0.5f, 1.0f};
-        e.particleColorEnd      = {0.8f, 0.2f, 0.0f, 0.0f};
-        e.particleSizeStart     = 0.2f;
-        e.particleSizeEnd       = 0.02f;
-        e.particleDrag          = 0.5f;
-        e.particleGravity       = {0.0f, -4.9f, 0.0f};
+        e.name                     = "ParticleEmitterEnt";
+        e.position                 = {8.0f, 0.0f, 0.0f};
+        e.visualType               = LevelEntityVisualType::ParticleEmitter;
+        e.assetPath                = "textures/spark.png";
+        e.tint                     = {1.0f, 0.8f, 0.4f, 1.0f};
+        e.particleEmissionRate     = 50.0f;
+        e.particleEmitDir          = {0.1f, 1.0f, 0.0f};
+        e.particleConeHalfAngle    = 0.3f;
+        e.particleSpeedMin         = 2.0f;
+        e.particleSpeedMax         = 5.0f;
+        e.particleLifetimeMin      = 0.5f;
+        e.particleLifetimeMax      = 2.0f;
+        e.particleColorStart       = {1.0f, 0.9f, 0.5f, 1.0f};
+        e.particleColorEnd         = {0.8f, 0.2f, 0.0f, 0.0f};
+        e.particleSizeStart        = 0.2f;
+        e.particleSizeEnd          = 0.02f;
+        e.particleDrag             = 0.5f;
+        e.particleGravity          = {0.0f, -4.9f, 0.0f};
+        // v5 extended particle fields
+        e.particleEmissiveScale    = 4.5f;
+        e.particleTurbulenceScale  = 1.2f;
+        e.particleVelocityStretch  = 0.15f;
+        e.particleSoftRange        = 0.4f;
+        e.particleEmissiveStart    = 2.0f;
+        e.particleEmissiveEnd      = 0.5f;
+        e.particleAtlasCols        = 4u;
+        e.particleAtlasRows        = 2u;
+        e.particleAtlasFrameRate   = 12.0f;
+        e.particleEmitsLight       = true;
+        e.particleShadowDensity    = 0.6f;
         original.entities.push_back(e);
     }
 
@@ -387,7 +400,7 @@ TEST_F(DlevelIOTest, EntityV4VisualRoundTrip)
         EXPECT_FLOAT_EQ(b.decalOpacity,   o.decalOpacity);
     }
 
-    // ── 7: ParticleEmitter ────────────────────────────────────────────────────
+    // ── 7: ParticleEmitter ────────────────────────────────────
     {
         const auto& o = original.entities[7];
         const auto& b = loaded.entities[7];
@@ -407,6 +420,18 @@ TEST_F(DlevelIOTest, EntityV4VisualRoundTrip)
         EXPECT_FLOAT_EQ(b.particleSizeEnd,       o.particleSizeEnd);
         EXPECT_FLOAT_EQ(b.particleDrag,          o.particleDrag);
         EXPECT_TRUE(eqV3(b.particleGravity, o.particleGravity));
+        // v5 extended particle fields
+        EXPECT_FLOAT_EQ(b.particleEmissiveScale,   o.particleEmissiveScale);
+        EXPECT_FLOAT_EQ(b.particleTurbulenceScale, o.particleTurbulenceScale);
+        EXPECT_FLOAT_EQ(b.particleVelocityStretch, o.particleVelocityStretch);
+        EXPECT_FLOAT_EQ(b.particleSoftRange,       o.particleSoftRange);
+        EXPECT_FLOAT_EQ(b.particleEmissiveStart,   o.particleEmissiveStart);
+        EXPECT_FLOAT_EQ(b.particleEmissiveEnd,     o.particleEmissiveEnd);
+        EXPECT_EQ(b.particleAtlasCols,             o.particleAtlasCols);
+        EXPECT_EQ(b.particleAtlasRows,             o.particleAtlasRows);
+        EXPECT_FLOAT_EQ(b.particleAtlasFrameRate,  o.particleAtlasFrameRate);
+        EXPECT_EQ(b.particleEmitsLight,            o.particleEmitsLight);
+        EXPECT_FLOAT_EQ(b.particleShadowDensity,   o.particleShadowDensity);
     }
 
     // ── 8: None (visual-less) ─────────────────────────────────────────────────

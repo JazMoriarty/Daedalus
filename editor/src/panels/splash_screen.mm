@@ -92,11 +92,11 @@ SplashScreen::~SplashScreen()
 
 // ─── SplashScreen::init ───────────────────────────────────────────────────────
 
-void SplashScreen::init(void* mtlDevice, const std::string& exeDir)
+void SplashScreen::init(void* mtlDevice, const std::string& resDir)
 {
     // ── Load splash image ─────────────────────────────────────────────────────
     {
-        const std::string path = exeDir + "editor_assets/splash.png";
+        const std::string path = resDir + "/editor_assets/splash.png";
         int channels = 0;
         stbi_uc* px  = stbi_load(path.c_str(), &m_texW, &m_texH, &channels, 4);
 

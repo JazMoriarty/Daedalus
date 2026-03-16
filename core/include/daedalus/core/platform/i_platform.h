@@ -66,6 +66,12 @@ public:
     /// Returns the directory that contains the running executable.
     [[nodiscard]] virtual std::string getExecutableDir() const = 0;
 
+    /// Returns the directory where runtime resources (assets, shaders, etc.) are located.
+    /// For standalone executables: same as getExecutableDir().
+    /// For macOS app bundles: Contents/MacOS/ (where executable and resources are copied).
+    /// This makes resource loading agnostic to launch mode.
+    [[nodiscard]] virtual std::string getResourceDir() const = 0;
+
 protected:
     IPlatform() = default;
 };

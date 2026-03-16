@@ -1,13 +1,13 @@
 // dlevel_binary.cpp
-// Binary .dlevel v4 serialisation / deserialisation.
+// Binary .dlevel v5 serialisation / deserialisation.
 //
-// ─── Format specification (version 4) ─────────────────────────────────────────────────────────────────────────────────────────────────────────────
+// ─── Format specification (version 5) ─────────────────────────────────────────────────────────────────────────────────────────────────────────────
 //
 // All multi-byte integers are little-endian.
 //
 // Header (28 bytes):
 //   [4]  magic          u32 = 0x4C564C44  ('D','L','V','L' as little-endian)
-//   [4]  version        u32 = 4  (exact match required)
+//   [4]  version        u32 = 5  (exact match required)
 //   [4]  sectorCount    u32
 //   [4]  textureCount   u32
 //   [4]  lightCount     u32
@@ -134,6 +134,19 @@
 //   [4]  particleSizeEnd        f32
 //   [4]  particleDrag           f32
 //   [12] particleGravity        f32[3]
+//
+//   --- Particle emitter extended params (v5) ---
+//   [4]  particleEmissiveScale  f32
+//   [4]  particleTurbulenceScale f32
+//   [4]  particleVelocityStretch f32
+//   [4]  particleSoftRange       f32
+//   [4]  particleEmissiveStart   f32
+//   [4]  particleEmissiveEnd     f32
+//   [4]  particleAtlasCols       u32
+//   [4]  particleAtlasRows       u32
+//   [4]  particleAtlasFrameRate  f32
+//   [4]  particleEmitsLight      u32 (0 = false, 1 = true)
+//   [4]  particleShadowDensity   f32
 
 #include "daedalus/world/dlevel_io.h"
 
@@ -147,7 +160,7 @@ namespace
 {
 
 constexpr u32 k_MAGIC   = 0x4C564C44u;  // 'D','L','V','L' as little-endian u32
-constexpr u32 k_VERSION = 4u;
+constexpr u32 k_VERSION = 5u;
 
 // ─── Write helpers ────────────────────────────────────────────────────────────
 
@@ -384,6 +397,18 @@ std::expected<void, DlevelError> saveDlevel(const LevelPackData&         pack,
         w.write(ent.particleSizeEnd);
         w.write(ent.particleDrag);
         w.writeVec3(ent.particleGravity);
+        // v5 extended particle params
+        w.write(ent.particleEmissiveScale);
+        w.write(ent.particleTurbulenceScale);
+        w.write(ent.particleVelocityStretch);
+        w.write(ent.particleSoftRange);
+        w.write(ent.particleEmissiveStart);
+        w.write(ent.particleEmissiveEnd);
+        w.write(ent.particleAtlasCols);
+        w.write(ent.particleAtlasRows);
+        w.write(ent.particleAtlasFrameRate);
+        w.write(static_cast<u32>(ent.particleEmitsLight ? 1u : 0u));
+        w.write(ent.particleShadowDensity);
     }
 
     if (!ofs) { return std::unexpected(DlevelError::WriteError); }
@@ -620,6 +645,21 @@ std::expected<LevelPackData, DlevelError> loadDlevel(const std::filesystem::path
             return std::unexpected(DlevelError::ParseError);
         if (!r.readVec3(ent.particleGravity))
             return std::unexpected(DlevelError::ParseError);
+        // v5 extended particle params
+        if (!r.read(ent.particleEmissiveScale)   ||
+            !r.read(ent.particleTurbulenceScale) ||
+            !r.read(ent.particleVelocityStretch) ||
+            !r.read(ent.particleSoftRange)       ||
+            !r.read(ent.particleEmissiveStart)   ||
+            !r.read(ent.particleEmissiveEnd)     ||
+            !r.read(ent.particleAtlasCols)       ||
+            !r.read(ent.particleAtlasRows)       ||
+            !r.read(ent.particleAtlasFrameRate))
+            return std::unexpected(DlevelError::ParseError);
+        u32 emitsLightRaw = 0;
+        if (!r.read(emitsLightRaw) || !r.read(ent.particleShadowDensity))
+            return std::unexpected(DlevelError::ParseError);
+        ent.particleEmitsLight = (emitsLightRaw != 0u);
     }
 
     return pack;

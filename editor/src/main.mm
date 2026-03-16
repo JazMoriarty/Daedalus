@@ -15,6 +15,7 @@
 #include "imgui_impl_sdl3.h"
 #include "imgui_impl_metal.h"
 
+#include "daedalus/core/create_platform.h"
 #include "daedalus/render/create_render_device.h"
 #include "daedalus/render/i_asset_loader.h"
 #include "daedalus/render/rhi/i_render_device.h"
@@ -71,12 +72,14 @@
 using namespace daedalus;
 using namespace daedalus::editor;
 
-// ─── Helpers ─────────────────────────────────────────────────────────────────
+// ─── Helpers ───────────────────────────────────────────────────────────────────
+// Returns the directory containing runtime resources (assets, shaders, etc.).
+// This works for both standalone executables and app bundles.
 
-static std::string executableDir()
+static std::string resourceDir()
 {
-    const char* base = SDL_GetBasePath();
-    return base ? base : ".";
+    auto platform = createPlatform();
+    return platform ? platform->getResourceDir() : ".";
 }
 
 // ─── Saved window geometry ────────────────────────────────────────────────────
@@ -239,7 +242,7 @@ static void drawMenuBar(EditMapDocument& doc,
 
             if (ImGui::MenuItem("Open\xe2\x80\xa6", "Cmd+O"))
             {
-                const std::string mapsDir = executableDir() + "assets/maps";
+                const std::string mapsDir = resourceDir() + "/assets/maps";
                 spawnFileDialog(&dlgState,
                     "POSIX path of (choose file default location (POSIX file \"" + mapsDir + "\"))");
                 dlgState.purpose = FileDialogPurpose::OpenMap;
@@ -263,7 +266,7 @@ static void drawMenuBar(EditMapDocument& doc,
                 const std::string defaultName = doc.filePath().empty()
                     ? "untitled.dmap"
                     : doc.filePath().filename().string();
-                const std::string mapsDir = executableDir() + "assets/maps";
+                const std::string mapsDir = resourceDir() + "/assets/maps";
                 spawnFileDialog(&dlgState,
                     "POSIX path of (choose file name default name \"" + defaultName +
                     "\" default location (POSIX file \"" + mapsDir + "\"))");
@@ -483,12 +486,12 @@ int main(int /*argc*/, char* /*argv*/[])
     metalLayer.maximumDrawableCount = 2;
     metalLayer.displaySyncEnabled   = NO;
 
-    // ── Working directory ─────────────────────────────────────────────────────
+    // ── Working directory ─────────────────────────────────────────────
     // Ensure relative paths (asset paths, INI, shaders) resolve from the
-    // executable's directory regardless of how the editor was launched.
+    // resource directory regardless of how the editor was launched.
     {
         std::error_code ec;
-        std::filesystem::current_path(std::filesystem::path(executableDir()), ec);
+        std::filesystem::current_path(std::filesystem::path(resourceDir()), ec);
         // Non-fatal: if this fails, relative paths may not resolve correctly.
     }
 
@@ -555,14 +558,14 @@ int main(int /*argc*/, char* /*argv*/[])
     ImGui_ImplSDL3_InitForMetal(window);
     ImGui_ImplMetal_Init(mtlDevice);
 
-    // ── Splash screen ────────────────────────────────────────────────────────────────
+    // ── Splash screen ──────────────────────────────────────────────────────────────────────────
     // Must be initialised AFTER the ImGui context exists and the Metal device
     // is configured — stb_image needs the texture pixel format to be set.
     SplashScreen splash;
-    splash.init(device->nativeDevice(), executableDir());
+    splash.init(device->nativeDevice(), resourceDir());
 
     // ── Editor state
-    const std::string shaderLibPath = executableDir() + "/daedalus_shaders.metallib";
+    const std::string shaderLibPath = resourceDir() + "/daedalus_shaders.metallib";
 
     EditMapDocument   doc;
     SelectTool        selectTool;
@@ -596,18 +599,15 @@ int main(int /*argc*/, char* /*argv*/[])
     // ── Model catalog: scan once at startup from the standard models directory.
     // ── Vox catalog: scan once at startup from assets/voxels/.
     // scan() silently returns if the root doesn't exist.
-    // Use root.parent_path().parent_path() as the base so we get a clean
-    // path without a trailing slash (SDL_GetBasePath returns one on macOS,
-    // which confuses std::filesystem::relative).
     {
         const std::filesystem::path modelRoot =
-            std::filesystem::path(executableDir()) / "assets" / "models";
+            std::filesystem::path(resourceDir()) / "assets" / "models";
         modelCatalog.setRoot(modelRoot, modelRoot.parent_path().parent_path());
         modelCatalog.scan();
     }
     {
         const std::filesystem::path voxRoot =
-            std::filesystem::path(executableDir()) / "assets" / "voxels";
+            std::filesystem::path(resourceDir()) / "assets" / "voxels";
         voxCatalog.setRoot(voxRoot, voxRoot.parent_path().parent_path());
         voxCatalog.setExtensions({".vox"});
         voxCatalog.scan();
@@ -987,8 +987,18 @@ int main(int /*argc*/, char* /*argv*/[])
                                 ent.particleColorEnd      = ed.particle.colorEnd;
                                 ent.particleSizeStart     = ed.particle.sizeStart;
                                 ent.particleSizeEnd       = ed.particle.sizeEnd;
-                                ent.particleDrag          = ed.particle.drag;
-                                ent.particleGravity       = ed.particle.gravity;
+                                ent.particleDrag             = ed.particle.drag;
+                                ent.particleGravity          = ed.particle.gravity;
+                                // Extended v5 particle fields
+                                ent.particleSoftRange        = ed.particle.softRange;
+                                ent.particleEmissiveStart    = ed.particle.emissiveStart;
+                                ent.particleEmissiveEnd      = ed.particle.emissiveEnd;
+                                ent.particleEmitsLight       = ed.particle.emitsLight;
+                                ent.particleShadowDensity    = ed.particle.shadowDensity;
+                                // Atlas grid from AnimSettings (shared with billboard anim)
+                                ent.particleAtlasCols        = ed.anim.cols;
+                                ent.particleAtlasRows        = ed.anim.rows;
+                                ent.particleAtlasFrameRate   = ed.anim.frameRate;
 
                                 pack.entities.push_back(std::move(ent));
                             }
@@ -1002,18 +1012,33 @@ int main(int /*argc*/, char* /*argv*/[])
                             }
                             else
                             {
-                                // DaedalusApp lives in ../app/ relative to this
-                                // editor executable (both are in the build tree).
-                                const std::filesystem::path appPath =
-                                    (std::filesystem::path(executableDir())
-                                     / ".." / "app" / "DaedalusApp")
+                                // Locate DaedalusApp: try app bundle first (release),
+                                // then standalone executable (debug).
+                                std::filesystem::path resDir = resourceDir();
+                                std::filesystem::path appPath;
+                                
+                                // From app bundle: navigate to sibling app bundle
+                                // (build/app/DaedalusApp.app/Contents/MacOS/DaedalusApp)
+                                std::filesystem::path bundlePath =
+                                    (resDir / ".." / ".." / ".." / ".." / "app" 
+                                     / "DaedalusApp.app" / "Contents" / "MacOS" / "DaedalusApp")
                                     .lexically_normal();
+                                
+                                // From standalone: ../app/DaedalusApp
+                                std::filesystem::path standalonePath =
+                                    (resDir / ".." / "app" / "DaedalusApp")
+                                    .lexically_normal();
+                                
+                                if (std::filesystem::exists(bundlePath))
+                                    appPath = bundlePath;
+                                else if (std::filesystem::exists(standalonePath))
+                                    appPath = standalonePath;
 
-                                if (!std::filesystem::exists(appPath))
+                                if (appPath.empty())
                                 {
                                         doc.log(std::format(
-                                            "\\ — Test Map: DaedalusApp not found at '{}'.",
-                                        appPath.string()));
+                                            "\\ — Test Map: DaedalusApp not found at '{}' or '{}'.",
+                                        bundlePath.string(), standalonePath.string()));
                                 }
                                 else
                                 {
@@ -1351,9 +1376,9 @@ int main(int /*argc*/, char* /*argv*/[])
                 else
                 {
                     // No persisted root — default to the bundled textures folder
-                    // shipped next to the binary.  The user can always override
+                    // shipped next to the resource directory.  The user can always override
                     // this via File > Set Asset Root.
-                    const std::string def = executableDir() + "assets/textures";
+                    const std::string def = resourceDir() + "/assets/textures";
                     if (std::filesystem::is_directory(def))
                         doc.setAssetRoot(def);
                 }

@@ -26,6 +26,8 @@ public:
     [[nodiscard]] f64 getTimeSeconds() const noexcept override;
 
     [[nodiscard]] std::string getExecutableDir() const override;
+
+    [[nodiscard]] std::string getResourceDir() const override;
 };
 
 } // namespace daedalus

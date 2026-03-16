@@ -71,6 +71,14 @@ struct ParticleEmitterComponent
     /// Set > 1 for fire/sparks that should contribute to bloom.
     f32 emissiveScale = 3.0f;
 
+    /// Per-particle emissive intensity at birth.
+    /// Controls self-illumination: 0 = fully scene-lit, 1+ = additive/emissive.
+    /// Interpolated toward emissiveEnd over the particle's lifetime by the GPU simulate kernel.
+    f32 emissiveStart = 1.0f;
+
+    /// Per-particle emissive intensity at death.
+    f32 emissiveEnd = 0.0f;
+
     // ── Physics ───────────────────────────────────────────────────────────────
 
     glm::vec3 gravity          = glm::vec3(0.0f, -4.0f, 0.0f);  ///< Gravity acceleration
@@ -91,6 +99,16 @@ struct ParticleEmitterComponent
     /// Depth fade range: alpha *= saturate((sceneDepth - particleDepth) / softRange).
     /// 0.0 = hard intersection, 0.3+ = soft fade.
     f32 softRange = 0.3f;
+
+    // ── Dynamic lighting ──────────────────────────────────────────────────────
+
+    /// When true, spawns a dynamic point light at the emitter origin.
+    /// Light color and intensity are derived from colorStart and emissiveScale.
+    bool emitsLight = false;
+
+    /// RT mode shadow volume density: 0.0 = no shadow volume, higher = more opaque.
+    /// Used to render Beer-Lambert absorption for smoke/fog particles in path tracer.
+    f32 shadowDensity = 0.0f;
 
     // ── Internal state ────────────────────────────────────────────────────────
 

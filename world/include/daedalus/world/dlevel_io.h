@@ -166,19 +166,35 @@ struct LevelEntity
     float       decalOpacity   = 1.0f;    ///< Global fade multiplier.
 
     // Particle emitter params
-    float     particleEmissionRate  = 10.0f;
-    glm::vec3 particleEmitDir       = glm::vec3(0.0f, 1.0f, 0.0f);
-    float     particleConeHalfAngle = glm::pi<float>() / 12.0f;  ///< 15 degrees
-    float     particleSpeedMin      = 1.0f;
-    float     particleSpeedMax      = 3.0f;
-    float     particleLifetimeMin   = 1.0f;
-    float     particleLifetimeMax   = 3.0f;
-    glm::vec4 particleColorStart    = glm::vec4(1.0f);
-    glm::vec4 particleColorEnd      = glm::vec4(1.0f, 1.0f, 1.0f, 0.0f);
-    float     particleSizeStart     = 0.1f;
-    float     particleSizeEnd       = 0.05f;
-    float     particleDrag          = 0.0f;
-    glm::vec3 particleGravity       = glm::vec3(0.0f, -9.81f, 0.0f);
+    float     particleEmissionRate   = 10.0f;
+    glm::vec3 particleEmitDir        = glm::vec3(0.0f, 1.0f, 0.0f);
+    float     particleConeHalfAngle  = glm::pi<float>() / 12.0f;  ///< 15 degrees
+    float     particleSpeedMin       = 1.0f;
+    float     particleSpeedMax       = 3.0f;
+    float     particleLifetimeMin    = 1.0f;
+    float     particleLifetimeMax    = 3.0f;
+    glm::vec4 particleColorStart     = glm::vec4(1.0f);
+    glm::vec4 particleColorEnd       = glm::vec4(1.0f, 1.0f, 1.0f, 0.0f);
+    float     particleSizeStart      = 0.1f;
+    float     particleSizeEnd        = 0.05f;
+    float     particleDrag           = 0.0f;
+    glm::vec3 particleGravity        = glm::vec3(0.0f, -9.81f, 0.0f);
+    
+    // Particle emitter extended params (v5)
+    // Defaults match the editor's entity_gpu_cache hardcoded values so that
+    // unexorted fields (not in ParticleEmitterParams) behave identically to
+    // the editor's 3D viewport.
+    float     particleEmissiveScale   = 1.0f;   ///< HDR emission multiplier (editor hardcodes 1.0)
+    float     particleTurbulenceScale  = 0.0f;  ///< Curl-noise strength (editor hardcodes 0.0)
+    float     particleVelocityStretch  = 0.0f;  ///< Quad stretch factor along velocity
+    float     particleSoftRange        = 0.0f;  ///< Depth fade range (matches editor ParticleEmitterParams default)
+    float     particleEmissiveStart    = 1.0f;  ///< Birth emissive multiplier (matches editor ParticleEmitterParams default)
+    float     particleEmissiveEnd      = 0.0f;  ///< Death emissive multiplier
+    u32       particleAtlasCols        = 1;     ///< Sprite sheet column count
+    u32       particleAtlasRows        = 1;     ///< Sprite sheet row count
+    float     particleAtlasFrameRate   = 0.0f;  ///< Atlas animation FPS (0 = static)
+    bool      particleEmitsLight       = false; ///< Spawn dynamic point light at emitter origin
+    float     particleShadowDensity    = 0.0f;  ///< RT shadow volume density (0 = no shadow)
 };
 
 // ─── LevelTexture ─────────────────────────────────────────────────────────────

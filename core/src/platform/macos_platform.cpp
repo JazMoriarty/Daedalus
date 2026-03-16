@@ -90,4 +90,12 @@ std::string MacosPlatform::getExecutableDir() const
     return std::filesystem::path(resolved).parent_path().string();
 }
 
+std::string MacosPlatform::getResourceDir() const
+{
+    // For both standalone and app bundles, resources are copied to the same
+    // directory as the executable (Contents/MacOS/ for bundles, build/editor/ or
+    // build/app/ for standalone).
+    return getExecutableDir();
+}
+
 } // namespace daedalus

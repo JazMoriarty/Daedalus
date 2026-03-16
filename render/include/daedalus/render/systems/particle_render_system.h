@@ -87,7 +87,36 @@ inline void particleRenderSystem(daedalus::World& world,
             c.atlasFrameRate  = emitter.atlasFrameRate;
             c.velocityStretch = emitter.velocityStretch;
             c.softRange       = emitter.softRange;
+            c.emissiveStart   = emitter.emissiveStart;
+            c.emissiveEnd     = emitter.emissiveEnd;
             c.pad2 = 0.0f;
+
+            // ─── Dynamic point light emission ───────────────────────────────────
+            if (emitter.emitsLight)
+            {
+                render::PointLight pl;
+                pl.position  = transform.position;
+                pl.color     = glm::vec3(emitter.colorStart);
+                pl.radius    = 5.0f;
+                pl.intensity = emitter.emissiveStart * 10.0f;
+                scene.pointLights.push_back(pl);
+            }
+
+            // ─── Shadow volume (RT mode) ────────────────────────────────────────
+            if (emitter.shadowDensity > 0.0f)
+            {
+                // Compute AABB that encompasses all possible particle positions:
+                // particles can travel up to speedMax * lifetimeMax from emitter,
+                // and have radius sizeStart.
+                const f32 extent = emitter.speedMax * emitter.lifetimeMax
+                                 + emitter.sizeStart * 0.5f;
+                draw.hasShadowVolume  = true;
+                draw.shadowVolumeMin  = transform.position - glm::vec3(extent);
+                draw.shadowVolumeMax  = transform.position + glm::vec3(extent);
+                draw.shadowDensity    = emitter.shadowDensity;
+                draw.emissiveColor    = glm::vec3(emitter.colorStart);
+                draw.emissiveIntensity = emitter.emissiveScale;
+            }
 
             scene.particleEmitters.push_back(draw);
         });

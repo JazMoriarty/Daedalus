@@ -1,4 +1,4 @@
-add_executable(DaedalusEdit)
+add_executable(DaedalusEdit MACOSX_BUNDLE)
 
 target_sources(DaedalusEdit PRIVATE
     src/main.mm
@@ -93,23 +93,56 @@ if(DAEDALUS_PLATFORM_MACOS)
         ${COREGRAPHICS_FRAMEWORK}
     )
 
+    # Configure app bundle properties
+    set_target_properties(DaedalusEdit PROPERTIES
+        MACOSX_BUNDLE_INFO_PLIST "${CMAKE_SOURCE_DIR}/resources/DaedalusEdit-Info.plist"
+        MACOSX_BUNDLE_BUNDLE_NAME "Daedalus Edit"
+        MACOSX_BUNDLE_GUI_IDENTIFIER "com.daedalus.editor"
+        MACOSX_BUNDLE_BUNDLE_VERSION "0.1.0"
+        MACOSX_BUNDLE_SHORT_VERSION_STRING "0.1.0"
+        MACOSX_BUNDLE_ICON_FILE "EditorIcon.icns"
+    )
+
+    # Build app bundle in Release mode with full optimizations (standalone stays Debug)
+    # The app bundle executable inside .app is optimized; the loose executable is for debugging
+    target_compile_options(DaedalusEdit PRIVATE
+        $<$<CONFIG:Debug>:
+            $<$<COMPILE_LANGUAGE:CXX,OBJCXX>:-O3 -DNDEBUG -flto=thin>
+        >
+    )
+    target_link_options(DaedalusEdit PRIVATE
+        $<$<CONFIG:Debug>:-flto=thin -Wl,-dead_strip>
+    )
+
+    # Copy app icon to Resources
+    add_custom_command(TARGET DaedalusEdit POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy
+                "${CMAKE_SOURCE_DIR}/resources/icons/EditorIcon.icns"
+                "$<TARGET_BUNDLE_CONTENT_DIR:DaedalusEdit>/Resources/EditorIcon.icns"
+        COMMENT "Copying editor icon to app bundle"
+    )
+
     # Enable ARC for all Obj-C++ source files.
     set_source_files_properties(src/main.mm PROPERTIES COMPILE_FLAGS "-fobjc-arc")
     set_source_files_properties(src/panels/splash_screen.mm PROPERTIES COMPILE_FLAGS "-fobjc-arc")
 
-    # Copy the .metallib next to the editor executable (same pattern as app/).
-    set(METALLIB_EDITOR_COPY "${CMAKE_BINARY_DIR}/editor/daedalus_shaders.metallib")
-    add_custom_command(
-        OUTPUT  "${METALLIB_EDITOR_COPY}"
+    # Copy the .metallib into the app bundle next to the executable
+    add_custom_command(TARGET DaedalusEdit POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
                 "${DAEDALUS_METALLIB_OUTPUT}"
-                "${METALLIB_EDITOR_COPY}"
+                "$<TARGET_FILE_DIR:DaedalusEdit>/daedalus_shaders.metallib"
         DEPENDS "${DAEDALUS_METALLIB_OUTPUT}"
-        COMMENT "Copying daedalus_shaders.metallib to editor output directory"
+        COMMENT "Copying daedalus_shaders.metallib to editor app bundle"
     )
-    add_custom_target(CopyDaedalusShadersEdit ALL DEPENDS "${METALLIB_EDITOR_COPY}")
-    add_dependencies(CopyDaedalusShadersEdit DaedalusShaders)
-    add_dependencies(DaedalusEdit CopyDaedalusShadersEdit)
+
+    # Also copy to standalone executable directory for debugging
+    add_custom_command(TARGET DaedalusEdit POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${DAEDALUS_METALLIB_OUTPUT}"
+                "${CMAKE_CURRENT_BINARY_DIR}/daedalus_shaders.metallib"
+        DEPENDS "${DAEDALUS_METALLIB_OUTPUT}"
+        COMMENT "Copying daedalus_shaders.metallib to standalone editor directory"
+    )
 
     # Copy shared assets directory next to the editor executable.
     add_custom_command(TARGET DaedalusEdit POST_BUILD
@@ -125,6 +158,21 @@ if(DAEDALUS_PLATFORM_MACOS)
                 "${CMAKE_CURRENT_SOURCE_DIR}/assets"
                 "$<TARGET_FILE_DIR:DaedalusEdit>/editor_assets"
         COMMENT "Copying editor-private assets to editor binary dir"
+    )
+
+    # Also copy assets to standalone executable directory for debugging
+    add_custom_command(TARGET DaedalusEdit POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+                "${CMAKE_SOURCE_DIR}/assets"
+                "${CMAKE_CURRENT_BINARY_DIR}/assets"
+        COMMENT "Copying shared assets to standalone editor directory"
+    )
+
+    add_custom_command(TARGET DaedalusEdit POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+                "${CMAKE_CURRENT_SOURCE_DIR}/assets"
+                "${CMAKE_CURRENT_BINARY_DIR}/editor_assets"
+        COMMENT "Copying editor-private assets to standalone editor directory"
     )
 endif()
 

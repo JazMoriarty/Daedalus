@@ -831,21 +831,32 @@ int main(int argc, char* argv[])
                         render::ParticlePool* pool = dlEntityPools.back().get();
 
                         render::ParticleEmitterComponent pec;
-                        pec.pool            = pool;
-                        pec.atlasTexture    = atlas;
-                        pec.emissionRate    = ent.particleEmissionRate;
-                        pec.emitDir         = ent.particleEmitDir;
-                        pec.coneHalfAngle   = ent.particleConeHalfAngle;
-                        pec.speedMin        = ent.particleSpeedMin;
-                        pec.speedMax        = ent.particleSpeedMax;
-                        pec.lifetimeMin     = ent.particleLifetimeMin;
-                        pec.lifetimeMax     = ent.particleLifetimeMax;
-                        pec.colorStart      = ent.particleColorStart;
-                        pec.colorEnd        = ent.particleColorEnd;
-                        pec.sizeStart       = ent.particleSizeStart;
-                        pec.sizeEnd         = ent.particleSizeEnd;
-                        pec.drag            = ent.particleDrag;
-                        pec.gravity         = ent.particleGravity;
+                        pec.pool              = pool;
+                        pec.atlasTexture      = atlas;
+                        pec.emissionRate      = ent.particleEmissionRate;
+                        pec.emitDir           = ent.particleEmitDir;
+                        pec.coneHalfAngle     = ent.particleConeHalfAngle;
+                        pec.speedMin          = ent.particleSpeedMin;
+                        pec.speedMax          = ent.particleSpeedMax;
+                        pec.lifetimeMin       = ent.particleLifetimeMin;
+                        pec.lifetimeMax       = ent.particleLifetimeMax;
+                        pec.colorStart        = ent.particleColorStart;
+                        pec.colorEnd          = ent.particleColorEnd;
+                        pec.sizeStart         = ent.particleSizeStart;
+                        pec.sizeEnd           = ent.particleSizeEnd;
+                        pec.drag              = ent.particleDrag;
+                        pec.gravity           = ent.particleGravity;
+                        pec.emissiveScale     = ent.particleEmissiveScale;
+                        pec.emissiveStart     = ent.particleEmissiveStart;
+                        pec.emissiveEnd       = ent.particleEmissiveEnd;
+                        pec.turbulenceScale   = ent.particleTurbulenceScale;
+                        pec.velocityStretch   = ent.particleVelocityStretch;
+                        pec.softRange         = ent.particleSoftRange;
+                        pec.atlasGridSize     = glm::vec2(static_cast<float>(ent.particleAtlasCols),
+                                                          static_cast<float>(ent.particleAtlasRows));
+                        pec.atlasFrameRate    = ent.particleAtlasFrameRate;
+                        pec.emitsLight        = ent.particleEmitsLight;
+                        pec.shadowDensity     = ent.particleShadowDensity;
                         dlWorld.addComponent(entityId, std::move(pec));
                         break;
                     }

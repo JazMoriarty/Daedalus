@@ -25,8 +25,8 @@ public:
 
     /// Load the splash image and gather hardware/OS info.
     /// @param mtlDevice  id<MTLDevice> cast to void* (avoids Obj-C in header).
-    /// @param exeDir     Path returned by SDL_GetBasePath() (trailing slash).
-    void init(void* mtlDevice, const std::string& exeDir);
+    /// @param resDir     Resource directory path (works for standalone + app bundles).
+    void init(void* mtlDevice, const std::string& resDir);
 
     /// Returns true while the modal is still on screen.
     [[nodiscard]] bool isVisible() const noexcept { return m_visible; }
