@@ -168,10 +168,18 @@ fragment float4 decal_rt_composite_frag(
                                 address::clamp_to_edge);
     float depth = gDepthCopy.sample(depthSamp, screenUV).r;
 
-    // Sky pixels have no surface to project onto.
-    if (depth >= 0.9999f) { discard_fragment(); }
+    // RT path stores linear camera distance. Sky is written as far-plane depth.
+    const float farLinearDepth = frame.proj[3][2] / (1.0 - frame.proj[2][2]);
+    if (depth >= farLinearDepth * 0.999) { discard_fragment(); }
 
-    float3 worldPos  = reconstruct_world_pos(depth, screenUV, frame.invViewProj);
+    // RT path stores linear camera distance in gDepthCopy; reconstruct world
+    // position from camera ray + linear depth instead of treating depth as NDC.
+    float2 ndc      = uv_to_ndc(screenUV);
+    float4 farClip  = frame.invViewProj * float4(ndc, 1.0, 1.0);
+    float3 farPos   = farClip.xyz / farClip.w;
+    float3 camPos   = frame.cameraPos.xyz;
+    float3 rayDir   = normalize(farPos - camPos);
+    float3 worldPos = camPos + rayDir * depth;
     float4 localPos4 = decal.invModel * float4(worldPos, 1.0);
     float3 local     = localPos4.xyz / localPos4.w;
 

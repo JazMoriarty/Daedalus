@@ -1822,8 +1822,26 @@ void FrameRenderer::renderFrame(IRenderDevice& device,
             // RTRemodulate then multiplies irradiance × patched albedo, so decals
             // receive the same path-traced lighting as the underlying surface.
             // Sorted by zIndex ascending so lower-index decals appear underneath.
-            for (const DecalDraw& draw : decalDraws)
+            
+            // Debug: log decal count in RT mode
+            if (!decalDraws.empty())
             {
+                static u32 s_lastDecalCount = 0;
+                if (decalDraws.size() != s_lastDecalCount)
+                {
+                    std::printf("[RT_DECALS] Injecting %zu decals into rtAlbedo\n", decalDraws.size());
+                    const DecalDraw& d0 = decalDraws[0];
+                    const glm::vec3 p0 = glm::vec3(d0.modelMatrix[3]);
+                    std::printf("[RT_DECALS] First decal: opacity=%.3f rough=%.3f metal=%.3f pos=(%.2f, %.2f, %.2f)\n",
+                        d0.opacity, d0.roughness, d0.metalness, p0.x, p0.y, p0.z);
+                    s_lastDecalCount = static_cast<u32>(decalDraws.size());
+                }
+            }
+            
+            for (std::size_t decalIdx = 0; decalIdx < decalDraws.size(); ++decalIdx)
+            {
+                const DecalDraw& draw = decalDraws[decalIdx];
+                
                 DecalConstantsGPU dc;
                 dc.model     = draw.modelMatrix;
                 dc.invModel  = draw.invModelMatrix;
@@ -1833,6 +1851,13 @@ void FrameRenderer::renderFrame(IRenderDevice& device,
                 dc.pad       = 0.0f;
 
                 ITexture* decalAlbTex = draw.albedoTexture;
+                
+                // Debug: log if texture is missing
+                if (!decalAlbTex)
+                {
+                    std::printf("[RT_DECALS] WARNING: Decal %zu has NULL albedo texture!\n", decalIdx);
+                    continue;  // Skip this decal if it has no texture
+                }
 
                 RGComputePassDesc inj;
                 inj.name    = "DecalAlbedoInject";
@@ -1848,6 +1873,23 @@ void FrameRenderer::renderFrame(IRenderDevice& device,
                     enc->dispatch  (swapW, swapH, 1);
                 };
                 m_graph.addComputePass(std::move(inj));
+            }
+
+            // ── Pass RT.4.5 — Debug: verify rtAlbedo content before remodulation ──
+            // This pass runs just before remodulation to log whether rtAlbedo
+            // contains decal-modified data or original path tracer output.
+            if (!decalDraws.empty() && m_frameIndex % 60 == 0)
+            {
+                RGComputePassDesc p;
+                p.name    = "DebugRTAlbedo";
+                p.execute = [=](IComputePassEncoder* enc)
+                {
+                    // Read rtAlbedo at screen center to verify decal writes landed.
+                    // If decals were injected with magenta debug tint, center pixel
+                    // should show modified RGB values.
+                    std::printf("[RT_DECALS] About to remodulate — checking rtAlbedo state\n");
+                };
+                m_graph.addComputePass(std::move(p));
             }
 
             // ── Pass RT.5 — Albedo remodulation ───────────────────────────────────

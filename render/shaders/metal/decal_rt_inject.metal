@@ -36,13 +36,22 @@ kernel void decal_albedo_inject_main(
     // ── Sample depth ──────────────────────────────────────────────────────────
     float depth = depthTex.read(gid).r;
 
-    // Sky pixels (depth == 1.0) have no surface to project onto; skip.
-    if (depth >= 0.9999f) { return; }
+    // RT path stores linear camera distance.  Sky pixels are written at the far
+    // plane distance (see path_trace.metal), not at depth==1.0.
+    const float farLinearDepth = frame.proj[3][2] / (1.0f - frame.proj[2][2]);
+    if (depth >= farLinearDepth * 0.999f) { return; }
 
     // ── Reconstruct world-space surface position ──────────────────────────────
-    // Convert pixel centre to [0,1] UV, then reconstruct via invViewProj.
+    // RT path writes *linear camera distance* into gDepthCopy (not NDC depth).
+    // Reconstruct by building the camera ray from invViewProj and advancing by
+    // that linear distance.
     float2 screenUV = (float2(gid) + 0.5f) / float2(dims);
-    float3 worldPos = reconstruct_world_pos(depth, screenUV, frame.invViewProj);
+    float2 ndc      = uv_to_ndc(screenUV);
+    float4 farClip  = frame.invViewProj * float4(ndc, 1.0f, 1.0f);
+    float3 farPos   = farClip.xyz / farClip.w;
+    float3 camPos   = frame.cameraPos.xyz;
+    float3 rayDir   = normalize(farPos - camPos);
+    float3 worldPos = camPos + rayDir * depth;
 
     // ── OBB test: transform to decal local space ──────────────────────────────
     float4 localPos4 = decal.invModel * float4(worldPos, 1.0f);
@@ -68,5 +77,6 @@ kernel void decal_albedo_inject_main(
     // Preserves the original surface albedo in the dest alpha channel.
     float4 existing = rtAlbedo.read(gid);
     float3 blended  = mix(existing.rgb, decalSample.rgb, alpha);
+
     rtAlbedo.write(float4(blended, existing.a), gid);
 }
