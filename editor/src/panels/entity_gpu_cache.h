@@ -66,6 +66,10 @@ public:
                            const std::vector<EntityDef>& entities,
                            const glm::mat4&              view);
 
+    /// Get the mesh AABB for an entity in local space (VoxelObject / StaticMesh).
+    /// Returns true if the entity has mesh bounds; false otherwise.
+    bool getMeshAABB(std::size_t entityIdx, glm::vec3& outMin, glm::vec3& outMax) const;
+
 private:
     struct EntityGpuEntry
     {
@@ -81,6 +85,10 @@ private:
         std::unique_ptr<rhi::IBuffer> vbo;
         std::unique_ptr<rhi::IBuffer> ibo;
         unsigned                      indexCount = 0;
+
+        // Mesh axis-aligned bounding box in local space (VoxelObject / StaticMesh).
+        glm::vec3 meshAABBMin = {};
+        glm::vec3 meshAABBMax = {};
 
         // Particle simulation buffers: ParticleEmitter only.
         std::unique_ptr<render::ParticlePool> particlePool;

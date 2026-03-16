@@ -615,6 +615,11 @@ int main(int /*argc*/, char* /*argv*/[])
 
     bool layoutBuilt = false;
 
+    // ── Test Map process tracking ─────────────────────────────────────────────
+    // When non-nil, the Test Map app is running. We pause 3D rendering and
+    // periodically check if the process has terminated.
+    NSTask* __block testMapTask = nil;
+
     // ── Window title tracking ─────────────────────────────────────────────────
     // Update the OS title when dirty state or file path changes.
     bool        lastDirty = false;
@@ -632,7 +637,16 @@ int main(int /*argc*/, char* /*argv*/[])
             : 0.016f;
         prevFrameNs = frameStartNs;
 
-        // ── Event processing ─────────────────────────────────────────────
+        // ── Test Map task monitoring ─────────────────────────────────────────────
+        // Check if the Test Map app has exited and resume rendering.
+        if (testMapTask != nil && !testMapTask.isRunning)
+        {
+            doc.log("\\ — Test Map exited. Resuming 3D viewport rendering.");
+            vp3d.setRenderingPaused(false);
+            testMapTask = nil;
+        }
+
+        // ── Event processing ─────────────────────────────────────────────────
         SDL_Event event;
         while (SDL_PollEvent(&event))
         {
@@ -1012,27 +1026,28 @@ int main(int /*argc*/, char* /*argv*/[])
                             }
                             else
                             {
-                                // Locate DaedalusApp: try app bundle first (release),
-                                // then standalone executable (debug).
+                                // Locate DaedalusApp: try standalone (debug) first,
+                                // then app bundle (release) as fallback.
                                 std::filesystem::path resDir = resourceDir();
                                 std::filesystem::path appPath;
                                 
-                                // From app bundle: navigate to sibling app bundle
+                                // From standalone editor: ../app/DaedalusApp
+                                std::filesystem::path standalonePath =
+                                    (resDir / ".." / "app" / "DaedalusApp")
+                                    .lexically_normal();
+                                
+                                // From app bundle editor: navigate to sibling app bundle
                                 // (build/app/DaedalusApp.app/Contents/MacOS/DaedalusApp)
                                 std::filesystem::path bundlePath =
                                     (resDir / ".." / ".." / ".." / ".." / "app" 
                                      / "DaedalusApp.app" / "Contents" / "MacOS" / "DaedalusApp")
                                     .lexically_normal();
                                 
-                                // From standalone: ../app/DaedalusApp
-                                std::filesystem::path standalonePath =
-                                    (resDir / ".." / "app" / "DaedalusApp")
-                                    .lexically_normal();
-                                
-                                if (std::filesystem::exists(bundlePath))
-                                    appPath = bundlePath;
-                                else if (std::filesystem::exists(standalonePath))
+                                // Prefer standalone (debug) for development
+                                if (std::filesystem::exists(standalonePath))
                                     appPath = standalonePath;
+                                else if (std::filesystem::exists(bundlePath))
+                                    appPath = bundlePath;
 
                                 if (appPath.empty())
                                 {
@@ -1091,6 +1106,10 @@ int main(int /*argc*/, char* /*argv*/[])
                                     NSError* launchErr = nil;
                                     if ([task launchAndReturnError:&launchErr])
                                     {
+                                        // Store the task and pause 3D rendering to improve test app performance.
+                                        testMapTask = task;
+                                        vp3d.setRenderingPaused(true);
+                                        
                                         // On macOS 14+, a process launched via NSTask
                                         // cannot steal focus using
                                         // activateIgnoringOtherApps: — the system

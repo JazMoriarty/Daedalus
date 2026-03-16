@@ -478,6 +478,42 @@ static bool rayTriangleIntersect(
     return true;
 }
 
+// Ray-AABB intersection test for entity bounding boxes.
+// Returns true if the ray intersects the box, with outT receiving the entry distance.
+static bool rayBoxIntersect(
+    const glm::vec3& rayOrig, const glm::vec3& rayDir,
+    const glm::vec3& boxMin,  const glm::vec3& boxMax,
+    float& outT) noexcept
+{
+    constexpr float kEps = 1e-6f;
+    float tmin = 0.0f;
+    float tmax = FLT_MAX;
+    
+    for (int i = 0; i < 3; ++i)
+    {
+        if (std::abs(rayDir[i]) < kEps)
+        {
+            // Ray parallel to slab i
+            if (rayOrig[i] < boxMin[i] || rayOrig[i] > boxMax[i])
+                return false;
+        }
+        else
+        {
+            const float invD = 1.0f / rayDir[i];
+            float t0 = (boxMin[i] - rayOrig[i]) * invD;
+            float t1 = (boxMax[i] - rayOrig[i]) * invD;
+            if (t0 > t1) std::swap(t0, t1);
+            tmin = std::max(tmin, t0);
+            tmax = std::min(tmax, t1);
+            if (tmin > tmax) return false;
+        }
+    }
+    
+    if (tmin < 0.0f && tmax < 0.0f) return false;  // box behind ray
+    outT = (tmin >= 0.0f) ? tmin : tmax;
+    return outT >= 0.0f;
+}
+
 // Build a ray from a mouse position in image-space.
 // Uses near+far unprojection and returns the normalized direction.
 static glm::vec3 screenToWorldRay(
@@ -523,6 +559,22 @@ void Viewport3D::draw(EditMapDocument&      doc,
     const auto h = static_cast<unsigned>(sz.y > 8.0f ? sz.y : 8.0f);
 
     ensureInit(device, w, h);
+
+    // Skip rendering if paused (e.g. Test Map app is running), but still display
+    // the last rendered frame and update the panel UI.
+    if (m_renderingPaused)
+    {
+        rhi::ITexture* tex = m_offscreenSwap->nextDrawable();
+        ImGui::Image(reinterpret_cast<ImTextureID>(tex->nativeHandle()),
+                     ImVec2(static_cast<float>(w), static_cast<float>(h)));
+        
+        // Show pause indicator
+        ImGui::SetCursorPos(ImVec2(8.0f, 8.0f));
+        ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, 1.0f), "[PAUSED] Test Map running");
+        
+        ImGui::End();
+        return;
+    }
 
     // Retessellate if the map geometry changed.
     if (doc.isGeometryDirty())
@@ -1160,6 +1212,25 @@ void Viewport3D::draw(EditMapDocument&      doc,
             world::SectorId hitSector  = world::INVALID_SECTOR_ID;
             std::size_t     hitWall    = 0;
             HoveredSurface  hitSurface = HoveredSurface::None;
+            std::size_t     hitEntity  = SIZE_MAX;
+
+            // ── Entity bounding boxes (test first for correct depth priority) ──────────
+            const auto& entities = doc.entities();
+            for (std::size_t ei = 0; ei < entities.size(); ++ei)
+            {
+                const EntityDef& ent = entities[ei];
+                // Build AABB from entity position and scale
+                const glm::vec3 halfExtents = ent.scale * 0.5f;
+                const glm::vec3 boxMin = ent.position - halfExtents;
+                const glm::vec3 boxMax = ent.position + halfExtents;
+                
+                float t;
+                if (rayBoxIntersect(m_eye, rayDir, boxMin, boxMax, t) && t < closestT)
+                {
+                    closestT = t;
+                    hitEntity = ei;
+                }
+            }
 
             // ── Wall triangles: solid walls + portal upper/lower strips ──────────
             for (std::size_t si = 0; si < sectors.size(); ++si)
@@ -1253,12 +1324,24 @@ void Viewport3D::draw(EditMapDocument&      doc,
             m_hoveredSectorId = hitSector;
             m_hoveredWallIdx  = hitWall;
             m_hoveredSurface  = hitSurface;
+            m_hoveredEntityIdx = hitEntity;
 
-            // Left-click: select hovered surface, or deselect if already selected.
+            // Left-click: select hovered surface/entity, or deselect if already selected.
             if (ImGui::IsMouseClicked(ImGuiMouseButton_Left) && !io3d.KeyAlt)
             {
                 SelectionState& sel = doc.selection();
-                if (hitSector != world::INVALID_SECTOR_ID)
+                if (hitEntity != SIZE_MAX)
+                {
+                    // Entity hit: toggle entity selection
+                    if (sel.type == SelectionType::Entity && sel.entityIndex == hitEntity)
+                        sel.clear();
+                    else
+                    {
+                        sel.type = SelectionType::Entity;
+                        sel.entityIndex = hitEntity;
+                    }
+                }
+                else if (hitSector != world::INVALID_SECTOR_ID)
                 {
                     if (hitSurface == HoveredSurface::Wall ||
                         hitSurface == HoveredSurface::UpperWall ||
@@ -1297,12 +1380,14 @@ void Viewport3D::draw(EditMapDocument&      doc,
         {
             m_hoveredSectorId = world::INVALID_SECTOR_ID;
             m_hoveredSurface  = HoveredSurface::None;
+            m_hoveredEntityIdx = SIZE_MAX;
         }
     }
     else if (m_mouseCaptured)
     {
         m_hoveredSectorId = world::INVALID_SECTOR_ID;
         m_hoveredSurface  = HoveredSurface::None;
+        m_hoveredEntityIdx = SIZE_MAX;
     }
 
     // ── Wall outline overlay ────────────────────────────────────────────────────────────
@@ -1491,6 +1576,161 @@ void Viewport3D::draw(EditMapDocument&      doc,
                     ? sectors[sid].ceilHeight
                     : sectors[sid].floorHeight;
                 drawSectorOutline(sid, selY, IM_COL32(255, 200, 0, 220));
+            }
+        }
+        
+        // ── Entity box outlines ────────────────────────────────────
+        // Draw a 3D wireframe box in world space.
+        auto drawBoxOutline = [&](const glm::vec3& center, const glm::vec3& halfExtents, ImU32 col)
+        {
+            // 8 corners of the box
+            const glm::vec3 corners[8] = {
+                center + glm::vec3(-halfExtents.x, -halfExtents.y, -halfExtents.z),
+                center + glm::vec3( halfExtents.x, -halfExtents.y, -halfExtents.z),
+                center + glm::vec3( halfExtents.x, -halfExtents.y,  halfExtents.z),
+                center + glm::vec3(-halfExtents.x, -halfExtents.y,  halfExtents.z),
+                center + glm::vec3(-halfExtents.x,  halfExtents.y, -halfExtents.z),
+                center + glm::vec3( halfExtents.x,  halfExtents.y, -halfExtents.z),
+                center + glm::vec3( halfExtents.x,  halfExtents.y,  halfExtents.z),
+                center + glm::vec3(-halfExtents.x,  halfExtents.y,  halfExtents.z),
+            };
+            
+            // Project to clip space
+            glm::vec4 clip[8];
+            for (int i = 0; i < 8; ++i)
+                clip[i] = VP * glm::vec4(corners[i], 1.0f);
+            
+            // Draw 12 edges with proper near-plane clipping
+            auto drawEdge = [&](int i0, int i1)
+            {
+                const glm::vec4& c0 = clip[i0];
+                const glm::vec4& c1 = clip[i1];
+                const bool v0In = c0.w > kNearEps;
+                const bool v1In = c1.w > kNearEps;
+                
+                if (!v0In && !v1In) return;  // Both behind camera
+                
+                if (v0In && v1In)
+                {
+                    // Both in front - draw directly
+                    dl->AddLine(projClip(c0), projClip(c1), col, 2.0f);
+                }
+                else
+                {
+                    // One vertex behind camera - clip to near plane
+                    const float t = (kNearEps - c0.w) / (c1.w - c0.w);
+                    const glm::vec4 clipped = glm::mix(c0, c1, t);
+                    
+                    if (v0In)
+                        dl->AddLine(projClip(c0), projClip(clipped), col, 2.0f);
+                    else
+                        dl->AddLine(projClip(clipped), projClip(c1), col, 2.0f);
+                }
+            };
+            
+            // Bottom face
+            drawEdge(0, 1); drawEdge(1, 2); drawEdge(2, 3); drawEdge(3, 0);
+            // Top face
+            drawEdge(4, 5); drawEdge(5, 6); drawEdge(6, 7); drawEdge(7, 4);
+            // Vertical edges
+            drawEdge(0, 4); drawEdge(1, 5); drawEdge(2, 6); drawEdge(3, 7);
+        };
+        
+        // Hovered entity outline
+        if (m_hoveredEntityIdx != SIZE_MAX && m_hoveredEntityIdx < doc.entities().size())
+        {
+            const EntityDef& ent = doc.entities()[m_hoveredEntityIdx];
+            glm::vec3 aabbMin, aabbMax;
+            
+            // For StaticMesh/VoxelObject, use actual mesh AABB; otherwise fall back to scale-based box.
+            if (m_entityCache.getMeshAABB(m_hoveredEntityIdx, aabbMin, aabbMax))
+            {
+                // Build entity transform matrix.
+                glm::mat4 model = glm::mat4(1.0f);
+                model = glm::translate(model, ent.position);
+                model = glm::rotate(model, ent.yaw,   glm::vec3(0.0f, 1.0f, 0.0f));
+                model = glm::rotate(model, ent.pitch, glm::vec3(1.0f, 0.0f, 0.0f));
+                model = glm::rotate(model, ent.roll,  glm::vec3(0.0f, 0.0f, 1.0f));
+                model = glm::scale(model, ent.scale);
+                
+                // Transform all 8 corners of the local AABB to world space.
+                const glm::vec3 localCorners[8] = {
+                    {aabbMin.x, aabbMin.y, aabbMin.z},
+                    {aabbMax.x, aabbMin.y, aabbMin.z},
+                    {aabbMax.x, aabbMin.y, aabbMax.z},
+                    {aabbMin.x, aabbMin.y, aabbMax.z},
+                    {aabbMin.x, aabbMax.y, aabbMin.z},
+                    {aabbMax.x, aabbMax.y, aabbMin.z},
+                    {aabbMax.x, aabbMax.y, aabbMax.z},
+                    {aabbMin.x, aabbMax.y, aabbMax.z},
+                };
+                
+                glm::vec3 worldMin(FLT_MAX), worldMax(-FLT_MAX);
+                for (const auto& corner : localCorners)
+                {
+                    const glm::vec3 worldCorner = glm::vec3(model * glm::vec4(corner, 1.0f));
+                    worldMin = glm::min(worldMin, worldCorner);
+                    worldMax = glm::max(worldMax, worldCorner);
+                }
+                
+                const glm::vec3 center = (worldMin + worldMax) * 0.5f;
+                const glm::vec3 halfExtents = (worldMax - worldMin) * 0.5f;
+                drawBoxOutline(center, halfExtents, IM_COL32(255, 255, 255, 200));
+            }
+            else
+            {
+                // Billboard/non-mesh entities: use scale-based collision box.
+                const glm::vec3 halfExtents = ent.scale * 0.5f;
+                drawBoxOutline(ent.position, halfExtents, IM_COL32(255, 255, 255, 200));
+            }
+        }
+        
+        // Selected entity outline (yellow, drawn on top if same entity)
+        if (sel2.type == SelectionType::Entity && sel2.entityIndex < doc.entities().size())
+        {
+            const EntityDef& ent = doc.entities()[sel2.entityIndex];
+            glm::vec3 aabbMin, aabbMax;
+            
+            // For StaticMesh/VoxelObject, use actual mesh AABB; otherwise fall back to scale-based box.
+            if (m_entityCache.getMeshAABB(sel2.entityIndex, aabbMin, aabbMax))
+            {
+                // Build entity transform matrix.
+                glm::mat4 model = glm::mat4(1.0f);
+                model = glm::translate(model, ent.position);
+                model = glm::rotate(model, ent.yaw,   glm::vec3(0.0f, 1.0f, 0.0f));
+                model = glm::rotate(model, ent.pitch, glm::vec3(1.0f, 0.0f, 0.0f));
+                model = glm::rotate(model, ent.roll,  glm::vec3(0.0f, 0.0f, 1.0f));
+                model = glm::scale(model, ent.scale);
+                
+                // Transform all 8 corners of the local AABB to world space.
+                const glm::vec3 localCorners[8] = {
+                    {aabbMin.x, aabbMin.y, aabbMin.z},
+                    {aabbMax.x, aabbMin.y, aabbMin.z},
+                    {aabbMax.x, aabbMin.y, aabbMax.z},
+                    {aabbMin.x, aabbMin.y, aabbMax.z},
+                    {aabbMin.x, aabbMax.y, aabbMin.z},
+                    {aabbMax.x, aabbMax.y, aabbMin.z},
+                    {aabbMax.x, aabbMax.y, aabbMax.z},
+                    {aabbMin.x, aabbMax.y, aabbMax.z},
+                };
+                
+                glm::vec3 worldMin(FLT_MAX), worldMax(-FLT_MAX);
+                for (const auto& corner : localCorners)
+                {
+                    const glm::vec3 worldCorner = glm::vec3(model * glm::vec4(corner, 1.0f));
+                    worldMin = glm::min(worldMin, worldCorner);
+                    worldMax = glm::max(worldMax, worldCorner);
+                }
+                
+                const glm::vec3 center = (worldMin + worldMax) * 0.5f;
+                const glm::vec3 halfExtents = (worldMax - worldMin) * 0.5f;
+                drawBoxOutline(center, halfExtents, IM_COL32(255, 200, 0, 220));
+            }
+            else
+            {
+                // Billboard/non-mesh entities: use scale-based collision box.
+                const glm::vec3 halfExtents = ent.scale * 0.5f;
+                drawBoxOutline(ent.position, halfExtents, IM_COL32(255, 200, 0, 220));
             }
         }
     }

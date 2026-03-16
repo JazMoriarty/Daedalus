@@ -82,6 +82,10 @@ public:
     /// True if the 3D viewport panel was hovered on the previous frame.
     [[nodiscard]] bool isHovered() const noexcept { return m_isHovered; }
 
+    /// Pause/resume 3D rendering (e.g. while Test Map app is running).
+    void setRenderingPaused(bool paused) noexcept { m_renderingPaused = paused; }
+    [[nodiscard]] bool isRenderingPaused() const noexcept { return m_renderingPaused; }
+
     /// Camera state accessors (used by Viewport2D for the fly-camera overlay).
     [[nodiscard]] glm::vec3 eye()   const noexcept { return m_eye;   }
     [[nodiscard]] float     yaw()   const noexcept { return m_yaw;   }
@@ -126,6 +130,7 @@ private:
     bool        m_mouseCaptured   = false;  ///< True when Tab has locked the cursor for mouselook.
     bool        m_altDragging     = false;  ///< True while Alt+LMB orbit is active.
     glm::vec3   m_altFocus{};              ///< Orbit pivot point for current Alt+drag gesture.
+    bool        m_renderingPaused = false;  ///< True when 3D rendering should be skipped (e.g. Test Map running).
 
     // Mouse-capture state for fly-mode mouselook (SDL relative-mouse-mode).
     SDL_Window* m_captureWindow = nullptr;
@@ -171,6 +176,9 @@ private:
     HoveredSurface  m_selectedSurface  = HoveredSurface::Floor;
     /// Which wall surface (Wall/UpperWall/LowerWall) produced the current Wall selection.
     HoveredSurface  m_selectedWallSurface = HoveredSurface::Wall;
+    
+    // ─── Entity hover state ──────────────────────────────────────────────────────
+    std::size_t     m_hoveredEntityIdx = SIZE_MAX;  ///< SIZE_MAX = none hovered
 
     // ─── Accumulated mouse delta for mouselook (fed from event loop) ─────────────
     float m_pendingDx = 0.0f;

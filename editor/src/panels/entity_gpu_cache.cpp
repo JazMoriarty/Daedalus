@@ -112,6 +112,16 @@ void EntityGpuCache::loadEntry(EntityGpuEntry&       entry,
         }
         entry.indexCount = static_cast<unsigned>(mesh.indices.size());
 
+        // Calculate mesh AABB in local space.
+        entry.meshAABBMin = glm::vec3(FLT_MAX);
+        entry.meshAABBMax = glm::vec3(-FLT_MAX);
+        for (const auto& v : mesh.vertices)
+        {
+            const glm::vec3 p(v.pos[0], v.pos[1], v.pos[2]);
+            entry.meshAABBMin = glm::min(entry.meshAABBMin, p);
+            entry.meshAABBMax = glm::max(entry.meshAABBMax, p);
+        }
+
         // Upload 256×1 RGBA8Unorm palette texture.
         {
             rhi::TextureDescriptor td;
@@ -156,6 +166,16 @@ void EntityGpuCache::loadEntry(EntityGpuEntry&       entry,
             entry.ibo   = device.createBuffer(d);
         }
         entry.indexCount = static_cast<unsigned>(mesh.indices.size());
+
+        // Calculate mesh AABB in local space.
+        entry.meshAABBMin = glm::vec3(FLT_MAX);
+        entry.meshAABBMax = glm::vec3(-FLT_MAX);
+        for (const auto& v : mesh.vertices)
+        {
+            const glm::vec3 p(v.pos[0], v.pos[1], v.pos[2]);
+            entry.meshAABBMin = glm::min(entry.meshAABBMin, p);
+            entry.meshAABBMax = glm::max(entry.meshAABBMax, p);
+        }
 
         // Load albedo texture if the glTF material provided a path.
         if (!mesh.albedoPath.empty())
@@ -512,6 +532,28 @@ void EntityGpuCache::populateSceneView(render::SceneView&            scene,
         }
         }
     }
+}
+
+// ─── getMeshAABB ──────────────────────────────────────────────────────────────
+
+bool EntityGpuCache::getMeshAABB(std::size_t entityIdx, glm::vec3& outMin, glm::vec3& outMax) const
+{
+    if (entityIdx >= m_entries.size())
+        return false;
+
+    const EntityGpuEntry& entry = m_entries[entityIdx];
+
+    // Only VoxelObject and StaticMesh have mesh AABBs.
+    if (!entry.loaded ||
+        (entry.visualType != EntityVisualType::VoxelObject &&
+         entry.visualType != EntityVisualType::StaticMesh))
+    {
+        return false;
+    }
+
+    outMin = entry.meshAABBMin;
+    outMax = entry.meshAABBMax;
+    return true;
 }
 
 } // namespace daedalus::editor
