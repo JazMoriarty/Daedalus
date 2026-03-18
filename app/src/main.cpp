@@ -406,6 +406,7 @@ int main(int argc, char* argv[])
 
         // ── 2. Upload textures to GPU ─────────────────────────────────────────
         // UUID → GPU texture. Missing UUIDs fall back to nullptr (engine default white).
+        // Detect normal maps by UUID pattern (XORed with 0xDEADBEEF) and upload as linear.
         std::unordered_map<daedalus::UUID, std::unique_ptr<rhi::ITexture>, daedalus::UUIDHash>
             packTextures;
 
@@ -417,14 +418,25 @@ int main(int argc, char* argv[])
             const render::MipmapChain mipChain = render::generateMipmapChain(
                 ltex.pixels.data(), ltex.width, ltex.height);
 
+            // Detect if this is a normal map by checking the UUID.
+            // Normal map UUIDs are derived: originalUUID.lo XOR 0xDEADBEEF.
+            // We check all possible material UUIDs to see if un-XORing gives a valid match.
+            bool isNormalMap = false;
+            UUID testAlbedoUuid = uuid;
+            testAlbedoUuid.lo ^= 0xDEADBEEFull;
+            // If un-XORing gives a UUID that's also in pack.textures, this is a normal map.
+            if (pack.textures.find(testAlbedoUuid) != pack.textures.end())
+                isNormalMap = true;
+
             rhi::TextureDescriptor td;
             td.width     = mipChain.width;
             td.height    = mipChain.height;
             td.mipLevels = mipChain.mipCount;
-            td.format    = rhi::TextureFormat::RGBA8Unorm_sRGB;
+            td.format    = isNormalMap ? rhi::TextureFormat::RGBA8Unorm
+                                        : rhi::TextureFormat::RGBA8Unorm_sRGB;
             td.usage     = rhi::TextureUsage::ShaderRead;
             td.initData  = mipChain.data.data();
-            td.debugName = "dlevel_tex";
+            td.debugName = isNormalMap ? "dlevel_normal" : "dlevel_albedo";
             packTextures[uuid] = device->createTexture(td);
         }
 
@@ -475,7 +487,7 @@ int main(int argc, char* argv[])
                     sectorIBOs[si][bi] = device->createBuffer(d);
                 }
 
-                // MeshDraw — bind texture if the UUID is in packTextures
+                // MeshDraw — bind textures if the UUIDs are in packTextures
                 render::MeshDraw& draw = sectorDraws[si][bi];
                 draw.vertexBuffer  = sectorVBOs[si][bi].get();
                 draw.indexBuffer   = sectorIBOs[si][bi].get();
@@ -496,10 +508,17 @@ int main(int argc, char* argv[])
                 }
 
                 // Look up albedo texture for this material UUID.
-                const auto it = packTextures.find(batch.materialId);
-                if (it != packTextures.end())
-                    draw.material.albedo = it->second.get();
+                const auto albedoIt = packTextures.find(batch.materialId);
+                if (albedoIt != packTextures.end())
+                    draw.material.albedo = albedoIt->second.get();
                 // nullptr → engine-default white (no fallback needed here)
+
+                // Look up normal map using derived UUID (same XOR pattern as editor packing).
+                UUID normalUuid = batch.materialId;
+                normalUuid.lo ^= 0xDEADBEEFull;
+                const auto normalIt = packTextures.find(normalUuid);
+                if (normalIt != packTextures.end())
+                    draw.material.normalMap = normalIt->second.get();
             }
         }
 

@@ -952,24 +952,51 @@ int main(int /*argc*/, char* /*argv*/[])
                             }
 
                             // Textures: load each referenced UUID from disk.
+                            // Also pack companion normal maps with a derived UUID.
                             for (const UUID& uuid : uuids)
                             {
                                 const MaterialEntry* entry = catalog.find(uuid);
                                 if (!entry) continue;
 
+                                // Albedo texture
                                 int imgW = 0, imgH = 0, channels = 0;
                                 stbi_uc* pixels = stbi_load(
                                     entry->absPath.string().c_str(),
                                     &imgW, &imgH, &channels, 4);
-                                if (!pixels) continue;
+                                if (pixels)
+                                {
+                                    world::LevelTexture tex;
+                                    tex.width  = static_cast<u32>(imgW);
+                                    tex.height = static_cast<u32>(imgH);
+                                    tex.pixels.assign(pixels,
+                                                      pixels + imgW * imgH * 4);
+                                    stbi_image_free(pixels);
+                                    pack.textures.emplace(uuid, std::move(tex));
+                                }
 
-                                world::LevelTexture tex;
-                                tex.width  = static_cast<u32>(imgW);
-                                tex.height = static_cast<u32>(imgH);
-                                tex.pixels.assign(pixels,
-                                                  pixels + imgW * imgH * 4);
-                                stbi_image_free(pixels);
-                                pack.textures.emplace(uuid, std::move(tex));
+                                // Normal map companion (if present)
+                                if (!entry->normalPath.empty())
+                                {
+                                    int normW = 0, normH = 0, normChannels = 0;
+                                    stbi_uc* normPixels = stbi_load(
+                                        entry->normalPath.string().c_str(),
+                                        &normW, &normH, &normChannels, 4);
+                                    if (normPixels)
+                                    {
+                                        world::LevelTexture normTex;
+                                        normTex.width  = static_cast<u32>(normW);
+                                        normTex.height = static_cast<u32>(normH);
+                                        normTex.pixels.assign(normPixels,
+                                                              normPixels + normW * normH * 4);
+                                        stbi_image_free(normPixels);
+                                        // Pack with derived UUID: XOR low 32 bits to encode type.
+                                        // UUID is stored as two u64: hi and lo.
+                                        // We XOR the lower 32 bits of `lo` with 0xDEADBEEF.
+                                        UUID normalUuid = uuid;
+                                        normalUuid.lo ^= 0xDEADBEEFull;
+                                        pack.textures.emplace(normalUuid, std::move(normTex));
+                                    }
+                                }
                             }
 
                             // ── Entities ─────────────────────────────────────────
