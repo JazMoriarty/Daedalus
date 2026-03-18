@@ -948,6 +948,17 @@ int main(int /*argc*/, char* /*argv*/[])
                                 ll.innerConeAngle = ld.innerConeAngle;
                                 ll.outerConeAngle = ld.outerConeAngle;
                                 ll.range          = ld.range;
+                                
+                                // Debug: log first spotlight being packed
+                                static bool logged = false;
+                                if (!logged && ll.type == world::LevelLightType::Spot) {
+                                    std::printf("[DLevel] Packing spotlight: inner=%.1f° (%.4f rad) outer=%.1f° (%.4f rad) range=%.1f intensity=%.1f\n",
+                                                glm::degrees(ll.innerConeAngle), ll.innerConeAngle,
+                                                glm::degrees(ll.outerConeAngle), ll.outerConeAngle,
+                                                ll.range, ll.intensity);
+                                    logged = true;
+                                }
+                                
                                 pack.lights.push_back(ll);
                             }
 

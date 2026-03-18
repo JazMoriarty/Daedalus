@@ -361,7 +361,7 @@ int main(int argc, char* argv[])
     bool     startFog        = false;
     bool     startSSR        = false;
     bool     startDoF        = false;
-    bool     startMotionBlur = true;   // good game default
+    bool     startMotionBlur = false;  // Match editor default (disabled)
     bool     startColorGrade = true;   // uses identity LUT if no path provided
     bool     startOptFx      = true;   // mild vignette + grain
     bool     startFXAA       = true;
@@ -1311,6 +1311,16 @@ int main(int argc, char* argv[])
                     sl.color          = ll.color;
                     sl.intensity      = ll.intensity;
                     sl.castsShadows   = true;
+                    
+                    // Debug: log first spotlight parameters
+                    static bool logged = false;
+                    if (!logged) {
+                        std::printf("[DLevel] Spotlight: inner=%.1f° outer=%.1f° range=%.1f intensity=%.1f\n",
+                                    glm::degrees(sl.innerConeAngle), glm::degrees(sl.outerConeAngle),
+                                    sl.range, sl.intensity);
+                        logged = true;
+                    }
+                    
                     fpScene.spotLights.push_back(sl);
                 }
             }
