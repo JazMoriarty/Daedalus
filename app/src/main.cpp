@@ -438,6 +438,12 @@ int main(int argc, char* argv[])
             td.initData  = mipChain.data.data();
             td.debugName = isNormalMap ? "dlevel_normal" : "dlevel_albedo";
             packTextures[uuid] = device->createTexture(td);
+            
+            if (isNormalMap)
+            {
+                std::printf("[DLevel] Loaded normal map texture (%ux%u, linear)\n",
+                            mipChain.width, mipChain.height);
+            }
         }
 
         std::printf("[DLevel] Uploaded %zu material texture(s) to GPU.\n",
@@ -518,7 +524,11 @@ int main(int argc, char* argv[])
                 normalUuid.lo ^= 0xDEADBEEFull;
                 const auto normalIt = packTextures.find(normalUuid);
                 if (normalIt != packTextures.end())
+                {
                     draw.material.normalMap = normalIt->second.get();
+                    if (si == 0 && bi == 0)  // Log first batch only
+                        std::printf("[DLevel] Bound normal map to sector %zu batch %zu\n", si, bi);
+                }
             }
         }
 

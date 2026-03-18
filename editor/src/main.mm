@@ -995,6 +995,14 @@ int main(int /*argc*/, char* /*argv*/[])
                                         UUID normalUuid = uuid;
                                         normalUuid.lo ^= 0xDEADBEEFull;
                                         pack.textures.emplace(normalUuid, std::move(normTex));
+                                        std::printf("[DLevel] Packed normal map: %s (%ux%u)\n",
+                                                    entry->normalPath.filename().string().c_str(),
+                                                    normW, normH);
+                                    }
+                                    else
+                                    {
+                                        std::printf("[DLevel] Warning: Failed to load normal map: %s\n",
+                                                    entry->normalPath.string().c_str());
                                     }
                                 }
                             }
