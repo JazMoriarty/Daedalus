@@ -6,11 +6,12 @@
 
 #include <cstring>
 #include <algorithm>
+#include <cmath>
 
 namespace daedalus::render
 {
 
-MipmapChain generateMipmapChain(const u8* srcPixels, u32 width, u32 height)
+MipmapChain generateMipmapChain(const u8* srcPixels, u32 width, u32 height, bool isNormalMap)
 {
     DAEDALUS_ASSERT(srcPixels != nullptr, "Source pixels cannot be null");
     DAEDALUS_ASSERT(width > 0 && height > 0, "Texture dimensions must be > 0");
@@ -85,18 +86,56 @@ MipmapChain generateMipmapChain(const u8* srcPixels, u32 width, u32 height)
                 const u8* s01 = sample(sx0, sy1);
                 const u8* s11 = sample(sx1, sy1);
 
-                // Average all 4 channels (RGBA) separately.
-                // Use u32 to avoid overflow, then divide.
-                u32 r = s00[0] + s10[0] + s01[0] + s11[0];
-                u32 g = s00[1] + s10[1] + s01[1] + s11[1];
-                u32 b = s00[2] + s10[2] + s01[2] + s11[2];
-                u32 a = s00[3] + s10[3] + s01[3] + s11[3];
-
                 const usize dstIdx = (y * currW + x) * 4;
-                currMip[dstIdx + 0] = static_cast<u8>((r + 2) >> 2);  // +2 for rounding
-                currMip[dstIdx + 1] = static_cast<u8>((g + 2) >> 2);
-                currMip[dstIdx + 2] = static_cast<u8>((b + 2) >> 2);
-                currMip[dstIdx + 3] = static_cast<u8>((a + 2) >> 2);
+
+                if (isNormalMap)
+                {
+                    // Normal map path: decode tangent-space normals, average,
+                    // renormalize, encode back. This preserves vector magnitude
+                    // and prevents the "flat" appearance at lower mip levels.
+
+                    // Step 1: Average in [0,255] space and convert to [0,1]
+                    float r = (s00[0] + s10[0] + s01[0] + s11[0]) / (4.0f * 255.0f);
+                    float g = (s00[1] + s10[1] + s01[1] + s11[1]) / (4.0f * 255.0f);
+                    float b = (s00[2] + s10[2] + s01[2] + s11[2]) / (4.0f * 255.0f);
+
+                    // Step 2: Decode from texture space [0,1] to tangent space [-1,1]
+                    float nx = r * 2.0f - 1.0f;
+                    float ny = g * 2.0f - 1.0f;
+                    float nz = b * 2.0f - 1.0f;
+
+                    // Step 3: Renormalize the averaged vector
+                    float len = std::sqrt(nx * nx + ny * ny + nz * nz);
+                    if (len > 1e-6f)  // Avoid divide-by-zero
+                    {
+                        nx /= len;
+                        ny /= len;
+                        nz /= len;
+                    }
+
+                    // Step 4: Encode back to texture space [0,1] and [0,255]
+                    currMip[dstIdx + 0] = static_cast<u8>(std::clamp((nx * 0.5f + 0.5f) * 255.0f, 0.0f, 255.0f));
+                    currMip[dstIdx + 1] = static_cast<u8>(std::clamp((ny * 0.5f + 0.5f) * 255.0f, 0.0f, 255.0f));
+                    currMip[dstIdx + 2] = static_cast<u8>(std::clamp((nz * 0.5f + 0.5f) * 255.0f, 0.0f, 255.0f));
+
+                    // Alpha: simple box filter average (not a normal vector)
+                    u32 a = s00[3] + s10[3] + s01[3] + s11[3];
+                    currMip[dstIdx + 3] = static_cast<u8>((a + 2) >> 2);
+                }
+                else
+                {
+                    // Albedo/standard path: simple box filter averaging.
+                    // Use u32 to avoid overflow, then divide.
+                    u32 r = s00[0] + s10[0] + s01[0] + s11[0];
+                    u32 g = s00[1] + s10[1] + s01[1] + s11[1];
+                    u32 b = s00[2] + s10[2] + s01[2] + s11[2];
+                    u32 a = s00[3] + s10[3] + s01[3] + s11[3];
+
+                    currMip[dstIdx + 0] = static_cast<u8>((r + 2) >> 2);  // +2 for rounding
+                    currMip[dstIdx + 1] = static_cast<u8>((g + 2) >> 2);
+                    currMip[dstIdx + 2] = static_cast<u8>((b + 2) >> 2);
+                    currMip[dstIdx + 3] = static_cast<u8>((a + 2) >> 2);
+                }
             }
         }
 

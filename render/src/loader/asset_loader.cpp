@@ -98,9 +98,11 @@ public:
             return std::unexpected(AssetError::FileNotFound);
 
         // Generate full mipmap chain for RT quality.
+        // Normal maps are loaded with sRGB=false, so use !sRGB to detect them.
         const MipmapChain mipChain = generateMipmapChain(pixels, 
                                                          static_cast<u32>(w), 
-                                                         static_cast<u32>(h));
+                                                         static_cast<u32>(h),
+                                                         !sRGB);  // isNormalMap
         stbi_image_free(pixels);  // Original pixels no longer needed
 
         rhi::TextureDescriptor d;

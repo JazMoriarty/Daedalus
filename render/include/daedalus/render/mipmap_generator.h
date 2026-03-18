@@ -30,14 +30,21 @@ struct MipmapChain
 
 /// Generate a full mipmap chain from RGBA8 source data using box filter.
 ///
-/// @param srcPixels  Source image in RGBA8 format (4 bytes per pixel)
-/// @param width      Source image width (must be > 0)
-/// @param height     Source image height (must be > 0)
-/// @return           Complete mipmap chain with all levels down to 1×1
+/// @param srcPixels   Source image in RGBA8 format (4 bytes per pixel)
+/// @param width       Source image width (must be > 0)
+/// @param height      Source image height (must be > 0)
+/// @param isNormalMap If true, uses renormalized filtering for tangent-space
+///                    normal maps (decode, average, renormalize, encode).
+///                    If false, uses simple box filter averaging (for albedo).
+/// @return            Complete mipmap chain with all levels down to 1×1
 ///
 /// Mip count = floor(log2(max(width, height))) + 1.
 /// Example: 512×512 → 10 mips (512, 256, 128, 64, 32, 16, 8, 4, 2, 1).
-MipmapChain generateMipmapChain(const u8* srcPixels, u32 width, u32 height);
+///
+/// Normal map filtering preserves vector magnitude by renormalizing after
+/// averaging, preventing the "flat" appearance at lower mip levels that
+/// results from naive RGB averaging.
+MipmapChain generateMipmapChain(const u8* srcPixels, u32 width, u32 height, bool isNormalMap = false);
 
 /// Calculate the total number of mip levels for a given texture size.
 ///

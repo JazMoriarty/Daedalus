@@ -424,41 +424,25 @@ int main(int argc, char* argv[])
             if (pack.textures.find(testAlbedoUuid) != pack.textures.end())
                 isNormalMap = true;
 
-            // Generate mipmaps for albedo textures only.
-            // Normal maps need special mipmap filtering (renormalization) which
-            // our simple box filter doesn't provide. Without proper filtering,
-            // averaged normal vectors lose magnitude at each mip level, making
-            // the normal mapping effect progressively weaker at distance.
-            // For now, use mip level 0 only for normal maps.
+            // Generate mipmaps with proper filtering for both albedo and normal maps.
+            // Normal maps use renormalized filtering to preserve vector magnitude.
+            const render::MipmapChain mipChain = render::generateMipmapChain(
+                ltex.pixels.data(), ltex.width, ltex.height, isNormalMap);
+
             rhi::TextureDescriptor td;
+            td.width     = mipChain.width;
+            td.height    = mipChain.height;
+            td.mipLevels = mipChain.mipCount;
+            td.format    = isNormalMap ? rhi::TextureFormat::RGBA8Unorm           // linear
+                                       : rhi::TextureFormat::RGBA8Unorm_sRGB;     // sRGB
+            td.usage     = rhi::TextureUsage::ShaderRead;
+            td.initData  = mipChain.data.data();
+            td.debugName = isNormalMap ? "dlevel_normal" : "dlevel_albedo";
+            packTextures[uuid] = device->createTexture(td);
+
             if (isNormalMap)
-            {
-                // No mipmaps for normal maps - use base level only.
-                td.width     = ltex.width;
-                td.height    = ltex.height;
-                td.mipLevels = 1;
-                td.format    = rhi::TextureFormat::RGBA8Unorm;
-                td.usage     = rhi::TextureUsage::ShaderRead;
-                td.initData  = ltex.pixels.data();
-                td.debugName = "dlevel_normal";
-                packTextures[uuid] = device->createTexture(td);
-                std::printf("[DLevel] Loaded normal map texture (%ux%u, linear, no mipmaps)\n",
-                            ltex.width, ltex.height);
-            }
-            else
-            {
-                // Generate full mipmap chain for albedo textures.
-                const render::MipmapChain mipChain = render::generateMipmapChain(
-                    ltex.pixels.data(), ltex.width, ltex.height);
-                td.width     = mipChain.width;
-                td.height    = mipChain.height;
-                td.mipLevels = mipChain.mipCount;
-                td.format    = rhi::TextureFormat::RGBA8Unorm_sRGB;
-                td.usage     = rhi::TextureUsage::ShaderRead;
-                td.initData  = mipChain.data.data();
-                td.debugName = "dlevel_albedo";
-                packTextures[uuid] = device->createTexture(td);
-            }
+                std::printf("[DLevel] Loaded normal map texture (%ux%u, %u mips, linear, renormalized)\n",
+                            ltex.width, ltex.height, mipChain.mipCount);
         }
 
         std::printf("[DLevel] Uploaded %zu material texture(s) to GPU.\n",
