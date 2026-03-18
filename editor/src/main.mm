@@ -1455,20 +1455,30 @@ int main(int /*argc*/, char* /*argv*/[])
             }
         }
 
-        // ── Asset catalog: rescan whenever doc's assetRoot changes ────────────────────────────
+        // ── Asset catalog: rescan whenever doc's assetRoot changes ──────────────────────────────────────
         // Triggered by: INI restore above, File > Set Asset Root, or loading a .dmap
         // that carries its own assetRoot.  Also persists the new root to the INI.
         {
             const std::string ar = doc.assetRoot();
-            if (ar != lastKnownAssetRoot)
+            bool needsRescan = (ar != lastKnownAssetRoot);
+            
+            // Also rescan if explicitly requested (e.g., after generating a normal map).
+            if (!needsRescan && !ar.empty())
+                needsRescan = catalog.consumeRescanRequest();
+            
+            if (needsRescan)
             {
-                lastKnownAssetRoot = ar;
+                if (ar != lastKnownAssetRoot)
+                {
+                    lastKnownAssetRoot = ar;
+                    persistState.assetRoot = ar;
+                    ImGui::MarkIniSettingsDirty();
+                }
+                
                 if (!ar.empty())
                 {
                     catalog.setRoot(std::filesystem::path(ar));
                     catalog.scan();
-                    persistState.assetRoot = ar;
-                    ImGui::MarkIniSettingsDirty();
 
                     // Also scan the sibling models and voxels directories.
                     const std::filesystem::path modelRoot =

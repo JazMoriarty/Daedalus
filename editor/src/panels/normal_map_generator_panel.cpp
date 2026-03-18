@@ -283,11 +283,9 @@ void NormalMapGeneratorPanel::saveAndClose(MaterialCatalog& catalog, EditMapDocu
 
     doc.log("Saved normal map to " + outputPath.string());
     
-    // Note: We don't automatically rescan the catalog here because:
-    // 1. It's expensive (full directory scan)
-    // 2. The user can manually rescan if they want to use the generated normal
-    // 3. Rescanning during close could cause issues with panel state
-    // The texture will be picked up on next editor launch or manual asset refresh.
+    // Request a catalog rescan to pick up the newly generated normal map.
+    // This happens on the next frame so it doesn't interfere with panel close.
+    catalog.requestRescan();
 }
 
 } // namespace daedalus::editor

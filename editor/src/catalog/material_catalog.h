@@ -100,6 +100,18 @@ public:
     /// True if the catalog has no entries (not scanned or empty root).
     [[nodiscard]] bool empty() const noexcept { return m_entries.empty(); }
 
+    /// Request a rescan on the next frame. Set this after modifying assets on disk.
+    void requestRescan() noexcept { m_needsRescan = true; }
+
+    /// Check if a rescan was requested and consume the flag.
+    [[nodiscard]] bool consumeRescanRequest() noexcept {
+        if (m_needsRescan) {
+            m_needsRescan = false;
+            return true;
+        }
+        return false;
+    }
+
     // ─── Lazy texture loading ──────────────────────────────────────────────
 
     /// Return a 64×64 thumbnail for uuid, loading it on first call.
@@ -136,6 +148,7 @@ private:
     std::filesystem::path m_root;
     std::vector<MaterialEntry> m_entries;
     std::unordered_map<UUID, std::size_t, UUIDHash> m_uuidIndex;
+    bool m_needsRescan = false;
 
     [[nodiscard]] MaterialEntry* findMutable(const UUID& uuid) noexcept;
 
