@@ -216,6 +216,18 @@ const MaterialEntry* MaterialCatalog::find(const UUID& uuid) const noexcept
     return &m_entries[it->second];
 }
 
+const MaterialEntry* MaterialCatalog::findByPath(const std::filesystem::path& path) const noexcept
+{
+    // Linear search through entries comparing absolute paths.
+    // This is acceptable since entity loading happens infrequently (rebuild on change).
+    for (const auto& entry : m_entries)
+    {
+        if (entry.absPath == path)
+            return &entry;
+    }
+    return nullptr;
+}
+
 MaterialEntry* MaterialCatalog::findMutable(const UUID& uuid) noexcept
 {
     const auto it = m_uuidIndex.find(uuid);

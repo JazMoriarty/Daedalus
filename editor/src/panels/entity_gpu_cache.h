@@ -26,6 +26,9 @@
 
 #include "sprite_anim_math.h"
 
+// Forward declarations to avoid circular header dependencies
+namespace daedalus::editor { class MaterialCatalog; }
+
 #include <glm/glm.hpp>
 #include <memory>
 #include <string>
@@ -56,6 +59,7 @@ public:
     /// Skips entries whose visualType + assetPath are unchanged since last rebuild.
     void rebuild(render::IAssetLoader&         loader,
                  rhi::IRenderDevice&           device,
+                 MaterialCatalog&              catalog,
                  const std::vector<EntityDef>& entities,
                  EditMapDocument&              doc);
 
@@ -77,9 +81,13 @@ private:
         std::string      assetPath;
         bool             loaded     = false;
 
-        // Textures: albedo/palette/atlas; normalTex used by Decal only.
-        std::unique_ptr<rhi::ITexture> albedoTex;
-        std::unique_ptr<rhi::ITexture> normalTex;
+        // Textures: owned (for voxels/particles/fallbacks) or catalog-referenced.
+        // When loading from MaterialCatalog, use albedoPtr/normalPtr (catalog owns lifetime).
+        // When creating textures directly (voxels, particles), use albedoTex/normalTex (we own lifetime).
+        std::unique_ptr<rhi::ITexture> albedoTex;  ///< Owned texture (voxel palette, particle fallback).
+        std::unique_ptr<rhi::ITexture> normalTex;  ///< Owned texture (explicit load for decals).
+        rhi::ITexture* albedoPtr = nullptr;  ///< Catalog-referenced texture (not owned).
+        rhi::ITexture* normalPtr = nullptr;  ///< Catalog-referenced normal map (not owned).
 
         // Mesh geometry: VoxelObject / StaticMesh.
         std::unique_ptr<rhi::IBuffer> vbo;
@@ -109,6 +117,7 @@ private:
                    const EntityDef&      def,
                    render::IAssetLoader& loader,
                    rhi::IRenderDevice&   device,
+                   MaterialCatalog&      catalog,
                    EditMapDocument&      doc);
 };
 

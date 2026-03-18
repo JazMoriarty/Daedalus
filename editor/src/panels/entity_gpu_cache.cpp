@@ -1,5 +1,6 @@
 #include "entity_gpu_cache.h"
 
+#include "../catalog/material_catalog.h"
 #include "daedalus/editor/edit_map_document.h"
 #include "daedalus/render/systems/billboard_render_system.h"
 #include "daedalus/render/rhi/rhi_types.h"
@@ -57,6 +58,7 @@ void EntityGpuCache::loadEntry(EntityGpuEntry&       entry,
                                 const EntityDef&      def,
                                 render::IAssetLoader& loader,
                                 rhi::IRenderDevice&   device,
+                                MaterialCatalog&      catalog,
                                 EditMapDocument&      doc)
 {
     entry.visualType = def.visualType;
@@ -71,14 +73,28 @@ void EntityGpuCache::loadEntry(EntityGpuEntry&       entry,
     case EntityVisualType::RotatedSpriteSet:
     {
         if (def.assetPath.empty()) break;
-        auto result = loader.loadTexture(device, def.assetPath, /*sRGB=*/true);
-        if (!result)
+        
+        // Look up material in catalog to get UUID and auto-detect companions.
+        const MaterialEntry* matEntry = catalog.findByPath(def.assetPath);
+        if (!matEntry)
         {
-            doc.log("EntityGpuCache: failed to load billboard texture: " + def.assetPath);
-            break;
+            // Fallback: load directly if not in catalog (e.g., external path).
+            auto result = loader.loadTexture(device, def.assetPath, /*sRGB=*/true);
+            if (!result)
+            {
+                doc.log("EntityGpuCache: failed to load billboard texture: " + def.assetPath);
+                break;
+            }
+            entry.albedoTex = std::move(*result);
         }
-        entry.albedoTex = std::move(*result);
-        entry.loaded    = true;
+        else
+        {
+            // Load via catalog to get auto-detected companion maps.
+            entry.albedoPtr = catalog.getOrLoadTexture(matEntry->uuid, device, loader);
+            entry.normalPtr = catalog.getOrLoadNormalMap(matEntry->uuid, device, loader);
+        }
+        
+        entry.loaded = true;
         break;
     }
 
@@ -200,34 +216,59 @@ void EntityGpuCache::loadEntry(EntityGpuEntry&       entry,
     case EntityVisualType::Decal:
     {
         if (def.assetPath.empty()) break;
-        auto albedo = loader.loadTexture(device, def.assetPath, /*sRGB=*/true);
-        if (!albedo)
+        
+        // Look up material in catalog for auto-detected companions.
+        const MaterialEntry* matEntry = catalog.findByPath(def.assetPath);
+        if (!matEntry)
         {
-            doc.log("EntityGpuCache: failed to load decal albedo: " + def.assetPath);
-            break;
+            // Fallback: load directly if not in catalog.
+            auto albedo = loader.loadTexture(device, def.assetPath, /*sRGB=*/true);
+            if (!albedo)
+            {
+                doc.log("EntityGpuCache: failed to load decal albedo: " + def.assetPath);
+                break;
+            }
+            entry.albedoTex = std::move(*albedo);
         }
-        entry.albedoTex = std::move(*albedo);
-
-        if (!def.decalMat.normalPath.empty())
+        else
         {
-            auto normal = loader.loadTexture(device, def.decalMat.normalPath, /*sRGB=*/false);
-            if (normal)
-                entry.normalTex = std::move(*normal);
+            entry.albedoPtr = catalog.getOrLoadTexture(matEntry->uuid, device, loader);
+            // For decals: use explicit normalPath if specified, otherwise use auto-detected.
+            if (!def.decalMat.normalPath.empty())
+            {
+                auto normal = loader.loadTexture(device, def.decalMat.normalPath, /*sRGB=*/false);
+                if (normal)
+                    entry.normalTex = std::move(*normal);
+            }
+            else
+            {
+                entry.normalPtr = catalog.getOrLoadNormalMap(matEntry->uuid, device, loader);
+            }
         }
+        
         entry.loaded = true;
         break;
     }
 
     case EntityVisualType::ParticleEmitter:
     {
-        // Try to load the user-specified atlas texture.
+        // Try to load the user-specified atlas texture via catalog.
         if (!def.assetPath.empty())
         {
-            auto atlas = loader.loadTexture(device, def.assetPath, /*sRGB=*/true);
-            if (atlas)
-                entry.albedoTex = std::move(*atlas);
+            const MaterialEntry* matEntry = catalog.findByPath(def.assetPath);
+            if (matEntry)
+            {
+                entry.albedoPtr = catalog.getOrLoadTexture(matEntry->uuid, device, loader);
+            }
             else
-                doc.log("EntityGpuCache: failed to load particle atlas: " + def.assetPath);
+            {
+                // Fallback: load directly if not in catalog.
+                auto atlas = loader.loadTexture(device, def.assetPath, /*sRGB=*/true);
+                if (atlas)
+                    entry.albedoTex = std::move(*atlas);
+                else
+                    doc.log("EntityGpuCache: failed to load particle atlas: " + def.assetPath);
+            }
         }
 
         // Fall back to a 1x1 white texture so the emitter renders without an atlas.
@@ -255,6 +296,7 @@ void EntityGpuCache::loadEntry(EntityGpuEntry&       entry,
 
 void EntityGpuCache::rebuild(render::IAssetLoader&         loader,
                                rhi::IRenderDevice&           device,
+                               MaterialCatalog&              catalog,
                                const std::vector<EntityDef>& entities,
                                EditMapDocument&              doc)
 {
@@ -283,7 +325,7 @@ void EntityGpuCache::rebuild(render::IAssetLoader&         loader,
         entry                   = {};
         m_animTimes[i]          = 0.0f;
         m_spawnAccumulators[i]  = 0.0f;
-        loadEntry(entry, def, loader, device, doc);
+        loadEntry(entry, def, loader, device, catalog, doc);
     }
 
     m_dirty = false;
@@ -296,6 +338,15 @@ void EntityGpuCache::populateSceneView(render::SceneView&            scene,
                                         const glm::mat4&              view)
 {
     const std::size_t n = std::min(m_entries.size(), entities.size());
+
+    // Helper: get albedo texture (catalog-ref or owned).
+    auto getAlbedo = [](const EntityGpuEntry& e) -> rhi::ITexture* {
+        return e.albedoPtr ? e.albedoPtr : e.albedoTex.get();
+    };
+    // Helper: get normal map texture (catalog-ref or owned).
+    auto getNormal = [](const EntityGpuEntry& e) -> rhi::ITexture* {
+        return e.normalPtr ? e.normalPtr : e.normalTex.get();
+    };
 
     for (std::size_t i = 0; i < n; ++i)
     {
@@ -319,8 +370,9 @@ void EntityGpuCache::populateSceneView(render::SceneView&            scene,
             draw.indexCount        = 6u;
             draw.modelMatrix       = model;
             draw.prevModel         = model;
-            draw.material.albedo   = entry.albedoTex.get();
-            draw.material.emissive = entry.albedoTex.get();  // self-illuminated: full colour regardless of NdotL
+            draw.material.albedo    = getAlbedo(entry);
+            draw.material.emissive  = getAlbedo(entry);  // self-illuminated: full colour regardless of NdotL
+            draw.material.normalMap = getNormal(entry);
             draw.material.roughness = 1.0f;
             draw.material.metalness = 0.0f;
             draw.material.tint      = def.tint;
@@ -391,8 +443,9 @@ void EntityGpuCache::populateSceneView(render::SceneView&            scene,
             draw.indexCount         = 6u;
             draw.modelMatrix        = model;
             draw.prevModel          = model;
-            draw.material.albedo    = entry.albedoTex.get();
+            draw.material.albedo    = getAlbedo(entry);
             draw.material.emissive  = nullptr;
+            draw.material.normalMap = getNormal(entry);
             draw.material.roughness = 1.0f;
             draw.material.metalness = 0.0f;
             draw.material.tint      = def.tint;
@@ -419,7 +472,8 @@ void EntityGpuCache::populateSceneView(render::SceneView&            scene,
             draw.indexCount         = entry.indexCount;
             draw.modelMatrix        = model;
             draw.prevModel          = model;
-            draw.material.albedo    = entry.albedoTex.get();  // palette tex (vox) or nullptr (static mesh)
+            draw.material.albedo    = getAlbedo(entry);  // palette tex (vox) or catalog-ref texture
+            draw.material.normalMap = getNormal(entry);
             draw.material.roughness = 0.8f;
             draw.material.metalness = 0.0f;
             draw.material.tint      = def.tint;
@@ -430,7 +484,8 @@ void EntityGpuCache::populateSceneView(render::SceneView&            scene,
 
         case EntityVisualType::Decal:
         {
-            if (!entry.albedoTex) break;
+            rhi::ITexture* albedo = getAlbedo(entry);
+            if (!albedo) break;
 
             glm::mat4 model = glm::mat4(1.0f);
             model = glm::translate(model, def.position);
@@ -442,8 +497,8 @@ void EntityGpuCache::populateSceneView(render::SceneView&            scene,
             render::DecalDraw decal;
             decal.modelMatrix    = model;
             decal.invModelMatrix = glm::inverse(model);
-            decal.albedoTexture  = entry.albedoTex.get();
-            decal.normalTexture  = entry.normalTex.get();   // may be nullptr
+            decal.albedoTexture  = albedo;
+            decal.normalTexture  = getNormal(entry);  // may be nullptr
             decal.roughness      = def.decalMat.roughness;
             decal.metalness      = def.decalMat.metalness;
             decal.opacity        = def.decalMat.opacity;
@@ -455,11 +510,12 @@ void EntityGpuCache::populateSceneView(render::SceneView&            scene,
 
         case EntityVisualType::ParticleEmitter:
         {
-            if (!entry.particlePool || !entry.albedoTex) break;
+            rhi::ITexture* atlas = getAlbedo(entry);
+            if (!entry.particlePool || !atlas) break;
 
             render::ParticleEmitterDraw emitter;
             emitter.pool         = entry.particlePool.get();
-            emitter.atlasTexture = entry.albedoTex.get();
+            emitter.atlasTexture = atlas;
 
             const auto& p = def.particle;
             auto&       c = emitter.constants;

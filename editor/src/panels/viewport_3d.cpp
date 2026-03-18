@@ -589,7 +589,7 @@ void Viewport3D::draw(EditMapDocument&      doc,
         m_entityCache.invalidate();
         doc.clearEntityDirty();
     }
-    m_entityCache.rebuild(loader, device, doc.entities(), doc);
+    m_entityCache.rebuild(loader, device, catalog, doc.entities(), doc);
 
     // ── Free-fly camera ───────────────────────────────────────────────────────
     const ImGuiIO& io = ImGui::GetIO();

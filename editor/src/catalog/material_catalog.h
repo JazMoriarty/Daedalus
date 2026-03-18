@@ -90,6 +90,10 @@ public:
     /// Find an entry by UUID.  Returns nullptr if not found.
     [[nodiscard]] const MaterialEntry* find(const UUID& uuid) const noexcept;
 
+    /// Find an entry by absolute filesystem path.  Returns nullptr if not found.
+    /// Used by entity loading to convert EntityDef::assetPath to a material UUID.
+    [[nodiscard]] const MaterialEntry* findByPath(const std::filesystem::path& path) const noexcept;
+
     /// All entries discovered in the last scan(), sorted by folder then name.
     [[nodiscard]] const std::vector<MaterialEntry>& entries() const noexcept { return m_entries; }
 
