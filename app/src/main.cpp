@@ -499,8 +499,8 @@ int main(int argc, char* argv[])
                 draw.indexCount    = static_cast<u32>(batch.mesh.indices.size());
                 draw.modelMatrix   = glm::mat4(1.0f);
                 draw.prevModel     = glm::mat4(1.0f);
-                draw.material.roughness = 0.85f;
-                draw.material.metalness = 0.0f;
+                // Use default Material roughness/metalness (0.5f / 0.0f) for visual parity with editor.
+                // High roughness (0.85f) makes surfaces very matte and greatly reduces normal map visibility.
 
                 // Bake per-sector ambient (matches editor viewport_3d retessellate).
                 // Global scene ambientColor is zeroed below to avoid double-counting.
