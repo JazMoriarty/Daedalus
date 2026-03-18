@@ -53,6 +53,7 @@
 #include "daedalus/render/components/particle_emitter_component.h"
 #include "daedalus/render/systems/particle_render_system.h"
 #include "daedalus/render/particle_pool.h"
+#include "daedalus/render/mipmap_generator.h"
 
 #include <SDL3/SDL.h>
 #include <CoreGraphics/CoreGraphics.h>
@@ -412,12 +413,17 @@ int main(int argc, char* argv[])
         {
             if (ltex.pixels.empty()) { continue; }
 
+            // Generate full mipmap chain for RT quality.
+            const render::MipmapChain mipChain = render::generateMipmapChain(
+                ltex.pixels.data(), ltex.width, ltex.height);
+
             rhi::TextureDescriptor td;
-            td.width     = ltex.width;
-            td.height    = ltex.height;
+            td.width     = mipChain.width;
+            td.height    = mipChain.height;
+            td.mipLevels = mipChain.mipCount;
             td.format    = rhi::TextureFormat::RGBA8Unorm_sRGB;
             td.usage     = rhi::TextureUsage::ShaderRead;
-            td.initData  = ltex.pixels.data();
+            td.initData  = mipChain.data.data();
             td.debugName = "dlevel_tex";
             packTextures[uuid] = device->createTexture(td);
         }
