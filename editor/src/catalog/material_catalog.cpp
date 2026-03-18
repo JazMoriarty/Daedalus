@@ -59,9 +59,13 @@ bool MaterialCatalog::isImageFile(const std::filesystem::path& p) noexcept
 
 // ─── readOrCreateMeta ────────────────────────────────────────────────────────
 
-UUID MaterialCatalog::readOrCreateMeta(const std::filesystem::path& imgPath)
+// ─── readOrCreateMeta (now takes MaterialEntry to populate companion paths) ────
+
+UUID MaterialCatalog::readOrCreateMeta(const std::filesystem::path& imgPath,
+                                        MaterialEntry&                entry)
 {
     const std::filesystem::path metaPath = imgPath.string() + ".meta";
+    const std::filesystem::path imgDir   = imgPath.parent_path();
 
     // Try to read an existing .meta file.
     if (std::filesystem::exists(metaPath))
@@ -76,6 +80,29 @@ UUID MaterialCatalog::readOrCreateMeta(const std::filesystem::path& imgPath)
                 UUID uuid;
                 uuid.hi = j["uuid_hi"].get<uint64_t>();
                 uuid.lo = j["uuid_lo"].get<uint64_t>();
+                
+                // Read optional companion map overrides.
+                // If present in .meta, override auto-detected paths.
+                // Empty string explicitly disables the companion map.
+                if (j.contains("normal_map"))
+                {
+                    const std::string nm = j["normal_map"].get<std::string>();
+                    entry.normalPath = nm.empty() ? std::filesystem::path{}
+                                                  : (imgDir / nm);
+                }
+                if (j.contains("roughness_map"))
+                {
+                    const std::string rm = j["roughness_map"].get<std::string>();
+                    entry.roughnessPath = rm.empty() ? std::filesystem::path{}
+                                                     : (imgDir / rm);
+                }
+                if (j.contains("metalness_map"))
+                {
+                    const std::string mm = j["metalness_map"].get<std::string>();
+                    entry.metalnessPath = mm.empty() ? std::filesystem::path{}
+                                                     : (imgDir / mm);
+                }
+                
                 if (uuid.isValid()) return uuid;
             }
             catch (...) {}
@@ -89,6 +116,8 @@ UUID MaterialCatalog::readOrCreateMeta(const std::filesystem::path& imgPath)
         nlohmann::json j;
         j["uuid_hi"] = uuid.hi;
         j["uuid_lo"] = uuid.lo;
+        // Do not write companion map fields yet — those are written only if
+        // the user explicitly overrides via a future UI feature.
         std::ofstream ofs(metaPath);
         if (ofs.is_open())
             ofs << j.dump(4) << '\n';
@@ -117,9 +146,16 @@ void MaterialCatalog::scan()
         // Skip .meta companion files themselves.
         if (p.extension() == ".meta")  continue;
 
+        // Skip companion map suffixes — they're not primary materials.
+        // Only albedo/diffuse textures (e.g., brick.png) become catalog entries.
+        // Their companions (brick_n.png, brick_r.png, brick_m.png) are discovered below.
+        const std::string stem = p.stem().string();
+        if (stem.ends_with("_n") || stem.ends_with("_r") || stem.ends_with("_m"))
+            continue;
+
         MaterialEntry me;
         me.absPath    = p;
-        me.displayName = p.stem().string();
+        me.displayName = stem;
 
         // Relative folder path within the root ("" when directly in root).
         {
@@ -129,7 +165,21 @@ void MaterialCatalog::scan()
                 me.folderPath = rel.string();
         }
 
-        me.uuid = readOrCreateMeta(p);
+        // Auto-detect companion maps by suffix convention.
+        // These may be overridden by .meta sidecar entries.
+        auto detectCompanion = [&](const std::string& suffix) -> std::filesystem::path
+        {
+            std::filesystem::path comp = p;
+            const std::string compStem = stem + suffix;
+            comp.replace_filename(compStem + p.extension().string());
+            return std::filesystem::exists(comp) ? comp : std::filesystem::path{};
+        };
+        me.normalPath    = detectCompanion("_n");
+        me.roughnessPath = detectCompanion("_r");
+        me.metalnessPath = detectCompanion("_m");
+
+        // Read .meta to get UUID and apply any explicit companion overrides.
+        me.uuid = readOrCreateMeta(p, me);
 
         // Query native image dimensions from the file header (no pixel decode).
         {
@@ -259,6 +309,69 @@ rhi::ITexture* MaterialCatalog::getOrLoadTexture(const UUID&           uuid,
     }
 
     return entry->fullTexture.get();
+}
+
+// ─── getOrLoadNormalMap ───────────────────────────────────────────────────────
+
+rhi::ITexture* MaterialCatalog::getOrLoadNormalMap(const UUID&           uuid,
+                                                     rhi::IRenderDevice&   device,
+                                                     render::IAssetLoader& loader)
+{
+    MaterialEntry* entry = findMutable(uuid);
+    if (!entry) return nullptr;
+    if (entry->normalPath.empty()) return nullptr;
+
+    if (!entry->normalTexture)
+    {
+        // Normal maps must be loaded with sRGB=false to preserve tangent-space data.
+        auto result = loader.loadTexture(device, entry->normalPath, /*sRGB=*/false);
+        if (result.has_value())
+            entry->normalTexture = std::move(*result);
+    }
+
+    return entry->normalTexture.get();
+}
+
+// ─── getOrLoadRoughnessMap ────────────────────────────────────────────────────
+
+rhi::ITexture* MaterialCatalog::getOrLoadRoughnessMap(const UUID&           uuid,
+                                                        rhi::IRenderDevice&   device,
+                                                        render::IAssetLoader& loader)
+{
+    MaterialEntry* entry = findMutable(uuid);
+    if (!entry) return nullptr;
+    if (entry->roughnessPath.empty()) return nullptr;
+
+    if (!entry->roughnessTexture)
+    {
+        // Roughness maps are typically single-channel linear data.
+        auto result = loader.loadTexture(device, entry->roughnessPath, /*sRGB=*/false);
+        if (result.has_value())
+            entry->roughnessTexture = std::move(*result);
+    }
+
+    return entry->roughnessTexture.get();
+}
+
+// ─── getOrLoadMetalnessMap ────────────────────────────────────────────────────
+
+rhi::ITexture* MaterialCatalog::getOrLoadMetalnessMap(const UUID&           uuid,
+                                                        rhi::IRenderDevice&   device,
+                                                        render::IAssetLoader& loader)
+{
+    MaterialEntry* entry = findMutable(uuid);
+    if (!entry) return nullptr;
+    if (entry->metalnessPath.empty()) return nullptr;
+
+    if (!entry->metalnessTexture)
+    {
+        // Metalness maps are typically single-channel linear data.
+        auto result = loader.loadTexture(device, entry->metalnessPath, /*sRGB=*/false);
+        if (result.has_value())
+            entry->metalnessTexture = std::move(*result);
+    }
+
+    return entry->metalnessTexture.get();
 }
 
 } // namespace daedalus::editor

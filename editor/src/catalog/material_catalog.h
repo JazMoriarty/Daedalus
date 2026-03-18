@@ -35,7 +35,7 @@ namespace daedalus::editor
 struct MaterialEntry
 {
     UUID                  uuid;
-    std::filesystem::path absPath;      ///< Absolute path to the image file.
+    std::filesystem::path absPath;      ///< Absolute path to the primary albedo/diffuse image file.
     std::string           displayName;  ///< Filename without extension (for display).
     std::string           folderPath;   ///< Relative folder path within root ("" = root).
 
@@ -44,11 +44,22 @@ struct MaterialEntry
     uint32_t texWidth  = 0;
     uint32_t texHeight = 0;
 
+    // ─── Companion map paths ──────────────────────────────────────────────────
+    // Auto-detected during scan() by suffix convention (stem_n.ext, stem_r.ext, etc.)
+    // or explicitly specified in the .meta sidecar. Empty path = no companion map.
+    std::filesystem::path normalPath;     ///< Tangent-space normal map (_n suffix).
+    std::filesystem::path roughnessPath;  ///< Roughness map (_r suffix).
+    std::filesystem::path metalnessPath;  ///< Metalness map (_m suffix).
+
+    // ─── GPU textures (loaded on demand) ──────────────────────────────────────
     /// 64×64 thumbnail texture; null until first getOrLoadThumbnail() call.
     std::unique_ptr<rhi::ITexture> thumbnail;
 
     /// Full-resolution GPU texture; null until first getOrLoadTexture() call.
-    std::unique_ptr<rhi::ITexture> fullTexture;
+    std::unique_ptr<rhi::ITexture> fullTexture;      ///< Albedo/diffuse texture.
+    std::unique_ptr<rhi::ITexture> normalTexture;    ///< Normal map texture.
+    std::unique_ptr<rhi::ITexture> roughnessTexture; ///< Roughness map texture.
+    std::unique_ptr<rhi::ITexture> metalnessTexture; ///< Metalness map texture.
 };
 
 // ─── MaterialCatalog ──────────────────────────────────────────────────────────
@@ -98,6 +109,25 @@ public:
                                                    rhi::IRenderDevice&   device,
                                                    render::IAssetLoader& loader);
 
+    /// Return the normal map texture for uuid, loading it on first call.
+    /// Returns nullptr if uuid is not in the catalog, no normal map exists, or loading fails.
+    /// Normal maps are loaded with sRGB=false to preserve tangent-space data.
+    [[nodiscard]] rhi::ITexture* getOrLoadNormalMap(const UUID&           uuid,
+                                                     rhi::IRenderDevice&   device,
+                                                     render::IAssetLoader& loader);
+
+    /// Return the roughness map texture for uuid, loading it on first call.
+    /// Returns nullptr if uuid is not in the catalog, no roughness map exists, or loading fails.
+    [[nodiscard]] rhi::ITexture* getOrLoadRoughnessMap(const UUID&           uuid,
+                                                        rhi::IRenderDevice&   device,
+                                                        render::IAssetLoader& loader);
+
+    /// Return the metalness map texture for uuid, loading it on first call.
+    /// Returns nullptr if uuid is not in the catalog, no metalness map exists, or loading fails.
+    [[nodiscard]] rhi::ITexture* getOrLoadMetalnessMap(const UUID&           uuid,
+                                                        rhi::IRenderDevice&   device,
+                                                        render::IAssetLoader& loader);
+
 private:
     std::filesystem::path m_root;
     std::vector<MaterialEntry> m_entries;
@@ -106,7 +136,8 @@ private:
     [[nodiscard]] MaterialEntry* findMutable(const UUID& uuid) noexcept;
 
     static bool isImageFile(const std::filesystem::path& p) noexcept;
-    static UUID readOrCreateMeta(const std::filesystem::path& imgPath);
+    static UUID readOrCreateMeta(const std::filesystem::path& imgPath,
+                                  MaterialEntry&                entry);
 
     [[nodiscard]] std::unique_ptr<rhi::ITexture>
     buildThumbnail(const std::filesystem::path& path, rhi::IRenderDevice& device);
