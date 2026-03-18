@@ -900,13 +900,16 @@ void Viewport3D::draw(EditMapDocument&      doc,
         scene.rt.denoise           = r.rt.denoise;
     }
 
-    // ── Refresh material albedo textures from catalog (lazy, each frame) ───────
+    // ── Refresh material albedo + normal map textures from catalog (lazy, each frame) ───────
     for (std::size_t si = 0; si < m_draws.size(); ++si)
         for (std::size_t bi = 0; bi < m_draws[si].size(); ++bi)
         {
             const UUID& uuid = m_drawMaterialIds[si][bi];
             m_draws[si][bi].material.albedo = uuid.isValid()
                 ? catalog.getOrLoadTexture(uuid, device, loader)
+                : nullptr;
+            m_draws[si][bi].material.normalMap = uuid.isValid()
+                ? catalog.getOrLoadNormalMap(uuid, device, loader)
                 : nullptr;
         }
 
