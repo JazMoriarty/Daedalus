@@ -13,6 +13,8 @@
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
 
+#include "mipmap_generator.h"
+
 // ─── cgltf implementation (compiled once here, private to this TU) ───────────
 #define CGLTF_IMPLEMENTATION
 #include "cgltf.h"
@@ -95,17 +97,23 @@ public:
         if (!pixels)
             return std::unexpected(AssetError::FileNotFound);
 
+        // Generate full mipmap chain for RT quality.
+        const MipmapChain mipChain = generateMipmapChain(pixels, 
+                                                         static_cast<u32>(w), 
+                                                         static_cast<u32>(h));
+        stbi_image_free(pixels);  // Original pixels no longer needed
+
         rhi::TextureDescriptor d;
-        d.width     = static_cast<u32>(w);
-        d.height    = static_cast<u32>(h);
+        d.width     = mipChain.width;
+        d.height    = mipChain.height;
+        d.mipLevels = mipChain.mipCount;
         d.format    = sRGB ? rhi::TextureFormat::RGBA8Unorm_sRGB
                            : rhi::TextureFormat::RGBA8Unorm;
         d.usage     = rhi::TextureUsage::ShaderRead;
-        d.initData  = pixels;
+        d.initData  = mipChain.data.data();
         d.debugName = path.filename().string();
 
         auto texture = device.createTexture(d);
-        stbi_image_free(pixels);
 
         if (!texture)
             return std::unexpected(AssetError::UploadError);

@@ -1090,25 +1090,37 @@ public:
 
         if (desc.initData)
         {
-            const u32 bytesPerRow = desc.width * formatBytesPerPixel(desc.format);
-            if (desc.depth > 1)
+            // Upload all mip levels sequentially from initData.
+            // For mipLevels > 1, initData contains all mips laid out back-to-back.
+            const u8* srcPtr = static_cast<const u8*>(desc.initData);
+            
+            for (u32 mip = 0; mip < desc.mipLevels; ++mip)
             {
-                // 3D texture: MTLRegionMake3D covers all depth slices.
-                // bytesPerImage is the stride between consecutive depth slices.
-                const u32 bytesPerImage = bytesPerRow * desc.height;
-                [tex replaceRegion:MTLRegionMake3D(0, 0, 0, desc.width, desc.height, desc.depth)
-                       mipmapLevel:0
-                             slice:0
-                         withBytes:desc.initData
-                       bytesPerRow:bytesPerRow
-                     bytesPerImage:bytesPerImage];
-            }
-            else
-            {
-                [tex replaceRegion:MTLRegionMake2D(0, 0, desc.width, desc.height)
-                       mipmapLevel:0
-                         withBytes:desc.initData
-                       bytesPerRow:bytesPerRow];
+                const u32 mipW = std::max(desc.width  >> mip, 1u);
+                const u32 mipH = std::max(desc.height >> mip, 1u);
+                const u32 mipD = std::max(desc.depth  >> mip, 1u);
+                const u32 bytesPerRow = mipW * formatBytesPerPixel(desc.format);
+                
+                if (desc.depth > 1)
+                {
+                    // 3D texture: MTLRegionMake3D covers all depth slices.
+                    const u32 bytesPerImage = bytesPerRow * mipH;
+                    [tex replaceRegion:MTLRegionMake3D(0, 0, 0, mipW, mipH, mipD)
+                           mipmapLevel:mip
+                                 slice:0
+                             withBytes:srcPtr
+                           bytesPerRow:bytesPerRow
+                         bytesPerImage:bytesPerImage];
+                    srcPtr += bytesPerImage * mipD;
+                }
+                else
+                {
+                    [tex replaceRegion:MTLRegionMake2D(0, 0, mipW, mipH)
+                           mipmapLevel:mip
+                             withBytes:srcPtr
+                           bytesPerRow:bytesPerRow];
+                    srcPtr += bytesPerRow * mipH;
+                }
             }
         }
 
