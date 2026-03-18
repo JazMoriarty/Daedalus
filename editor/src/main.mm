@@ -1479,6 +1479,11 @@ int main(int /*argc*/, char* /*argv*/[])
                 {
                     catalog.setRoot(std::filesystem::path(ar));
                     catalog.scan();
+                    
+                    // Catalog rescan invalidates MaterialEntry pointers.
+                    // Mark geometry and entities dirty to force reload.
+                    doc.markDirty();      // Marks geometry dirty
+                    doc.markEntityDirty(); // Marks entity cache dirty
 
                     // Also scan the sibling models and voxels directories.
                     const std::filesystem::path modelRoot =
