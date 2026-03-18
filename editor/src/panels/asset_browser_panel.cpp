@@ -101,6 +101,17 @@ void AssetBrowserPanel::drawThumbnailGrid(MaterialCatalog&    catalog,
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip("%s", entry.absPath.c_str());
 
+        // Right-click context menu on the thumbnail image
+        if (ImGui::BeginPopupContextItem("##thumbctx"))
+        {
+            if (ImGui::MenuItem("Generate Normal Map..."))
+            {
+                if (m_normalMapGenCallback)
+                    m_normalMapGenCallback(entry.uuid);
+            }
+            ImGui::EndPopup();
+        }
+
         // Drag source — drag a thumbnail into the 3D viewport to assign the material.
         if (ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceAllowNullID))
         {

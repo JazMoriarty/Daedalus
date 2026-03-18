@@ -16,6 +16,7 @@ target_sources(DaedalusRender PRIVATE
     src/renderer/rt_scene_manager.cpp
     src/loader/asset_loader.cpp
     src/loader/mipmap_generator.cpp
+    src/loader/normal_map_generator.cpp
 )
 
 # ─── Platform backend ───────────────────────────────────────────────────────

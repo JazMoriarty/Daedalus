@@ -49,6 +49,7 @@
 #include "catalog/model_catalog.h"
 #include "panels/asset_browser_panel.h"
 #include "panels/splash_screen.h"
+#include "panels/normal_map_generator_panel.h"
 #include "daedalus/world/dlevel_io.h"
 
 // stb_image (declaration only — implementation compiled once in asset_loader.cpp)
@@ -230,7 +231,17 @@ static void drawMenuBar(EditMapDocument& doc,
                          glm::vec2         lastMouseMapPos,
                          bool&             openNewMapDlg,
                          HelpPanel&        helpPanel,
-                         FileDialogState&  dlgState)
+                         FileDialogState&  dlgState,
+                         bool&             show2DViewport,
+                         bool&             show3DViewport,
+                         bool&             showPropertyInspector,
+                         bool&             showObjectBrowser,
+                         bool&             showAssetBrowser,
+                         bool&             showLayers,
+                         bool&             showOutputLog,
+                         bool&             showRenderSettings,
+                         bool&             showNormalMapGen,
+                         bool&             showHelp)
 {
     if (ImGui::BeginMainMenuBar())
     {
@@ -322,6 +333,24 @@ static void drawMenuBar(EditMapDocument& doc,
                     doc.selection().sectors.front(),
                     glm::vec2{gridStep, gridStep}));
 
+            ImGui::EndMenu();
+        }
+
+        // ── Window ────────────────────────────────────────────────────────────
+        if (ImGui::BeginMenu("Window"))
+        {
+            ImGui::MenuItem("2D Viewport", nullptr, &show2DViewport);
+            ImGui::MenuItem("3D Viewport", nullptr, &show3DViewport);
+            ImGui::MenuItem("Property Inspector", nullptr, &showPropertyInspector);
+            ImGui::MenuItem("Object Browser", nullptr, &showObjectBrowser);
+            ImGui::MenuItem("Asset Browser", nullptr, &showAssetBrowser);
+            ImGui::MenuItem("Layers", nullptr, &showLayers);
+            ImGui::MenuItem("Output Log", nullptr, &showOutputLog);
+            ImGui::Separator();
+            ImGui::MenuItem("Render Settings", nullptr, &showRenderSettings);
+            ImGui::MenuItem("Normal Map Generator", nullptr, &showNormalMapGen);
+            ImGui::Separator();
+            ImGui::MenuItem("Help", "F1", &showHelp);
             ImGui::EndMenu();
         }
 
@@ -594,7 +623,27 @@ int main(int /*argc*/, char* /*argv*/[])
     ModelCatalog        modelCatalog;
     ModelCatalog        voxCatalog;
     AssetBrowserPanel   assetBrowser;
+    NormalMapGeneratorPanel normalMapGenPanel;
     std::string         lastKnownAssetRoot;
+
+    // Panel visibility flags (controlled by Window menu)
+    bool show2DViewport          = true;
+    bool show3DViewport          = true;
+    bool showPropertyInspector   = true;
+    bool showObjectBrowser       = true;
+    bool showAssetBrowser        = true;
+    bool showLayers              = true;
+    bool showOutputLog           = true;
+    bool showRenderSettings      = true;
+    bool showNormalMapGen        = false;  // Hidden by default
+    bool showHelp                = false;  // Hidden by default (opened via F1)
+
+    // ── Wire up Asset Browser right-click callback to Normal Map Generator ───────
+    assetBrowser.setNormalMapGenCallback([&](const UUID& textureUUID)
+    {
+        normalMapGenPanel.openWithTexture(textureUUID);
+        showNormalMapGen = true;  // Make panel visible
+    });
 
     // ── Model catalog: scan once at startup from the standard models directory.
     // ── Vox catalog: scan once at startup from assets/voxels/.
@@ -1156,7 +1205,9 @@ int main(int /*argc*/, char* /*argv*/[])
                         }
                         else if (sc == SDL_SCANCODE_F1)
                         {
-                            helpPanel.toggle();
+                            showHelp = !showHelp;
+                            if (showHelp)
+                                helpPanel.setOpen(true);
                         }
                         else if (sc == SDL_SCANCODE_F9)
                         {
@@ -1487,7 +1538,10 @@ int main(int /*argc*/, char* /*argv*/[])
         // ── Menu bar ──────────────────────────────────────────────────────────
         drawMenuBar(doc, activeToolId, selectTool, drawSectorTool, vertexTool, activeTool,
                     vp2d.gridStep(), vp2d.viewCenterMapPos(), nmDlg.open, helpPanel,
-                    dlgState);
+                    dlgState,
+                    show2DViewport, show3DViewport, showPropertyInspector,
+                    showObjectBrowser, showAssetBrowser, showLayers,
+                    showOutputLog, showRenderSettings, showNormalMapGen, showHelp);
 
         // ── Panels ────────────────────────────────────────────────────────────
         DrawSectorTool* drawToolPtr =
@@ -1497,10 +1551,13 @@ int main(int /*argc*/, char* /*argv*/[])
         VertexTool* vertexToolPtr =
             (activeToolId == ActiveTool::Vertex) ? &vertexTool : nullptr;
 
-        vp2d.updateFlyCamera(vp3d.isMouseCaptured(),
-                              {vp3d.eye().x, vp3d.eye().z},
-                              vp3d.yaw());
-        vp2d.draw(doc, activeTool, drawToolPtr, selectToolPtr, vertexToolPtr);
+        if (show2DViewport)
+        {
+            vp2d.updateFlyCamera(vp3d.isMouseCaptured(),
+                                  {vp3d.eye().x, vp3d.eye().z},
+                                  vp3d.yaw());
+            vp2d.draw(doc, activeTool, drawToolPtr, selectToolPtr, vertexToolPtr);
+        }
 
         // Consume a pending placement committed by a click in the 2D viewport.
         {
@@ -1523,16 +1580,52 @@ int main(int /*argc*/, char* /*argv*/[])
             }
         }
 
-        vp3d.draw(doc, *assetLoader, *device, *queue, catalog, assetBrowser,
-                  vp2d.isEntityRotating(), vp2d.rotatingEntityIdx());
-        inspector.draw(doc, catalog, *device, *assetLoader, assetBrowser,
-                        &voxCatalog, vp2d.gridStep());
-        assetBrowser.draw(catalog, *device, *assetLoader, modelCatalog, &voxCatalog);
-        renderPanel.draw(doc);
-        objBrowser.draw(doc, vp2d.viewCenterMapPos());
-        layersPanel.draw(doc);
-        outputLog.draw(doc);
-        helpPanel.draw();
+        if (show3DViewport)
+        {
+            vp3d.draw(doc, *assetLoader, *device, *queue, catalog, assetBrowser,
+                      vp2d.isEntityRotating(), vp2d.rotatingEntityIdx());
+        }
+        
+        if (showPropertyInspector)
+        {
+            inspector.draw(doc, catalog, *device, *assetLoader, assetBrowser,
+                            &voxCatalog, vp2d.gridStep());
+        }
+        
+        if (showAssetBrowser)
+        {
+            assetBrowser.draw(catalog, *device, *assetLoader, modelCatalog, &voxCatalog);
+        }
+        
+        if (showRenderSettings)
+        {
+            renderPanel.draw(doc);
+        }
+        
+        if (showObjectBrowser)
+        {
+            objBrowser.draw(doc, vp2d.viewCenterMapPos());
+        }
+        
+        if (showLayers)
+        {
+            layersPanel.draw(doc);
+        }
+        
+        if (showOutputLog)
+        {
+            outputLog.draw(doc);
+        }
+        
+        if (showHelp)
+        {
+            helpPanel.draw();
+        }
+        
+        if (showNormalMapGen)
+        {
+            normalMapGenPanel.draw(&showNormalMapGen, catalog, *device, *assetLoader, doc);
+        }
 
         // ── New Map dialog ──────────────────────────────────────────────────────────────────────
         if (nmDlg.open)

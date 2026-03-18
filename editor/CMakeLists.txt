@@ -55,6 +55,7 @@ target_sources(DaedalusEdit PRIVATE
     src/panels/object_browser_panel.cpp
     src/panels/layers_panel.cpp
     src/panels/help_panel.cpp
+    src/panels/normal_map_generator_panel.cpp
     src/document/emap_sidecar.cpp
     src/catalog/material_catalog.cpp
     src/catalog/model_catalog.cpp
@@ -185,6 +186,7 @@ if(DAEDALUS_PLATFORM_MACOS)
         src/panels/object_browser_panel.cpp
         src/panels/layers_panel.cpp
         src/panels/help_panel.cpp
+        src/panels/normal_map_generator_panel.cpp
         src/document/emap_sidecar.cpp
         src/catalog/material_catalog.cpp
         src/catalog/model_catalog.cpp

@@ -71,6 +71,12 @@ public:
     /// Dismiss the picker without selection (e.g. Escape key).
     void closePicker() noexcept;
 
+    /// Set callback to be invoked when user right-clicks "Generate Normal Map" on a texture.
+    void setNormalMapGenCallback(std::function<void(const UUID&)> callback)
+    {
+        m_normalMapGenCallback = std::move(callback);
+    }
+
 private:
     enum class Mode { Textures, Models, Voxels };
 
@@ -89,6 +95,9 @@ private:
 
     // Voxel picker state (reuses m_modelPickerCallback — mutually exclusive with model picker)
     std::string  m_voxSelectedFolder;
+
+    // Normal map generator callback
+    std::function<void(const UUID&)> m_normalMapGenCallback;
 
     // Draw helpers
     void drawThumbnailGrid(MaterialCatalog&    catalog,
