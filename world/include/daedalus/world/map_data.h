@@ -22,6 +22,7 @@
 #include "daedalus/core/types.h"
 
 #include <glm/glm.hpp>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -51,10 +52,19 @@ struct Wall
     UUID lowerMaterialId;   ///< Strip below a portal opening (this_floor < portal_floor).
     UUID backMaterialId;    ///< Face seen looking back through a portal from the adjacent sector.
 
-    // ─── UV mapping ───────────────────────────────────────────────────────────
+    // ─── UV mapping ────────────────────────────────────────────────────────────
     glm::vec2 uvOffset  = {0.0f, 0.0f};  ///< Texture coordinate offset.
     glm::vec2 uvScale   = {1.0f, 1.0f};  ///< Texture coordinate scale.
     f32       uvRotation = 0.0f;          ///< Rotation in radians (clockwise).
+
+    // ─── Phase 1F: per-vertex height overrides ────────────────────────────────
+    // Override the parent sector's scalar floor or ceiling height at THIS wall's
+    // start vertex (p0).  The end vertex height comes from the NEXT wall's override.
+    // std::nullopt means "use the sector's floorHeight / ceilHeight scalar".
+    // These drive sloped floors, ramps, and uneven ceilings without changing the
+    // sector's default height for other walls that have no override set.
+    std::optional<f32> floorHeightOverride;  ///< Per-vertex floor Y override at p0.
+    std::optional<f32> ceilHeightOverride;   ///< Per-vertex ceiling Y override at p0.
 };
 
 // ─── Sector ───────────────────────────────────────────────────────────────────
@@ -80,9 +90,15 @@ struct Sector
     f32       ambientIntensity = 1.0f;
 
     SectorFlags flags = SectorFlags::None;
+
+    // ─── Phase 1F: floor shape and stair geometry ─────────────────────────────
+    // Controls how the tessellator generates this sector's floor mesh.
+    // Defaults to FloorShape::Flat which reproduces the baseline flat floor.
+    FloorShape              floorShape   = FloorShape::Flat;
+    std::optional<StairProfile> stairProfile;  ///< Used when floorShape == VisualStairs.
 };
 
-// ─── WorldMapData ─────────────────────────────────────────────────────────────
+// ─── WorldMapData
 // The complete in-memory representation of a .dmap file.
 //
 // Sector IDs are implicit indices into the sectors vector (sector 0 is

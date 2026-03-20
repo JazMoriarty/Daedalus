@@ -1,18 +1,21 @@
 // dmap_binary.cpp
-// Binary .dmap v1 serialisation / deserialisation.
+// Binary .dmap serialisation / deserialisation.
 //
-// ─── Format specification (version 1) ────────────────────────────────────────
+// ─── Format specification ─────────────────────────────────────────────────────────
 //
 // All multi-byte integers are little-endian.
+// Versions are forwards-compatible: the reader rejects files where
+// version > k_VERSION, but accepts all older versions using defaults for
+// fields that did not exist in that version.
 //
 // Header (16 bytes):
 //   [4]  magic         u32 = 0x50414D44  ('D','M','A','P')
-//   [4]  version       u32 = 1
+//   [4]  version       u32 = 2  (current)
 //   [4]  sectorCount   u32
 //   [4]  _pad          u32 = 0  (reserved)
 //
 // Map meta (variable):
-//   [2]  nameLen       u16  (byte length of name, not null-terminated)
+//   [2]  nameLen       u16
 //   [nameLen] name     UTF-8
 //   [2]  authorLen     u16
 //   [authorLen] author UTF-8
@@ -20,27 +23,40 @@
 //   [4]  globalAmbientIntensity f32
 //
 // Per sector (repeated sectorCount times):
-//   [4]  wallCount     u32
-//   [4]  flags         u32  (SectorFlags)
-//   [4]  floorHeight   f32
-//   [4]  ceilHeight    f32
-//   [16] floorMaterialId  UUID (u64 hi, u64 lo)
-//   [16] ceilMaterialId   UUID
-//   [12] ambientColor  f32[3]
+//   [4]  wallCount       u32
+//   [4]  flags           u32  (SectorFlags)
+//   [4]  floorHeight     f32
+//   [4]  ceilHeight      f32
+//   [16] floorMaterialId UUID (u64 hi, u64 lo)
+//   [16] ceilMaterialId  UUID
+//   [12] ambientColor    f32[3]
 //   [4]  ambientIntensity f32
-//   --- total sector header: 60 bytes ---
+//   --- v1 sector header ends here (60 bytes) ---
+//   v2 additions (appended, omitted when reading v1 files):
+//   [4]  floorShape      u32  (FloorShape enum: 0=Flat, 1=Heightfield, 2=VisualStairs)
+//   [4]  hasStairProfile u32  (0 or 1)
+//   if hasStairProfile == 1:
+//     [4]  stepCount     u32
+//     [4]  riserHeight   f32
+//     [4]  treadDepth    f32
+//     [4]  directionAngle f32
 //
-//   Per wall (repeated wallCount times, immediately after sector header):
-//     [8]  p0         f32[2]  (map X, map Z)
-//     [4]  flags      u32     (WallFlags)
-//     [4]  portalSectorId u32  (0xFFFFFFFF = none)
-//     [16] frontMaterialId  UUID
-//     [16] upperMaterialId  UUID
-//     [16] lowerMaterialId  UUID
-//     [8]  uvOffset   f32[2]
-//     [8]  uvScale    f32[2]
-//     [4]  uvRotation f32
-//     --- total per wall: 84 bytes ---
+//   Per wall (repeated wallCount times, immediately after sector record):
+//     [8]  p0              f32[2]  (map X, map Z)
+//     [4]  flags           u32     (WallFlags)
+//     [4]  portalSectorId  u32     (0xFFFFFFFF = none)
+//     [16] frontMaterialId UUID
+//     [16] upperMaterialId UUID
+//     [16] lowerMaterialId UUID
+//     [8]  uvOffset        f32[2]
+//     [8]  uvScale         f32[2]
+//     [4]  uvRotation      f32
+//     --- v1 wall record ends here (84 bytes) ---
+//     v2 additions (appended, omitted when reading v1 files):
+//     [1]  heightFlags     u8   bit 0 = hasFloorHeightOverride,
+//                               bit 1 = hasCeilHeightOverride
+//     [4]  floorHeightOverride f32  (only if bit 0 set)
+//     [4]  ceilHeightOverride  f32  (only if bit 1 set)
 
 #include "daedalus/world/dmap_io.h"
 
@@ -54,7 +70,7 @@ namespace
 {
 
 constexpr u32 k_MAGIC   = 0x50414D44u;  // 'D','M','A','P' as little-endian u32
-constexpr u32 k_VERSION = 1u;
+constexpr u32 k_VERSION = 2u;
 
 // ─── Write helpers ────────────────────────────────────────────────────────────
 
@@ -177,6 +193,24 @@ std::expected<void, DmapError> saveDmap(const WorldMapData&         map,
             w.writeVec2(wall.uvOffset);
             w.writeVec2(wall.uvScale);
             w.write(wall.uvRotation);
+            // v2: per-vertex height overrides
+            const u8 hFlags =
+                (wall.floorHeightOverride.has_value() ? 0x01u : 0u) |
+                (wall.ceilHeightOverride .has_value() ? 0x02u : 0u);
+            w.write(hFlags);
+            if (wall.floorHeightOverride) w.write(*wall.floorHeightOverride);
+            if (wall.ceilHeightOverride)  w.write(*wall.ceilHeightOverride);
+        }
+        // v2: floor shape and optional stair profile
+        w.write(static_cast<u32>(sec.floorShape));
+        const u32 hasStair = sec.stairProfile.has_value() ? 1u : 0u;
+        w.write(hasStair);
+        if (sec.stairProfile)
+        {
+            w.write(sec.stairProfile->stepCount);
+            w.write(sec.stairProfile->riserHeight);
+            w.write(sec.stairProfile->treadDepth);
+            w.write(sec.stairProfile->directionAngle);
         }
     }
 
@@ -270,6 +304,40 @@ std::expected<WorldMapData, DmapError> loadDmap(const std::filesystem::path& pat
                 !r.read(wall.uvRotation))
             {
                 return std::unexpected(DmapError::ParseError);
+            }
+            // v2 additions: per-vertex height overrides
+            if (version >= 2)
+            {
+                u8 hFlags = 0;
+                if (!r.read(hFlags)) return std::unexpected(DmapError::ParseError);
+                if (hFlags & 0x01u)
+                {
+                    f32 v = 0.0f;
+                    if (!r.read(v)) return std::unexpected(DmapError::ParseError);
+                    wall.floorHeightOverride = v;
+                }
+                if (hFlags & 0x02u)
+                {
+                    f32 v = 0.0f;
+                    if (!r.read(v)) return std::unexpected(DmapError::ParseError);
+                    wall.ceilHeightOverride = v;
+                }
+            }
+        }
+        // v2 additions: floor shape and optional stair profile
+        if (version >= 2)
+        {
+            u32 shapeRaw = 0, hasStair = 0;
+            if (!r.read(shapeRaw) || !r.read(hasStair))
+                return std::unexpected(DmapError::ParseError);
+            sec.floorShape = static_cast<FloorShape>(shapeRaw);
+            if (hasStair)
+            {
+                StairProfile sp;
+                if (!r.read(sp.stepCount) || !r.read(sp.riserHeight) ||
+                    !r.read(sp.treadDepth) || !r.read(sp.directionAngle))
+                    return std::unexpected(DmapError::ParseError);
+                sec.stairProfile = sp;
             }
         }
     }

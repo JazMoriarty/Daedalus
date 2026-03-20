@@ -54,7 +54,7 @@ namespace daedalus::world
 namespace
 {
 
-constexpr u32 k_JSON_VERSION = 1u;
+constexpr u32 k_JSON_VERSION = 2u;
 
 // ─── UUID helpers ─────────────────────────────────────────────────────────────
 
@@ -84,7 +84,7 @@ constexpr u32 k_JSON_VERSION = 1u;
 
 [[nodiscard]] nlohmann::json wallToJson(const Wall& w)
 {
-    return {
+    nlohmann::json j = {
         {"p0",            {w.p0.x, w.p0.y}},
         {"flags",         static_cast<u32>(w.flags)},
         {"portal_sector", (w.portalSectorId == INVALID_SECTOR_ID)
@@ -97,6 +97,10 @@ constexpr u32 k_JSON_VERSION = 1u;
         {"uv_scale",      {w.uvScale.x,    w.uvScale.y}},
         {"uv_rotation",    w.uvRotation},
     };
+    // Phase 1F-A: emit only when set (omitted fields default to nullopt on load).
+    if (w.floorHeightOverride) j["floor_height_override"] = *w.floorHeightOverride;
+    if (w.ceilHeightOverride)  j["ceil_height_override"]  = *w.ceilHeightOverride;
+    return j;
 }
 
 [[nodiscard]] nlohmann::json sectorToJson(const Sector& sec)
@@ -104,7 +108,7 @@ constexpr u32 k_JSON_VERSION = 1u;
     nlohmann::json jw = nlohmann::json::array();
     for (const auto& w : sec.walls) { jw.push_back(wallToJson(w)); }
 
-    return {
+    nlohmann::json j = {
         {"floor_height",       sec.floorHeight},
         {"ceil_height",        sec.ceilHeight},
         {"floor_material",     uuidToString(sec.floorMaterialId)},
@@ -112,8 +116,20 @@ constexpr u32 k_JSON_VERSION = 1u;
         {"ambient_color",      {sec.ambientColor.r, sec.ambientColor.g, sec.ambientColor.b}},
         {"ambient_intensity",  sec.ambientIntensity},
         {"flags",              static_cast<u32>(sec.flags)},
+        {"floor_shape",        static_cast<u32>(sec.floorShape)},
         {"walls",              std::move(jw)},
     };
+    // Phase 1F-A: emit stair profile only when present.
+    if (sec.stairProfile)
+    {
+        j["stair_profile"] = {
+            {"step_count",       sec.stairProfile->stepCount},
+            {"riser_height",     sec.stairProfile->riserHeight},
+            {"tread_depth",      sec.stairProfile->treadDepth},
+            {"direction_angle",  sec.stairProfile->directionAngle},
+        };
+    }
+    return j;
 }
 
 [[nodiscard]] nlohmann::json mapToJson(const WorldMapData& map)
@@ -154,6 +170,11 @@ constexpr u32 k_JSON_VERSION = 1u;
         out.uvOffset   = {jw["uv_offset"][0].get<float>(),  jw["uv_offset"][1].get<float>()};
         out.uvScale    = {jw["uv_scale"][0].get<float>(),   jw["uv_scale"][1].get<float>()};
         out.uvRotation = jw["uv_rotation"].get<float>();
+        // Phase 1F-A: optional height overrides (absent = nullopt).
+        if (jw.contains("floor_height_override"))
+            out.floorHeightOverride = jw["floor_height_override"].get<float>();
+        if (jw.contains("ceil_height_override"))
+            out.ceilHeightOverride = jw["ceil_height_override"].get<float>();
         return true;
     }
     catch (...) { return false; }
@@ -174,7 +195,19 @@ constexpr u32 k_JSON_VERSION = 1u;
         };
         out.ambientIntensity = jsec["ambient_intensity"].get<float>();
         out.flags = static_cast<SectorFlags>(jsec["flags"].get<u32>());
-
+        // Phase 1F-A: floor shape and stair profile (absent = defaults).
+        out.floorShape = static_cast<FloorShape>(
+            jsec.value("floor_shape", static_cast<u32>(FloorShape::Flat)));
+        if (jsec.contains("stair_profile"))
+        {
+            const auto& jsp = jsec["stair_profile"];
+            StairProfile sp;
+            sp.stepCount      = jsp.value("step_count",      sp.stepCount);
+            sp.riserHeight    = jsp.value("riser_height",    sp.riserHeight);
+            sp.treadDepth     = jsp.value("tread_depth",     sp.treadDepth);
+            sp.directionAngle = jsp.value("direction_angle", sp.directionAngle);
+            out.stairProfile  = sp;
+        }
         for (const auto& jw : jsec["walls"])
         {
             Wall w;
