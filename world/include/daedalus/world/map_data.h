@@ -70,9 +70,10 @@ struct Wall
 // ─── Sector ───────────────────────────────────────────────────────────────────
 // A convex or concave horizontal region of the world.
 //
-// walls forms a closed polygon (CCW winding from above). All walls share this
-// sector's floor and ceiling heights unless a per-vertex slope is applied
-// (slope support is reserved for a future phase; not encoded here).
+// walls forms a closed polygon (CCW winding from above). The sector's
+// floorHeight and ceilHeight are the scalar defaults for all surfaces.
+// Individual walls may override these with floorHeightOverride / ceilHeightOverride
+// to produce sloped floors, ramps, and uneven ceilings.
 
 struct Sector
 {

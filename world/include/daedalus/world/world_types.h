@@ -59,13 +59,7 @@ enum class WallFlags : u32
     return (flags & test) != WallFlags::None;
 }
 
-// Bit-field operators for WallFlags |
-[[nodiscard]] inline constexpr WallFlags operator~(WallFlags a) noexcept
-{
-    return static_cast<WallFlags>(~static_cast<u32>(a));
-}
-
-// ─── SectorFlags ─────────────────────────────────────────────────────────────
+// ─── SectorFlags
 // Bit-field describing per-sector properties.
 
 enum class SectorFlags : u32

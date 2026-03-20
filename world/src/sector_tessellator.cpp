@@ -457,8 +457,11 @@ std::vector<render::MeshData> tessellateMap(const WorldMapData& map)
 
                 if (yC0 > adjCeil || yC1 > adjCeil)
                 {
-                    const float sF0 = adjCeil, sC0 = yC0;
-                    const float sF1 = adjCeil, sC1 = yC1;
+                    // Clamp: where this sector's ceiling dips below adjCeil, the
+                    // strip top is clamped to adjCeil (zero-height, invisible edge)
+                    // rather than producing an inverted quad.
+                    const float sF0 = adjCeil, sC0 = std::max(yC0, adjCeil);
+                    const float sF1 = adjCeil, sC1 = std::max(yC1, adjCeil);
                     if (sC0 > sF0 || sC1 > sF1)
                         appendWallQuad(mesh.vertices, mesh.indices,
                                        wall.p0, wallP1,
@@ -469,8 +472,11 @@ std::vector<render::MeshData> tessellateMap(const WorldMapData& map)
                 }
                 if (yF0 < adjFloor || yF1 < adjFloor)
                 {
-                    const float sF0 = yF0, sC0 = adjFloor;
-                    const float sF1 = yF1, sC1 = adjFloor;
+                    // Clamp: where this sector's floor rises above adjFloor, the
+                    // strip bottom is clamped to adjFloor (zero-height, invisible edge)
+                    // rather than producing an inverted quad.
+                    const float sF0 = std::min(yF0, adjFloor), sC0 = adjFloor;
+                    const float sF1 = std::min(yF1, adjFloor), sC1 = adjFloor;
                     if (sC0 > sF0 || sC1 > sF1)
                         appendWallQuad(mesh.vertices, mesh.indices,
                                        wall.p0, wallP1,
@@ -579,8 +585,8 @@ std::vector<std::vector<TaggedMeshBatch>> tessellateMapTagged(const WorldMapData
 
                 if (yC0 > adjCeil || yC1 > adjCeil)
                 {
-                    const float sF0 = adjCeil, sC0 = yC0;
-                    const float sF1 = adjCeil, sC1 = yC1;
+                    const float sF0 = adjCeil, sC0 = std::max(yC0, adjCeil);
+                    const float sF1 = adjCeil, sC1 = std::max(yC1, adjCeil);
                     if (sC0 > sF0 || sC1 > sF1)
                     {
                         TaggedMeshBatch& batch = getBatch(wall.upperMaterialId);
@@ -594,8 +600,8 @@ std::vector<std::vector<TaggedMeshBatch>> tessellateMapTagged(const WorldMapData
                 }
                 if (yF0 < adjFloor || yF1 < adjFloor)
                 {
-                    const float sF0 = yF0, sC0 = adjFloor;
-                    const float sF1 = yF1, sC1 = adjFloor;
+                    const float sF0 = std::min(yF0, adjFloor), sC0 = adjFloor;
+                    const float sF1 = std::min(yF1, adjFloor), sC1 = adjFloor;
                     if (sC0 > sF0 || sC1 > sF1)
                     {
                         TaggedMeshBatch& batch = getBatch(wall.lowerMaterialId);

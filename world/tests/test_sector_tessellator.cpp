@@ -304,16 +304,17 @@ TEST(SectorTessellatorTest, SlopedPortalStripHeightFollowsCeilingOverride)
     EXPECT_EQ(meshes[0].vertices.size(), 24u);
 
     // Strip for portal wall a1 (wi=1, p0=(5,-5), p1=(5,5)):
-    //   sF0 = adjCeil = 3.0        (bottom of strip at p0)
-    //   sF1 = adjCeil = 3.0        (bottom of strip at p1)
-    //   sC0 = ceilH[1] = 2.0       (top of strip at p0 — sloped down via override)
-    //   sC1 = ceilH[2] = 4.0       (top of strip at p1 — no override, sector default)
-    // appendWallQuad order: bottom-left, bottom-right, top-right, top-left
+    //   sF0 = adjCeil = 3.0                     (bottom at p0)
+    //   sF1 = adjCeil = 3.0                     (bottom at p1)
+    //   sC0 = max(ceilH[1], adjCeil) = max(2,3) = 3.0  (clamped: sloped ceil < adjCeil)
+    //   sC1 = max(ceilH[2], adjCeil) = max(4,3) = 4.0  (not clamped: ceil > adjCeil)
+    // The strip tapers to zero height at p0 (ceiling has dipped below adj opening)
+    // and rises to 1.0 unit height at p1.  appendWallQuad order: BL, BR, TR, TL.
     const auto& sv = meshes[0].vertices;
     EXPECT_NEAR(sv[12].pos[1], 3.0f, 1e-5f) << "strip bottom-left  (adjCeil at p0)";
     EXPECT_NEAR(sv[13].pos[1], 3.0f, 1e-5f) << "strip bottom-right (adjCeil at p1)";
-    EXPECT_NEAR(sv[14].pos[1], 4.0f, 1e-5f) << "strip top-right    (sector ceilH at p1, no override)";
-    EXPECT_NEAR(sv[15].pos[1], 2.0f, 1e-5f) << "strip top-left     (sloped ceilH at p0 via override)";
+    EXPECT_NEAR(sv[14].pos[1], 4.0f, 1e-5f) << "strip top-right    (ceilH at p1, unclamped)";
+    EXPECT_NEAR(sv[15].pos[1], 3.0f, 1e-5f) << "strip top-left     (ceilH at p0 clamped to adjCeil)";
 }
 
 // Visual stairs: FloorShape::VisualStairs must produce strictly more floor
@@ -324,9 +325,8 @@ TEST(SectorTessellatorTest, VisualStairsProducesMoreGeometryThanFlat)
     const WorldMapData flatMap = makeSingleRoomMap(5.0f, 5.0f, 0.0f, 4.0f);
     const auto flatMeshes = tessellateMap(flatMap);
     ASSERT_EQ(flatMeshes.size(), 1u);
-    const std::size_t flatFloorVerts = 4u;  // flat 4-vertex floor
 
-    // Stair map: same 4-wall box, FloorShape::VisualStairs with 4 steps.
+    // Stair map
     WorldMapData stairMap;
     Sector sec;
     sec.floorHeight = 0.0f;
