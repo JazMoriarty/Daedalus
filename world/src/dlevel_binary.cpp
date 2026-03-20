@@ -147,6 +147,46 @@
 //   [4]  particleAtlasFrameRate  f32
 //   [4]  particleEmitsLight      u32 (0 = false, 1 = true)
 //   [4]  particleShadowDensity   f32
+//
+// Render settings (present only in version >= 6; ~119 bytes + LUT path string):
+//   [4]  fogEnabled                       u32 (0 = false, 1 = true)
+//   [12] fogColor                         f32[3]
+//   [4]  fogDensity                       f32
+//   [4]  fogHeightFalloff                 f32
+//   [4]  ssrEnabled                       u32 (0 = false, 1 = true)
+//   [4]  ssrMaxRayDistance                f32
+//   [4]  ssrStrideLength                  f32
+//   [4]  ssrMaxSteps                      u32
+//   [4]  ssrBinarySearchIterations        u32
+//   [4]  dofEnabled                       u32 (0 = false, 1 = true)
+//   [4]  dofFocalDistance                 f32
+//   [4]  dofFocalRange                    f32
+//   [4]  dofBokehRadius                   f32
+//   [4]  motionBlurEnabled                u32 (0 = false, 1 = true)
+//   [4]  motionBlurStrength               f32
+//   [4]  motionBlurMaxSamples             u32
+//   [4]  colorGradingEnabled              u32 (0 = false, 1 = true)
+//   [2]  colorGradingLutPath              u16 (length prefix) + UTF-8 string
+//   [4]  colorGradingLutStrength          f32
+//   [4]  bloomEnabled                     u32 (0 = false, 1 = true)
+//   [4]  bloomThreshold                   f32
+//   [4]  bloomIntensity                   f32
+//   [4]  chromaticAberrationEnabled      u32 (0 = false, 1 = true)
+//   [4]  chromaticAberrationStrength     f32
+//   [4]  vignetteEnabled                  u32 (0 = false, 1 = true)
+//   [4]  vignetteIntensity                f32
+//   [4]  vignetteSmoothness               f32
+//   [4]  filmGrainEnabled                 u32 (0 = false, 1 = true)
+//   [4]  filmGrainIntensity               f32
+//   [4]  fxaaEnabled                      u32 (0 = false, 1 = true)
+//   [4]  fxaaQualitySubpix                f32
+//   [4]  fxaaQualityEdgeThreshold         f32
+//   [4]  fxaaQualityEdgeThresholdMin     f32
+//   [4]  rayTracingEnabled                u32 (0 = false, 1 = true)
+//   [4]  rayTracingMaxBounces             u32
+//   [4]  rayTracingSamplesPerPixel       u32
+//   [4]  rayTracingEnableGI              u32 (0 = false, 1 = true)
+//   [4]  rayTracingGIIntensity            f32
 
 #include "daedalus/world/dlevel_io.h"
 
@@ -160,7 +200,7 @@ namespace
 {
 
 constexpr u32 k_MAGIC   = 0x4C564C44u;  // 'D','L','V','L' as little-endian u32
-constexpr u32 k_VERSION = 5u;
+constexpr u32 k_VERSION = 7u;  // v7: added fogScattering, fogNear, fogFar to render settings
 
 // ─── Write helpers ────────────────────────────────────────────────────────────
 
@@ -411,6 +451,72 @@ std::expected<void, DlevelError> saveDlevel(const LevelPackData&         pack,
         w.write(ent.particleShadowDensity);
     }
 
+    // ── Render settings (v6) ─────────────────────────────────────────────────
+    const LevelRenderSettings& rs = pack.renderSettings;
+    
+    // Fog
+    w.write(static_cast<u32>(rs.fogEnabled ? 1u : 0u));
+    w.write(rs.fogAmbientR); w.write(rs.fogAmbientG); w.write(rs.fogAmbientB);
+    w.write(rs.fogDensity);
+    w.write(rs.fogAnisotropy);  // was: 0.0f fogHeightFalloff — repurposed for anisotropy
+    w.write(rs.fogScattering);
+    w.write(rs.fogNear);
+    w.write(rs.fogFar);
+    
+    // SSR
+    w.write(static_cast<u32>(rs.ssrEnabled ? 1u : 0u));
+    w.write(rs.ssrMaxDistance);
+    w.write(rs.ssrThickness);
+    w.write(rs.ssrMaxSteps);
+    w.write(8u);  // ssrBinarySearchIterations — not in struct, write default
+    
+    // DoF
+    w.write(static_cast<u32>(rs.dofEnabled ? 1u : 0u));
+    w.write(rs.dofFocusDistance);
+    w.write(rs.dofFocusRange);
+    w.write(rs.dofBokehRadius);
+    
+    // Motion blur
+    w.write(static_cast<u32>(rs.motionBlurEnabled ? 1u : 0u));
+    w.write(rs.motionBlurShutterAngle);
+    w.write(rs.motionBlurNumSamples);
+    
+    // Color grading
+    w.write(static_cast<u32>(rs.colorGradingEnabled ? 1u : 0u));
+    w.writeStr(rs.colorGradingLutPath);
+    w.write(rs.colorGradingIntensity);
+    
+    // Bloom — not in struct, write defaults
+    w.write(0u);  // bloomEnabled = false
+    w.write(1.0f);  // bloomThreshold
+    w.write(0.5f);  // bloomIntensity
+    
+    // Chromatic aberration
+    w.write(static_cast<u32>(rs.optFxEnabled ? 1u : 0u));
+    w.write(rs.optFxCaAmount);
+    
+    // Vignette
+    w.write(static_cast<u32>(rs.optFxEnabled ? 1u : 0u));
+    w.write(rs.optFxVignetteIntensity);
+    w.write(rs.optFxVignetteRadius);
+    
+    // Film grain
+    w.write(static_cast<u32>(rs.optFxEnabled ? 1u : 0u));
+    w.write(rs.optFxGrainAmount);
+    
+    // FXAA
+    w.write(static_cast<u32>(rs.fxaaEnabled ? 1u : 0u));
+    w.write(0.75f);  // fxaaQualitySubpix — not in struct, write default
+    w.write(0.125f);  // fxaaQualityEdgeThreshold — not in struct, write default
+    w.write(0.0312f);  // fxaaQualityEdgeThresholdMin — not in struct, write default
+    
+    // Ray tracing
+    w.write(static_cast<u32>(rs.rtEnabled ? 1u : 0u));
+    w.write(rs.rtMaxBounces);
+    w.write(rs.rtSamplesPerPixel);
+    w.write(static_cast<u32>(rs.rtDenoise ? 1u : 0u));  // rtEnableGI mapped to denoise for now
+    w.write(1.0f);  // rayTracingGIIntensity — not in struct, write default
+
     if (!ofs) { return std::unexpected(DlevelError::WriteError); }
     return {};
 }
@@ -443,8 +549,9 @@ std::expected<LevelPackData, DlevelError> loadDlevel(const std::filesystem::path
     {
         return std::unexpected(DlevelError::ParseError);
     }
-    if (magic   != k_MAGIC)   { return std::unexpected(DlevelError::ParseError);      }
-    if (version != k_VERSION)  { return std::unexpected(DlevelError::VersionMismatch); }
+    if (magic != k_MAGIC) { return std::unexpected(DlevelError::ParseError); }
+    // Accept v5, v6, and v7
+    if (version != 5u && version != 6u && version != 7u) { return std::unexpected(DlevelError::VersionMismatch); }
 
     u32 entityCount = 0;
     if (!r.read(entityCount)) { return std::unexpected(DlevelError::ParseError); }
@@ -661,6 +768,98 @@ std::expected<LevelPackData, DlevelError> loadDlevel(const std::filesystem::path
             return std::unexpected(DlevelError::ParseError);
         ent.particleEmitsLight = (emitsLightRaw != 0u);
     }
+
+    // ── Render settings (v6 only; v5 uses defaults) ─────────────────────────────
+    if (version >= 6u)
+    {
+        LevelRenderSettings& rs = pack.renderSettings;
+        u32 u32_tmp = 0;
+        float f32_tmp = 0.0f;
+
+        // Fog
+        if (!r.read(u32_tmp)) return std::unexpected(DlevelError::ParseError);
+        rs.fogEnabled = (u32_tmp != 0u);
+        if (!r.read(rs.fogAmbientR) || !r.read(rs.fogAmbientG) || !r.read(rs.fogAmbientB) ||
+            !r.read(rs.fogDensity))
+            return std::unexpected(DlevelError::ParseError);
+        if (!r.read(rs.fogAnisotropy))  // v6: was fogHeightFalloff; v7+: anisotropy
+            return std::unexpected(DlevelError::ParseError);
+        // v7 added fogScattering, fogNear, fogFar
+        if (version >= 7u)
+        {
+            if (!r.read(rs.fogScattering) || !r.read(rs.fogNear) || !r.read(rs.fogFar))
+                return std::unexpected(DlevelError::ParseError);
+        }
+
+        // SSR
+        if (!r.read(u32_tmp)) return std::unexpected(DlevelError::ParseError);
+        rs.ssrEnabled = (u32_tmp != 0u);
+        if (!r.read(rs.ssrMaxDistance) || !r.read(rs.ssrThickness) || !r.read(rs.ssrMaxSteps))
+            return std::unexpected(DlevelError::ParseError);
+        if (!r.read(u32_tmp))  // ssrBinarySearchIterations — not in struct, discard
+            return std::unexpected(DlevelError::ParseError);
+
+        // DoF
+        if (!r.read(u32_tmp)) return std::unexpected(DlevelError::ParseError);
+        rs.dofEnabled = (u32_tmp != 0u);
+        if (!r.read(rs.dofFocusDistance) || !r.read(rs.dofFocusRange) || !r.read(rs.dofBokehRadius))
+            return std::unexpected(DlevelError::ParseError);
+
+        // Motion blur
+        if (!r.read(u32_tmp)) return std::unexpected(DlevelError::ParseError);
+        rs.motionBlurEnabled = (u32_tmp != 0u);
+        if (!r.read(rs.motionBlurShutterAngle) || !r.read(rs.motionBlurNumSamples))
+            return std::unexpected(DlevelError::ParseError);
+
+        // Color grading
+        if (!r.read(u32_tmp)) return std::unexpected(DlevelError::ParseError);
+        rs.colorGradingEnabled = (u32_tmp != 0u);
+        if (!r.readStr(rs.colorGradingLutPath) || !r.read(rs.colorGradingIntensity))
+            return std::unexpected(DlevelError::ParseError);
+
+        // Bloom — not in struct, discard
+        u32 bloomEnabled = 0;
+        float bloomThreshold = 0.0f, bloomIntensity = 0.0f;
+        if (!r.read(bloomEnabled) || !r.read(bloomThreshold) || !r.read(bloomIntensity))
+            return std::unexpected(DlevelError::ParseError);
+
+        // Chromatic aberration
+        if (!r.read(u32_tmp)) return std::unexpected(DlevelError::ParseError);
+        rs.optFxEnabled = (u32_tmp != 0u);
+        if (!r.read(rs.optFxCaAmount))
+            return std::unexpected(DlevelError::ParseError);
+
+        // Vignette
+        if (!r.read(u32_tmp)) return std::unexpected(DlevelError::ParseError);
+        // Vignette enabled is folded into optFxEnabled (already set above)
+        if (!r.read(rs.optFxVignetteIntensity) || !r.read(rs.optFxVignetteRadius))
+            return std::unexpected(DlevelError::ParseError);
+
+        // Film grain
+        if (!r.read(u32_tmp)) return std::unexpected(DlevelError::ParseError);
+        // Film grain enabled is folded into optFxEnabled (already set above)
+        if (!r.read(rs.optFxGrainAmount))
+            return std::unexpected(DlevelError::ParseError);
+
+        // FXAA
+        if (!r.read(u32_tmp)) return std::unexpected(DlevelError::ParseError);
+        rs.fxaaEnabled = (u32_tmp != 0u);
+        float fxaaSubpix = 0.0f, fxaaEdgeThresh = 0.0f, fxaaEdgeMin = 0.0f;
+        if (!r.read(fxaaSubpix) || !r.read(fxaaEdgeThresh) || !r.read(fxaaEdgeMin))
+            return std::unexpected(DlevelError::ParseError);
+        // FXAA quality params not in struct, discarded
+
+        // Ray tracing
+        if (!r.read(u32_tmp)) return std::unexpected(DlevelError::ParseError);
+        rs.rtEnabled = (u32_tmp != 0u);
+        if (!r.read(rs.rtMaxBounces) || !r.read(rs.rtSamplesPerPixel))
+            return std::unexpected(DlevelError::ParseError);
+        if (!r.read(u32_tmp)) return std::unexpected(DlevelError::ParseError);
+        rs.rtDenoise = (u32_tmp != 0u);  // rtEnableGI mapped to denoise
+        if (!r.read(f32_tmp))  // rayTracingGIIntensity — not in struct, discard
+            return std::unexpected(DlevelError::ParseError);
+    }
+    // else: v5 files use default-initialized LevelRenderSettings (all fields default to 0/false)
 
     return pack;
 }

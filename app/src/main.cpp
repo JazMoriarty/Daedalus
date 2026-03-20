@@ -8,6 +8,9 @@
 #include "stb_image_write.h"
 #pragma clang diagnostic pop
 
+// stb_image — header-only (implementation lives in asset_loader.cpp).
+#include "stb_image.h"
+
 #include "daedalus/core/assert.h"
 #include "daedalus/core/create_platform.h"
 #include "daedalus/core/ecs/world.h"
@@ -69,6 +72,7 @@
 #include <fstream>
 #include <memory>
 #include <unordered_map>
+#include <unordered_set>
 
 using namespace daedalus;
 using namespace daedalus::rhi;
@@ -275,6 +279,13 @@ int main(int argc, char* argv[])
                                           WINDOW_W, WINDOW_H,
                                           SDL_WINDOW_METAL | SDL_WINDOW_RESIZABLE);
     DAEDALUS_ASSERT(window != nullptr, "Failed to create SDL window");
+    // Query actual drawable resolution (Retina may be > logical window size).
+    int pixelW = 0, pixelH = 0;
+    SDL_GetWindowSizeInPixels(window, &pixelW, &pixelH);
+    const u32 initPixelW = static_cast<u32>(pixelW > 0 ? pixelW : WINDOW_W);
+    const u32 initPixelH = static_cast<u32>(pixelH > 0 ? pixelH : WINDOW_H);
+    std::printf("[Daedalus] Window: %u×%u pts -> %u×%u px\n",
+                WINDOW_W, WINDOW_H, initPixelW, initPixelH);
 
     // ─── ECS World ─────────────────────────────────────────────────────────────
     // Main ECS container — persists for the application’s lifetime.
@@ -317,7 +328,7 @@ int main(int argc, char* argv[])
 
     auto device    = rhi::createRenderDevice();
     auto queue     = device->createCommandQueue("Main Queue");
-    auto swapchain = device->createSwapchain(window, WINDOW_W, WINDOW_H);
+    auto swapchain = device->createSwapchain(window, initPixelW, initPixelH);
 
     std::printf("[Daedalus] GPU: %s\n",
                 std::string(device->deviceName()).c_str());
@@ -329,7 +340,7 @@ int main(int argc, char* argv[])
     std::printf("[Daedalus] Shader library: %s\n", metalLibPath.c_str());
 
     render::FrameRenderer renderer;
-    renderer.initialize(*device, metalLibPath, WINDOW_W, WINDOW_H);
+    renderer.initialize(*device, metalLibPath, initPixelW, initPixelH);
 
     // ─── .dlevel game loop ────────────────────────────────────────────────────
     // When DaedalusApp is launched with a .dlevel path (e.g. from F5 in
@@ -366,6 +377,20 @@ int main(int argc, char* argv[])
     bool     startOptFx      = true;   // mild vignette + grain
     bool     startFXAA       = true;
 
+    // Track which CLI flags were explicitly provided.
+    // Only these override the .dlevel render settings; unset flags fall through
+    // to the values saved in the file by the editor.
+    bool cliHasFog        = false;
+    bool cliHasSSR        = false;
+    bool cliHasDoF        = false;
+    bool cliHasMotionBlur = false;
+    bool cliHasColorGrade = false;
+    bool cliHasOptFx      = false;
+    bool cliHasFXAA       = false;
+    bool cliHasRTBounces  = false;
+    bool cliHasRTSPP      = false;
+    bool cliHasRTDenoise  = false;
+
     // Helper: check if a string_view has a given prefix (C++17 compatible).
     auto hasPrefix = [](std::string_view s, std::string_view p) -> bool {
         return s.size() >= p.size() && s.compare(0, p.size(), p) == 0;
@@ -378,17 +403,17 @@ int main(int argc, char* argv[])
 
         if (arg == "--rt")                { startInRTMode   = true; }
         else if (hasPrefix(arg, "--rt-bounces="))
-            startRTBounces = static_cast<u32>(std::atoi(argv[i] + 13));
+            { startRTBounces = static_cast<u32>(std::atoi(argv[i] + 13)); cliHasRTBounces = true; }
         else if (hasPrefix(arg, "--rt-spp="))
-            startRTSPP     = static_cast<u32>(std::atoi(argv[i] + 9));
-        else if (arg == "--rt-nodenoise") { startRTDenoise  = false; }
-        else if (arg == "--fog")          { startFog        = true;  }
-        else if (arg == "--ssr")          { startSSR        = true;  }
-        else if (arg == "--dof")          { startDoF        = true;  }
-        else if (arg == "--nomotionblur") { startMotionBlur = false; }
-        else if (arg == "--nocolorgrade") { startColorGrade = false; }
-        else if (arg == "--nooptfx")      { startOptFx      = false; }
-        else if (arg == "--nofxaa")       { startFXAA       = false; }
+            { startRTSPP     = static_cast<u32>(std::atoi(argv[i] + 9));  cliHasRTSPP    = true; }
+        else if (arg == "--rt-nodenoise") { startRTDenoise  = false; cliHasRTDenoise = true; }
+        else if (arg == "--fog")          { startFog        = true;  cliHasFog        = true; }
+        else if (arg == "--ssr")          { startSSR        = true;  cliHasSSR        = true; }
+        else if (arg == "--dof")          { startDoF        = true;  cliHasDoF        = true; }
+        else if (arg == "--nomotionblur") { startMotionBlur = false; cliHasMotionBlur = true; }
+        else if (arg == "--nocolorgrade") { startColorGrade = false; cliHasColorGrade = true; }
+        else if (arg == "--nooptfx")      { startOptFx      = false; cliHasOptFx      = true; }
+        else if (arg == "--nofxaa")       { startFXAA       = false; cliHasFXAA       = true; }
     }
 
     if (isDlevel)
@@ -410,19 +435,39 @@ int main(int argc, char* argv[])
         std::unordered_map<daedalus::UUID, std::unique_ptr<rhi::ITexture>, daedalus::UUIDHash>
             packTextures;
 
+        // Build the set of albedo UUIDs from sector surface material IDs.
+        // These are the "original" UUIDs — any texture whose UUID is NOT in
+        // this set but whose UUID XOR 0xDEADBEEF IS in this set is a normal map.
+        // The previous symmetric XOR check incorrectly flagged albedo textures
+        // as normal maps when their companion normal map was also in the pack.
+        std::unordered_set<UUID, UUIDHash> albedoUUIDs;
+        for (const auto& sec : pack.map.sectors)
+        {
+            if (sec.floorMaterialId.isValid()) albedoUUIDs.insert(sec.floorMaterialId);
+            if (sec.ceilMaterialId.isValid())  albedoUUIDs.insert(sec.ceilMaterialId);
+            for (const auto& wall : sec.walls)
+            {
+                if (wall.frontMaterialId.isValid()) albedoUUIDs.insert(wall.frontMaterialId);
+                if (wall.upperMaterialId.isValid()) albedoUUIDs.insert(wall.upperMaterialId);
+                if (wall.lowerMaterialId.isValid()) albedoUUIDs.insert(wall.lowerMaterialId);
+            }
+        }
+
         for (auto& [uuid, ltex] : pack.textures)
         {
             if (ltex.pixels.empty()) { continue; }
 
-            // Detect if this is a normal map by checking the UUID.
-            // Normal map UUIDs are derived: originalUUID.lo XOR 0xDEADBEEF.
-            // We check all possible material UUIDs to see if un-XORing gives a valid match.
+            // A texture is a normal map if its UUID is NOT a sector material ID
+            // but un-XORing gives one that IS.  This correctly distinguishes
+            // albedo (materialId) from normal (materialId ^ 0xDEADBEEF).
             bool isNormalMap = false;
-            UUID testAlbedoUuid = uuid;
-            testAlbedoUuid.lo ^= 0xDEADBEEFull;
-            // If un-XORing gives a UUID that's also in pack.textures, this is a normal map.
-            if (pack.textures.find(testAlbedoUuid) != pack.textures.end())
-                isNormalMap = true;
+            if (albedoUUIDs.find(uuid) == albedoUUIDs.end())
+            {
+                UUID testAlbedoUuid = uuid;
+                testAlbedoUuid.lo ^= 0xDEADBEEFull;
+                if (albedoUUIDs.find(testAlbedoUuid) != albedoUUIDs.end())
+                    isNormalMap = true;
+            }
 
             // Generate mipmaps with proper filtering for both albedo and normal maps.
             // Normal maps use renormalized filtering to preserve vector magnitude.
@@ -447,6 +492,64 @@ int main(int argc, char* argv[])
 
         std::printf("[DLevel] Uploaded %zu material texture(s) to GPU.\n",
                     packTextures.size());
+
+        // ── 2b. Load colour grading LUT from .dlevel render settings ────────
+        // Replicates viewport_3d.cpp::reloadLutIfNeeded: 1024×32 strip → 32³ 3D tex.
+        std::unique_ptr<rhi::ITexture> dlLutTexture;
+        {
+            const std::string& lutPath = pack.renderSettings.colorGradingLutPath;
+            if (!lutPath.empty())
+            {
+                int imgW = 0, imgH = 0, channels = 0;
+                stbi_uc* pixels = stbi_load(lutPath.c_str(), &imgW, &imgH, &channels, 4);
+                if (pixels)
+                {
+                    static constexpr int kLutSize = 32;
+                    const bool validSize = (imgW == kLutSize * kLutSize) && (imgH == kLutSize);
+                    if (validSize)
+                    {
+                        const std::size_t kPixels = static_cast<std::size_t>(
+                            kLutSize * kLutSize * kLutSize);
+                        std::vector<stbi_uc> lut3d(kPixels * 4u);
+
+                        for (int b = 0; b < kLutSize; ++b)
+                        for (int g = 0; g < kLutSize; ++g)
+                        for (int r = 0; r < kLutSize; ++r)
+                        {
+                            const int srcX   = b * kLutSize + r;
+                            const int srcY   = g;
+                            const int srcOff = (srcY * imgW + srcX) * 4;
+                            const int dstOff = (b * kLutSize * kLutSize + g * kLutSize + r) * 4;
+                            lut3d[static_cast<std::size_t>(dstOff) + 0] = pixels[static_cast<std::size_t>(srcOff) + 0];
+                            lut3d[static_cast<std::size_t>(dstOff) + 1] = pixels[static_cast<std::size_t>(srcOff) + 1];
+                            lut3d[static_cast<std::size_t>(dstOff) + 2] = pixels[static_cast<std::size_t>(srcOff) + 2];
+                            lut3d[static_cast<std::size_t>(dstOff) + 3] = pixels[static_cast<std::size_t>(srcOff) + 3];
+                        }
+
+                        rhi::TextureDescriptor d;
+                        d.width     = static_cast<u32>(kLutSize);
+                        d.height    = static_cast<u32>(kLutSize);
+                        d.depth     = static_cast<u32>(kLutSize);
+                        d.format    = rhi::TextureFormat::RGBA8Unorm;
+                        d.usage     = rhi::TextureUsage::ShaderRead;
+                        d.initData  = lut3d.data();
+                        d.debugName = std::filesystem::path(lutPath).filename().string();
+                        dlLutTexture = device->createTexture(d);
+                        std::printf("[DLevel] Loaded colour grading LUT: %s\n", lutPath.c_str());
+                    }
+                    else
+                    {
+                        std::printf("[DLevel] LUT ignored: expected %dx%d, got %dx%d\n",
+                                    kLutSize * kLutSize, kLutSize, imgW, imgH);
+                    }
+                    stbi_image_free(pixels);
+                }
+                else
+                {
+                    std::printf("[DLevel] LUT not found: %s\n", lutPath.c_str());
+                }
+            }
+        }
 
         // ── 3+4. Tessellate map (tagged) and upload VBOs/IBOs ─────────────────
         // Returns: outer = per-sector, inner = per-material-batch.
@@ -950,10 +1053,10 @@ int main(int argc, char* argv[])
         }
 
         // ── 7. Capture mouse for mouselook ────────────────────────────────
-        // dlSwapW/H are declared here so they can be referenced from event
-        // handlers; they are updated in WINDOW_RESIZED events.
-        u32 dlSwapW = WINDOW_W;
-        u32 dlSwapH = WINDOW_H;
+        // dlSwapW/H track the swapchain pixel dimensions; updated in
+        // PIXEL_SIZE_CHANGED events (Retina-aware).
+        u32 dlSwapW = initPixelW;
+        u32 dlSwapH = initPixelH;
 
         // Strategy: bypass SDL's relative-mouse-mode entirely.
         // SDL's Cocoa relative-mode path contains a title-bar filter in
@@ -1015,7 +1118,8 @@ int main(int argc, char* argv[])
         using FPClock = std::chrono::steady_clock;
         auto fpPrevTP = FPClock::now();
 
-        u32 fpFrameIdx = 0;
+        u32   fpFrameIdx = 0;
+        float fpAccTime  = 0.0f;  // seconds since game loop started (feeds scene.time)
         glm::mat4 fpPrevView(1.0f);
         glm::mat4 fpPrevProj(1.0f);
 
@@ -1056,7 +1160,7 @@ int main(int argc, char* argv[])
                     std::printf("[RT] Render mode: %s\n",
                                 fpRTMode ? "RayTraced" : "Rasterized");
                 }
-                else if (event.type == SDL_EVENT_WINDOW_RESIZED)
+                else if (event.type == SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED)
                 {
                     dlSwapW = static_cast<u32>(event.window.data1);
                     dlSwapH = static_cast<u32>(event.window.data2);
@@ -1155,7 +1259,8 @@ int main(int argc, char* argv[])
             // ── Timing
             const auto fpNowTP = FPClock::now();
             const float fpDt   = std::chrono::duration<float>(fpNowTP - fpPrevTP).count();
-            fpPrevTP = fpNowTP;
+            fpPrevTP   = fpNowTP;
+            fpAccTime += fpDt;
 
             // ── Mouselook ───────────────────────────────────────────────────
             {
@@ -1239,7 +1344,7 @@ int main(int argc, char* argv[])
             const float fpAspect = static_cast<float>(dlSwapW) / static_cast<float>(dlSwapH);
             const glm::mat4 fpView = glm::lookAtLH(fpCamPos, fpCamPos + camDir, up);
             const glm::mat4 fpProj = glm::perspectiveLH_ZO(
-                glm::radians(70.0f), fpAspect, 0.1f, 200.0f);
+                glm::radians(60.0f), fpAspect, 0.1f, 500.0f);
 
             // ── Portal traversal ──────────────────────────────────────────────
             world::SectorId dlCamSector =
@@ -1341,32 +1446,63 @@ int main(int argc, char* argv[])
             fpScene.cameraPos = fpCamPos;
             fpScene.cameraDir = camDir;
 
-            // ── Post-FX — driven by editor render settings passed via CLI args ──
-            // Fog, SSR, DoF: off by default; enabled if --fog/--ssr/--dof was passed.
-            fpScene.fog.enabled = startFog;
-            fpScene.ssr.enabled = startSSR;
-            fpScene.dof.enabled = startDoF;
+            // ── Timing (required for TAA history, time-driven shaders) ───────────
+            fpScene.time       = fpAccTime;
+            fpScene.deltaTime  = fpDt;
+            fpScene.frameIndex = fpFrameIdx;
 
-            // Motion blur: on by default (good game feel); --nomotionblur disables.
-            fpScene.motionBlur.enabled      = startMotionBlur;
-            fpScene.motionBlur.shutterAngle = 0.25f;
-            fpScene.motionBlur.numSamples   = 8u;
+            // ── Post-FX — loaded from .dlevel v6; CLI flags override ──
+            // Apply render settings from .dlevel file (saved by editor).
+            // CLI flags passed by editor override these settings.
+            const auto& rs = pack.renderSettings;
+            
+            // Post-FX: .dlevel values are used unless a specific CLI flag was passed.
+            // cliHas* is only true when the flag was explicitly present in argv.
 
-            // Colour grading: on by default with the identity LUT (passthrough);
-            // --nocolorgrade disables entirely.
-            fpScene.colorGrading.enabled    = startColorGrade;
-            fpScene.colorGrading.intensity  = 1.0f;
-            fpScene.colorGrading.lutTexture = nullptr;
+            // Fog
+            fpScene.fog.enabled      = cliHasFog        ? startFog        : rs.fogEnabled;
+            fpScene.fog.density      = rs.fogDensity;
+            fpScene.fog.anisotropy   = rs.fogAnisotropy;
+            fpScene.fog.scattering   = rs.fogScattering;
+            fpScene.fog.fogNear      = rs.fogNear;
+            fpScene.fog.fogFar       = rs.fogFar;
+            fpScene.fog.ambientFog   = glm::vec3(rs.fogAmbientR, rs.fogAmbientG, rs.fogAmbientB);
 
-            // Optional FX (vignette, film grain, CA): mild defaults; --nooptfx disables.
-            fpScene.optionalFx.enabled          = startOptFx;
-            fpScene.optionalFx.vignetteIntensity = 0.30f;
-            fpScene.optionalFx.vignetteRadius    = 0.40f;
-            fpScene.optionalFx.grainAmount       = 0.03f;
-            fpScene.optionalFx.caAmount          = 0.0f;
+            // SSR
+            fpScene.ssr.enabled         = cliHasSSR        ? startSSR        : rs.ssrEnabled;
+            fpScene.ssr.maxDistance     = rs.ssrMaxDistance;
+            fpScene.ssr.thickness       = rs.ssrThickness;
+            fpScene.ssr.roughnessCutoff = rs.ssrRoughnessCutoff;
+            fpScene.ssr.fadeStart       = rs.ssrFadeStart;
+            fpScene.ssr.maxSteps        = rs.ssrMaxSteps;
 
-            // FXAA: on by default; --nofxaa disables.
-            fpScene.upscaling.mode = startFXAA
+            // DoF
+            fpScene.dof.enabled        = cliHasDoF        ? startDoF        : rs.dofEnabled;
+            fpScene.dof.focusDistance  = rs.dofFocusDistance;
+            fpScene.dof.focusRange     = rs.dofFocusRange;
+            fpScene.dof.bokehRadius    = rs.dofBokehRadius;
+            fpScene.dof.nearTransition = rs.dofNearTransition;
+            fpScene.dof.farTransition  = rs.dofFarTransition;
+
+            // Motion blur
+            fpScene.motionBlur.enabled      = cliHasMotionBlur ? startMotionBlur : rs.motionBlurEnabled;
+            fpScene.motionBlur.shutterAngle = rs.motionBlurShutterAngle;
+            fpScene.motionBlur.numSamples   = rs.motionBlurNumSamples;
+
+            // Colour grading
+            fpScene.colorGrading.enabled    = cliHasColorGrade ? startColorGrade : rs.colorGradingEnabled;
+            fpScene.colorGrading.intensity  = rs.colorGradingIntensity;
+            fpScene.colorGrading.lutTexture = dlLutTexture.get();  // nullptr = identity LUT
+
+            // Optional FX (vignette, film grain, CA)
+            fpScene.optionalFx.enabled           = cliHasOptFx      ? startOptFx      : rs.optFxEnabled;
+            fpScene.optionalFx.vignetteIntensity = rs.optFxVignetteIntensity;
+            fpScene.optionalFx.vignetteRadius    = rs.optFxVignetteRadius;
+            fpScene.optionalFx.grainAmount       = rs.optFxGrainAmount;
+            fpScene.optionalFx.caAmount          = rs.optFxCaAmount;
+
+            // FXAA
+            fpScene.upscaling.mode = (cliHasFXAA ? startFXAA : rs.fxaaEnabled)
                 ? render::UpscalingMode::FXAA
                 : render::UpscalingMode::None;
 
@@ -1375,10 +1511,10 @@ int main(int argc, char* argv[])
                 ? render::RenderMode::RayTraced
                 : render::RenderMode::Rasterized;
 
-            // RT sub-settings: bounces, SPP, denoiser — synced from editor panel.
-            fpScene.rt.maxBounces      = startRTBounces;
-            fpScene.rt.samplesPerPixel = startRTSPP;
-            fpScene.rt.denoise         = startRTDenoise;
+            // RT sub-settings
+            fpScene.rt.maxBounces      = cliHasRTBounces  ? startRTBounces  : rs.rtMaxBounces;
+            fpScene.rt.samplesPerPixel = cliHasRTSPP      ? startRTSPP      : rs.rtSamplesPerPixel;
+            fpScene.rt.denoise         = cliHasRTDenoise  ? startRTDenoise  : rs.rtDenoise;
 
             // ── ECS entity rendering
             // spriteAnimationSystem advances UV offsets before billboard gather.
@@ -1391,7 +1527,26 @@ int main(int argc, char* argv[])
             render::particleRenderSystem(dlWorld, fpScene, fpDt, fpFrameIdx);
             render::sortTransparentDraws(fpScene);
 
-            // ── Render ────────────────────────────────────────────────────────
+            // ── Diagnostic: comprehensive render state dump on frame 0
+            if (fpFrameIdx == 0u)
+            {
+                std::printf("[Standalone] === RENDER STATE ===\n");
+                std::printf("  renderMode=%s  (fpRTMode=%d, --rt=%d, rs.rtEnabled=%d)\n",
+                            fpScene.renderMode == render::RenderMode::RayTraced ? "RT" : "RASTER",
+                            fpRTMode, startInRTMode, rs.rtEnabled);
+                std::printf("  fog=%d  ssr=%d  dof=%d  motionBlur=%d\n",
+                            fpScene.fog.enabled, fpScene.ssr.enabled,
+                            fpScene.dof.enabled, fpScene.motionBlur.enabled);
+                std::printf("  colorGrade=%d  optFx=%d  fxaa=%d\n",
+                            fpScene.colorGrading.enabled, fpScene.optionalFx.enabled,
+                            fpScene.upscaling.mode == render::UpscalingMode::FXAA);
+                std::printf("  meshDraws=%zu  spotLights=%zu  pointLights=%zu\n",
+                            fpScene.meshDraws.size(), fpScene.spotLights.size(),
+                            fpScene.pointLights.size());
+                std::printf("===========================\n");
+            }
+
+            // ── Render
             renderer.renderFrame(*device, *queue, *swapchain, fpScene, dlSwapW, dlSwapH);
 
             fpPrevView = fpView;
@@ -2430,8 +2585,8 @@ int main(int argc, char* argv[])
     // UV to map to the wrong region of the RT as the camera moves → flickering.
     glm::mat4 lastMirrorReflView = glm::mat4(1.0f);
     glm::mat4 lastMirrorReflProj = glm::mat4(1.0f);
-    u32       swapW    = WINDOW_W;
-    u32       swapH    = WINDOW_H;
+    u32       swapW    = initPixelW;
+    u32       swapH    = initPixelH;
 
     // ─── Main loop ────────────────────────────────────────────────────────────
 
@@ -2446,7 +2601,7 @@ int main(int argc, char* argv[])
             {
                 running = false;
             }
-            else if (event.type == SDL_EVENT_WINDOW_RESIZED)
+            else if (event.type == SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED)
             {
                 swapW = static_cast<u32>(event.window.data1);
                 swapH = static_cast<u32>(event.window.data2);

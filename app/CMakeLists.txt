@@ -16,17 +16,20 @@ if(DAEDALUS_PLATFORM_MACOS)
     find_library(COREGRAPHICS_APP_FRAMEWORK CoreGraphics REQUIRED)
     target_link_libraries(DaedalusApp PRIVATE ${COREGRAPHICS_APP_FRAMEWORK})
     
-    # Ensure shaders are built before the app
-    add_dependencies(DaedalusApp DaedalusShaders)
-    
-    # Copy shader library to standalone executable directory
-    add_custom_command(TARGET DaedalusApp POST_BUILD
+    # Ensure shaders are always copied when building DaedalusApp.
+    # A dedicated custom target is used instead of POST_BUILD because
+    # POST_BUILD only runs when the executable re-links, not when the
+    # metallib alone changes.  Custom targets are always considered
+    # out-of-date, so copy_if_different runs every build and updates
+    # the destination only when the metallib actually differs.
+    add_custom_target(DaedalusAppCopyShaders
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
                 "${DAEDALUS_METALLIB_OUTPUT}"
                 "$<TARGET_FILE_DIR:DaedalusApp>/daedalus_shaders.metallib"
-        DEPENDS DaedalusShaders
         COMMENT "Copying shaders to app directory"
     )
+    add_dependencies(DaedalusAppCopyShaders DaedalusShaders)
+    add_dependencies(DaedalusApp DaedalusAppCopyShaders)
     
     # Copy shared assets directory
     add_custom_command(TARGET DaedalusApp POST_BUILD

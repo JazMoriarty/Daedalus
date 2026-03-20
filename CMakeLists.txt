@@ -88,10 +88,12 @@ set(JSON_Install        OFF CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(nlohmann_json)
 
 # Dear ImGui — dockable immediate-mode UI (editor)
+# Pinned to a release tag for reproducible builds.  The unpinned `docking`
+# branch caused crashes after a clean build fetched a newer commit.
 FetchContent_Declare(
     imgui
     GIT_REPOSITORY https://github.com/ocornut/imgui.git
-    GIT_TAG        docking
+    GIT_TAG        v1.92.6-docking
     GIT_SHALLOW    TRUE
 )
 FetchContent_MakeAvailable(imgui)

@@ -131,6 +131,37 @@ UUID MaterialCatalog::readOrCreateMeta(const std::filesystem::path& imgPath,
 
 void MaterialCatalog::scan()
 {
+    // Preserve loaded GPU textures from old entries so they are not freed
+    // while the GPU may still be referencing them from an in-flight command
+    // buffer.  Textures are transferred back to new entries with matching
+    // UUIDs after the filesystem walk.  Any textures not reclaimed are kept
+    // alive in m_retiredTextures until the NEXT scan, by which time the GPU
+    // has long finished with them.
+    m_retiredTextures.clear();   // free textures retired on the previous scan
+
+    struct SavedTextures {
+        std::unique_ptr<rhi::ITexture> fullTexture;
+        std::unique_ptr<rhi::ITexture> normalTexture;
+        std::unique_ptr<rhi::ITexture> roughnessTexture;
+        std::unique_ptr<rhi::ITexture> metalnessTexture;
+        std::unique_ptr<rhi::ITexture> thumbnail;
+    };
+    std::unordered_map<UUID, SavedTextures, UUIDHash> savedGPU;
+    for (auto& e : m_entries)
+    {
+        if (e.fullTexture || e.normalTexture || e.roughnessTexture ||
+            e.metalnessTexture || e.thumbnail)
+        {
+            SavedTextures st;
+            st.fullTexture      = std::move(e.fullTexture);
+            st.normalTexture    = std::move(e.normalTexture);
+            st.roughnessTexture = std::move(e.roughnessTexture);
+            st.metalnessTexture = std::move(e.metalnessTexture);
+            st.thumbnail        = std::move(e.thumbnail);
+            savedGPU[e.uuid]    = std::move(st);
+        }
+    }
+
     m_entries.clear();
     m_uuidIndex.clear();
 
@@ -205,6 +236,41 @@ void MaterialCatalog::scan()
     // Build UUID index after sort.
     for (std::size_t i = 0; i < m_entries.size(); ++i)
         m_uuidIndex[m_entries[i].uuid] = i;
+
+    // Reclaim GPU textures that match new entries by UUID.
+    for (auto& e : m_entries)
+    {
+        auto it = savedGPU.find(e.uuid);
+        if (it == savedGPU.end()) continue;
+        e.fullTexture      = std::move(it->second.fullTexture);
+        // Only reclaim normal/roughness/metalness if the companion path
+        // hasn't changed (a newly generated normal map should be reloaded).
+        if (e.normalTexture == nullptr && it->second.normalTexture)
+        {
+            // If the normal map path changed (e.g., a new _n.png was generated),
+            // don't reclaim — let getOrLoadNormalMap reload from disk.
+            // We can't easily compare paths here since the old entry is gone,
+            // so we conservatively keep the old texture.  The next getOrLoad
+            // call will replace it if the entry's normalPath differs.
+            e.normalTexture    = std::move(it->second.normalTexture);
+        }
+        e.roughnessTexture = std::move(it->second.roughnessTexture);
+        e.metalnessTexture = std::move(it->second.metalnessTexture);
+        e.thumbnail        = std::move(it->second.thumbnail);
+        savedGPU.erase(it);
+    }
+
+    // Any unclaimed textures go to the retired list — they stay alive until
+    // the NEXT scan() call, which is always ≥1 frame later (after the GPU
+    // fence has been waited on inside renderFrame).
+    for (auto& [uuid, st] : savedGPU)
+    {
+        if (st.fullTexture)      m_retiredTextures.push_back(std::move(st.fullTexture));
+        if (st.normalTexture)    m_retiredTextures.push_back(std::move(st.normalTexture));
+        if (st.roughnessTexture) m_retiredTextures.push_back(std::move(st.roughnessTexture));
+        if (st.metalnessTexture) m_retiredTextures.push_back(std::move(st.metalnessTexture));
+        if (st.thumbnail)        m_retiredTextures.push_back(std::move(st.thumbnail));
+    }
 }
 
 // ─── find / findMutable ───────────────────────────────────────────────────────

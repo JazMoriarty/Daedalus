@@ -208,6 +208,67 @@ struct LevelTexture
     std::vector<u8> pixels;  ///< RGBA8Unorm, width * height * 4 bytes.
 };
 
+// ─── LevelRenderSettings ──────────────────────────────────────────────────────
+// Post-processing and render mode settings saved from the editor.
+// Ensures standalone app renders identically to editor preview.
+// All fields use plain types — no glm, no render headers.
+
+struct LevelRenderSettings
+{
+    // Volumetric fog
+    bool  fogEnabled           = false;
+    float fogDensity           = 0.02f;
+    float fogAnisotropy        = 0.3f;
+    float fogScattering        = 0.8f;
+    float fogNear              = 0.5f;
+    float fogFar               = 80.0f;
+    float fogAmbientR          = 0.04f;
+    float fogAmbientG          = 0.05f;
+    float fogAmbientB          = 0.06f;
+    
+    // Screen-space reflections
+    bool  ssrEnabled           = false;
+    float ssrMaxDistance       = 20.0f;
+    float ssrThickness         = 0.15f;
+    float ssrRoughnessCutoff   = 0.6f;
+    float ssrFadeStart         = 0.1f;
+    u32   ssrMaxSteps          = 64u;
+    
+    // Depth of field
+    bool  dofEnabled           = false;
+    float dofFocusDistance     = 5.0f;
+    float dofFocusRange        = 2.0f;
+    float dofBokehRadius       = 8.0f;
+    float dofNearTransition    = 1.0f;
+    float dofFarTransition     = 3.0f;
+    
+    // Motion blur
+    bool  motionBlurEnabled    = false;
+    float motionBlurShutterAngle = 0.5f;
+    u32   motionBlurNumSamples = 8u;
+    
+    // Color grading
+    bool        colorGradingEnabled   = false;
+    float       colorGradingIntensity = 1.0f;
+    std::string colorGradingLutPath;  ///< Path to 3D LUT texture; empty = identity LUT.
+    
+    // Optional FX (vignette, grain, chromatic aberration)
+    bool  optFxEnabled             = false;
+    float optFxCaAmount            = 0.0f;
+    float optFxVignetteIntensity   = 0.30f;
+    float optFxVignetteRadius      = 0.40f;
+    float optFxGrainAmount         = 0.04f;
+    
+    // Upscaling
+    bool fxaaEnabled = true;
+    
+    // Ray tracing
+    bool rtEnabled         = false;
+    u32  rtMaxBounces      = 2u;
+    u32  rtSamplesPerPixel = 1u;
+    bool rtDenoise         = true;
+};
+
 // ─── LevelPackData ────────────────────────────────────────────────────────────
 // The complete in-memory representation of a .dlevel file.
 // This is what DaedalusApp receives after loadDlevel() and uses to build the
@@ -228,6 +289,10 @@ struct LevelPackData
 
     /// Placed entities with physics descriptors. Empty in v1 files.
     std::vector<LevelEntity>                         entities;
+    
+    /// Render settings from the editor. Ensures standalone app matches editor
+    /// preview exactly. Populated from .dlevel v6+; v5 files use sensible defaults.
+    LevelRenderSettings                              renderSettings;
 };
 
 // ─── DlevelError ─────────────────────────────────────────────────────────────

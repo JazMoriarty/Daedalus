@@ -150,6 +150,11 @@ private:
     std::unordered_map<UUID, std::size_t, UUIDHash> m_uuidIndex;
     bool m_needsRescan = false;
 
+    /// GPU textures from entries removed during the last scan().  Kept alive
+    /// for one extra scan cycle so the GPU’s async completion handler has time
+    /// to release its references before the C++ wrappers are destroyed.
+    std::vector<std::unique_ptr<rhi::ITexture>> m_retiredTextures;
+
     [[nodiscard]] MaterialEntry* findMutable(const UUID& uuid) noexcept;
 
     static bool isImageFile(const std::filesystem::path& p) noexcept;

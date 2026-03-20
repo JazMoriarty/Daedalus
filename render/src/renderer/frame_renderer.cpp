@@ -2265,9 +2265,13 @@ void FrameRenderer::renderFrame(IRenderDevice& device,
         m_graph.addComputePass(std::move(p));
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
+    // ─────────────────────────────────────────────────────────────────────
     // Pass 5 — Skybox (loads HDR + depth, draws sky on background pixels)
-    // ─────────────────────────────────────────────────────────────────────────
+    // Skipped in RT mode: the path tracer handles miss rays directly (writing
+    // sky colour into hdrTex), and gDepthId is not populated by the RT path,
+    // so the depth test would read undefined values and render sky everywhere.
+    // ─────────────────────────────────────────────────────────────────────
+    if (!rtMode)
     {
         RGRenderPassDesc p;
         p.name             = "Skybox";

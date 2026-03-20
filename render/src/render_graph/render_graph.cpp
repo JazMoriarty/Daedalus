@@ -28,15 +28,26 @@ const RenderGraph::TextureEntry& RenderGraph::entry(RGTextureId id) const
 
 RGTextureId RenderGraph::createTexture(const RGTextureDesc& desc)
 {
+    // Ensure the null slot exists.
     if (m_textures.empty())
-    {
-        // Slot 0 is reserved for the null handle.
         m_textures.push_back({});
+
+    const auto id = static_cast<RGTextureId>(m_nextSlot);
+
+    if (id < static_cast<u32>(m_textures.size()))
+    {
+        // Reuse an existing slot — keep its owned texture for compile() to reclaim.
+        m_textures[id].desc     = desc;
+        m_textures[id].imported = nullptr;
     }
-    const auto id = static_cast<RGTextureId>(m_textures.size());
-    TextureEntry e;
-    e.desc = desc;
-    m_textures.push_back(std::move(e));
+    else
+    {
+        // First time this slot is used — grow the vector.
+        TextureEntry e;
+        e.desc = desc;
+        m_textures.push_back(std::move(e));
+    }
+    ++m_nextSlot;
     return id;
 }
 
@@ -46,11 +57,22 @@ RGTextureId RenderGraph::importTexture(std::string_view name, ITexture* texture)
     if (m_textures.empty())
         m_textures.push_back({});
 
-    const auto id = static_cast<RGTextureId>(m_textures.size());
-    TextureEntry e;
-    e.desc.debugName = std::string(name);
-    e.imported       = texture;
-    m_textures.push_back(std::move(e));
+    const auto id = static_cast<RGTextureId>(m_nextSlot);
+
+    if (id < static_cast<u32>(m_textures.size()))
+    {
+        m_textures[id].desc.debugName = std::string(name);
+        m_textures[id].imported       = texture;
+        // Keep owned — compile() will skip this slot (imported != nullptr).
+    }
+    else
+    {
+        TextureEntry e;
+        e.desc.debugName = std::string(name);
+        e.imported       = texture;
+        m_textures.push_back(std::move(e));
+    }
+    ++m_nextSlot;
     return id;
 }
 
@@ -179,19 +201,23 @@ ITexture* RenderGraph::get(RGTextureId id) const
 
 void RenderGraph::reset()
 {
-    // Clear passes and imported textures; keep owned (transient) allocations
-    // so they can be reused next frame.
     m_passes.clear();
 
+    // Clear imported pointers but keep owned GPU textures alive.
+    // Owned textures must NOT be freed here — Metal’s command-buffer
+    // completion handler releases resource references asynchronously,
+    // so destroying the C++ wrapper while the handler still holds the
+    // underlying id<MTLTexture> causes a use-after-free crash.
+    // The next frame’s createTexture/importTexture will overwrite the
+    // same slots (m_nextSlot resets to 1), and compile() will reuse
+    // any owned allocation whose dimensions still match.
     for (auto& e : m_textures)
-    {
         e.imported = nullptr;
-        // e.owned intentionally retained for reuse
-    }
 
-    // Clear all entries but keep the reserved null slot capacity.
-    // Null slot is re-added lazily in createTexture/importTexture.
-    m_textures.clear();
+    // Reset the slot counter so the next frame’s createTexture /
+    // importTexture calls reuse the same indices (and thus the same
+    // owned allocations).  Slot 0 is always the null sentinel.
+    m_nextSlot = 1;
 }
 
 } // namespace daedalus::render

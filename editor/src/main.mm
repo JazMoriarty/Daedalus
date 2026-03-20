@@ -515,7 +515,7 @@ int main(int /*argc*/, char* /*argv*/[])
     metalLayer.maximumDrawableCount = 2;
     metalLayer.displaySyncEnabled   = NO;
 
-    // ── Working directory ─────────────────────────────────────────────
+    // ── Working directory
     // Ensure relative paths (asset paths, INI, shaders) resolve from the
     // resource directory regardless of how the editor was launched.
     {
@@ -1111,6 +1111,62 @@ int main(int /*argc*/, char* /*argv*/[])
 
                                 pack.entities.push_back(std::move(ent));
                             }
+
+                            // ── Render settings (v6) ─────────────────────────────
+                            const auto& rs = doc.renderSettings();
+                            
+                            // Fog
+                            pack.renderSettings.fogEnabled   = rs.fog.enabled;
+                            pack.renderSettings.fogAmbientR  = rs.fog.ambientFogR;
+                            pack.renderSettings.fogAmbientG  = rs.fog.ambientFogG;
+                            pack.renderSettings.fogAmbientB  = rs.fog.ambientFogB;
+                            pack.renderSettings.fogDensity   = rs.fog.density;
+                            pack.renderSettings.fogAnisotropy = rs.fog.anisotropy;
+                            pack.renderSettings.fogScattering = rs.fog.scattering;
+                            pack.renderSettings.fogNear      = rs.fog.fogNear;
+                            pack.renderSettings.fogFar       = rs.fog.fogFar;
+                            
+                            // SSR
+                            pack.renderSettings.ssrEnabled         = rs.ssr.enabled;
+                            pack.renderSettings.ssrMaxDistance     = rs.ssr.maxDistance;
+                            pack.renderSettings.ssrThickness       = rs.ssr.thickness;
+                            pack.renderSettings.ssrRoughnessCutoff = rs.ssr.roughnessCutoff;
+                            pack.renderSettings.ssrFadeStart       = rs.ssr.fadeStart;
+                            pack.renderSettings.ssrMaxSteps        = rs.ssr.maxSteps;
+                            
+                            // DoF
+                            pack.renderSettings.dofEnabled         = rs.dof.enabled;
+                            pack.renderSettings.dofFocusDistance   = rs.dof.focusDistance;
+                            pack.renderSettings.dofFocusRange      = rs.dof.focusRange;
+                            pack.renderSettings.dofBokehRadius     = rs.dof.bokehRadius;
+                            pack.renderSettings.dofNearTransition  = rs.dof.nearTransition;
+                            pack.renderSettings.dofFarTransition   = rs.dof.farTransition;
+                            
+                            // Motion blur
+                            pack.renderSettings.motionBlurEnabled      = rs.motionBlur.enabled;
+                            pack.renderSettings.motionBlurShutterAngle = rs.motionBlur.shutterAngle;
+                            pack.renderSettings.motionBlurNumSamples   = rs.motionBlur.numSamples;
+                            
+                            // Color grading
+                            pack.renderSettings.colorGradingEnabled   = rs.colorGrading.enabled;
+                            pack.renderSettings.colorGradingIntensity = rs.colorGrading.intensity;
+                            pack.renderSettings.colorGradingLutPath   = rs.colorGrading.lutPath;
+                            
+                            // Optional FX (vignette, grain, CA)
+                            pack.renderSettings.optFxEnabled           = rs.optionalFx.enabled;
+                            pack.renderSettings.optFxCaAmount          = rs.optionalFx.caAmount;
+                            pack.renderSettings.optFxVignetteIntensity = rs.optionalFx.vignetteIntensity;
+                            pack.renderSettings.optFxVignetteRadius    = rs.optionalFx.vignetteRadius;
+                            pack.renderSettings.optFxGrainAmount       = rs.optionalFx.grainAmount;
+                            
+                            // FXAA
+                            pack.renderSettings.fxaaEnabled = rs.upscaling.fxaaEnabled;
+                            
+                            // Ray tracing
+                            pack.renderSettings.rtEnabled         = rs.rt.enabled;
+                            pack.renderSettings.rtMaxBounces      = rs.rt.maxBounces;
+                            pack.renderSettings.rtSamplesPerPixel = rs.rt.samplesPerPixel;
+                            pack.renderSettings.rtDenoise         = rs.rt.denoise;
 
                             // ── Serialise .dlevel ────────────────────────────────
                             const auto saveResult =

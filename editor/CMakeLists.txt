@@ -97,14 +97,17 @@ if(DAEDALUS_PLATFORM_MACOS)
         ${COREGRAPHICS_FRAMEWORK}
     )
 
-    # Copy shader library to standalone executable directory
-    add_custom_command(TARGET DaedalusEdit POST_BUILD
+    # Ensure shaders are always copied when building DaedalusEdit.
+    # See app/CMakeLists.txt for rationale on using a custom target
+    # instead of POST_BUILD.
+    add_custom_target(DaedalusEditCopyShaders
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
                 "${DAEDALUS_METALLIB_OUTPUT}"
                 "$<TARGET_FILE_DIR:DaedalusEdit>/daedalus_shaders.metallib"
-        DEPENDS DaedalusShaders
         COMMENT "Copying daedalus_shaders.metallib to editor directory"
     )
+    add_dependencies(DaedalusEditCopyShaders DaedalusShaders)
+    add_dependencies(DaedalusEdit DaedalusEditCopyShaders)
 
     # Copy shared assets directory next to the editor executable
     add_custom_command(TARGET DaedalusEdit POST_BUILD

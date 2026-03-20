@@ -1120,7 +1120,7 @@ void Viewport3D::draw(EditMapDocument&      doc,
     }
     render::sortTransparentDraws(scene);
 
-    // ── Render ────────────────────────────────────────────────────────────────
+    // ── Render
     m_renderer.renderFrame(device, queue, *m_offscreenSwap, scene, w, h);
 
     // ── Display ─────────────────────────────────────────────────────────────

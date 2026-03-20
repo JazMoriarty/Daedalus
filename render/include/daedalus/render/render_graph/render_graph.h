@@ -162,6 +162,7 @@ private:
     std::vector<TextureEntry> m_textures;
     std::vector<PassEntry>    m_passes;
 
+    u32 m_nextSlot   = 1;  // next slot for createTexture/importTexture (0 = null)
     u32 m_swapWidth  = 0;
     u32 m_swapHeight = 0;
 
