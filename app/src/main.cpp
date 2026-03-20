@@ -961,7 +961,7 @@ int main(int argc, char* argv[])
                     }
                     case world::LevelEntityVisualType::ParticleEmitter:
                     {
-                        rhi::ITexture* atlas = loadEntityTex(ent.assetPath, false);
+                        rhi::ITexture* atlas = loadEntityTex(ent.assetPath, true);  // sRGB: matches editor catalog
                         constexpr u32 kDefaultPoolSize = 512u;
                         dlEntityPools.push_back(
                             render::createParticlePool(*device, kDefaultPoolSize));

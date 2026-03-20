@@ -115,7 +115,7 @@ inline void particleRenderSystem(daedalus::World& world,
                 draw.shadowVolumeMax  = transform.position + glm::vec3(extent);
                 draw.shadowDensity    = emitter.shadowDensity;
                 draw.emissiveColor    = glm::vec3(emitter.colorStart);
-                draw.emissiveIntensity = emitter.emissiveScale;
+                draw.emissiveIntensity = emitter.emissiveStart;  // match editor: birth emissive
             }
 
             scene.particleEmitters.push_back(draw);
