@@ -484,6 +484,66 @@ kernel void path_trace_main(
     float3 safeAlbedo = max(centerSurf.albedo, float3(0.01f));
     outAlbedo.write(float4(safeAlbedo, 1.0f), gid);
 
+    // ─── Spot lights (pixel-centre surface, outside jitter loop) ─────────────
+    // Shadow rays for spot lights MUST use the stable pixel-centre surface.
+    // Inside the jittered spp loop, evaluate_surface() may flip geoNormal to
+    // face the jittered ray — on near-edge pixels the jittered ray can arrive
+    // from a slightly different angle than the true surface front, causing
+    // geoNormal to flip inward.  That pushes the shadow ray origin INSIDE the
+    // geometry and produces immediate self-intersection, permanently occluding
+    // every spot light.  Computing spot lights once against centerSurf (whose
+    // geoNormal is always the correct front-face normal) eliminates the bug.
+    float3 V_center = -centerDir;
+    float3 spotDirectRadiance = float3(0.0f);
+    {
+        const uint numSpots = min(spotLightCount, 16u);
+        for (uint si = 0; si < numSpots; ++si)
+        {
+            float3 sPos     = spotLights[si].positionRange.xyz;
+            float  sRange   = spotLights[si].positionRange.w;
+            float3 sColor   = spotLights[si].colorIntensity.xyz;
+            float  sInt     = spotLights[si].colorIntensity.w;
+            float3 sDir     = normalize(spotLights[si].directionOuterCos.xyz);
+            float  outerCos = spotLights[si].directionOuterCos.w;
+            float  innerCos = spotLights[si].innerCosAndPad.x;
+
+            float3 toLight = sPos - centerSurf.position;
+            float  dist    = length(toLight);
+            if (dist >= sRange || dist < 0.0001f) continue;
+
+            float3 L = toLight / dist;
+
+            float cosTheta = dot(-L, sDir);
+            float cone     = smoothstep(outerCos, innerCos, cosTheta);
+            if (cone <= 0.0f) continue;
+
+            float NdotL = max(dot(centerSurf.normal, L), 0.0f);
+            if (NdotL <= 0.0f) continue;
+
+            float atten = 1.0f - clamp(dist / sRange, 0.0f, 1.0f);
+            atten *= atten;
+
+            ray shadowRay;
+            shadowRay.origin       = centerSurf.position + centerSurf.geoNormal * 0.001f;
+            shadowRay.direction    = L;
+            shadowRay.min_distance = 0.001f;
+            shadowRay.max_distance = dist - 0.002f;
+
+            intersector<instancing> shadowIsect;
+            shadowIsect.accept_any_intersection(true);
+            if (shadowIsect.intersect(shadowRay, tlas).type == intersection_type::none)
+            {
+                float T = compute_particle_transmittance(
+                    shadowRay.origin, L, dist - 0.002f,
+                    shadowVolumeCount, shadowVolumes, densityTextures, texSampler);
+                spotDirectRadiance += cook_torrance(centerSurf.normal, V_center, L,
+                                                    centerSurf.albedo, centerSurf.roughness,
+                                                    centerSurf.metalness)
+                                    * sColor * sInt * cone * atten * T;
+            }
+        }
+    }
+
     // ─── Multi-sample radiance — jittered primary rays ────────────────────────
     // Each sample generates its own primary ray direction by adding a uniform
     // random sub-pixel offset (±0.5 px) to the pixel centre before unprojecting.
@@ -504,7 +564,7 @@ kernel void path_trace_main(
     //   in principle to TAA, but driven by the path tracer's own sample budget.
     //
     // Demodulation uses safeAlbedo from the pixel-centre hit.  At geometric
-    // edges a jittered sample may hit a different surface; the resulting
+    //   edges a jittered sample may hit a different surface; the resulting
     // irradiance is slightly mismatched, but SVGF's normal/depth edge-stopping
     // already prevents blurring across surface boundaries so the artefact is
     // imperceptible in practice.
@@ -624,52 +684,6 @@ kernel void path_trace_main(
             }
         }
 
-        // ── Spot lights ───────────────────────────────────────────────────────
-        uint numSpots = min(spotLightCount, 16u);
-        for (uint si = 0; si < numSpots; ++si)
-        {
-            float3 sPos     = spotLights[si].positionRange.xyz;
-            float  sRange   = spotLights[si].positionRange.w;
-            float3 sColor   = spotLights[si].colorIntensity.xyz;
-            float  sInt     = spotLights[si].colorIntensity.w;
-            float3 sDir     = normalize(spotLights[si].directionOuterCos.xyz);
-            float  outerCos = spotLights[si].directionOuterCos.w;
-            float  innerCos = spotLights[si].innerCosAndPad.x;
-
-            float3 toLight = sPos - surf.position;
-            float  dist    = length(toLight);
-            if (dist >= sRange || dist < 0.0001f) continue;
-
-            float3 L = toLight / dist;
-
-            float cosTheta = dot(-L, sDir);
-            float cone     = smoothstep(outerCos, innerCos, cosTheta);
-            if (cone <= 0.0f) continue;
-
-            float NdotL = max(dot(N, L), 0.0f);
-            if (NdotL <= 0.0f) continue;
-
-            float atten = 1.0f - clamp(dist / sRange, 0.0f, 1.0f);
-            atten *= atten;
-
-            ray shadowRay;
-            shadowRay.origin       = surf.position + surf.geoNormal * 0.001f;
-            shadowRay.direction    = L;
-            shadowRay.min_distance = 0.001f;
-            shadowRay.max_distance = dist - 0.002f;
-
-            intersector<instancing> shadowIsect;
-            shadowIsect.accept_any_intersection(true);
-            if (shadowIsect.intersect(shadowRay, tlas).type == intersection_type::none)
-            {
-                float T = compute_particle_transmittance(
-                    shadowRay.origin, L, dist - 0.002f,
-                    shadowVolumeCount, shadowVolumes, densityTextures, texSampler);
-                radiance += cook_torrance(N, V, L, albedo, roughness, metalness)
-                          * sColor * sInt * cone * atten * T;
-            }
-        }
-
         // ── Particle volume emission (primary hit) ──────────────────────
         // Illuminate this surface from any visible emissive particle density
         // volumes.  Affects all geometry: floor, ceiling, walls, objects.
@@ -768,7 +782,10 @@ kernel void path_trace_main(
     // Divide averaged radiance by the pixel-centre safeAlbedo so SVGF denoises
     // pure irradiance.  rt_remodulate multiplies safeAlbedo back in afterward.
 
-    float3 irradiance = radianceAccum / float(spp) / safeAlbedo;
+    // spotDirectRadiance is added before the /spp division so it contributes
+    // at full weight — it was computed once (not per sample) so dividing by
+    // spp would incorrectly halve/quarter it at spp > 1.
+    float3 irradiance = (spotDirectRadiance + radianceAccum / float(spp)) / safeAlbedo;
 
     // ── Firefly suppression ───────────────────────────────────────────────────
     // Bounce rays that escape thin-shell geometry seams (wall-floor, wall-ceiling
