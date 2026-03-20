@@ -52,11 +52,17 @@
 //     [8]  uvScale         f32[2]
 //     [4]  uvRotation      f32
 //     --- v1 wall record ends here (84 bytes) ---
-//     v2 additions (appended, omitted when reading v1 files):
+//     --- v2 additions (appended, omitted when reading v1 files):
 //     [1]  heightFlags     u8   bit 0 = hasFloorHeightOverride,
 //                               bit 1 = hasCeilHeightOverride
 //     [4]  floorHeightOverride f32  (only if bit 0 set)
 //     [4]  ceilHeightOverride  f32  (only if bit 1 set)
+//
+//   v3 sector additions (appended after v2 stairProfile, omitted when reading v1/v2):
+//   [4]  floorPortalSectorId u32  (0xFFFFFFFF = none)
+//   [4]  ceilPortalSectorId  u32  (0xFFFFFFFF = none)
+//   [16] floorPortalMaterialId UUID
+//   [16] ceilPortalMaterialId  UUID
 
 #include "daedalus/world/dmap_io.h"
 
@@ -70,7 +76,7 @@ namespace
 {
 
 constexpr u32 k_MAGIC   = 0x50414D44u;  // 'D','M','A','P' as little-endian u32
-constexpr u32 k_VERSION = 2u;
+constexpr u32 k_VERSION = 3u;
 
 // ─── Write helpers ────────────────────────────────────────────────────────────
 
@@ -212,6 +218,11 @@ std::expected<void, DmapError> saveDmap(const WorldMapData&         map,
             w.write(sec.stairProfile->treadDepth);
             w.write(sec.stairProfile->directionAngle);
         }
+        // v3: floor and ceiling portal IDs + materials
+        w.write(sec.floorPortalSectorId);
+        w.write(sec.ceilPortalSectorId);
+        w.writeUUID(sec.floorPortalMaterialId);
+        w.writeUUID(sec.ceilPortalMaterialId);
     }
 
     if (!ofs) { return std::unexpected(DmapError::WriteError); }
@@ -339,6 +350,14 @@ std::expected<WorldMapData, DmapError> loadDmap(const std::filesystem::path& pat
                     return std::unexpected(DmapError::ParseError);
                 sec.stairProfile = sp;
             }
+        }
+        // v3: floor and ceiling portal fields
+        if (version >= 3)
+        {
+            if (!r.read(sec.floorPortalSectorId) || !r.read(sec.ceilPortalSectorId))
+                return std::unexpected(DmapError::ParseError);
+            if (!r.readUUID(sec.floorPortalMaterialId) || !r.readUUID(sec.ceilPortalMaterialId))
+                return std::unexpected(DmapError::ParseError);
         }
     }
 

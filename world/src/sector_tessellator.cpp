@@ -528,24 +528,37 @@ std::vector<std::vector<TaggedMeshBatch>> tessellateMapTagged(const WorldMapData
         buildHeightArrays(sector, floorH, ceilH);
 
         // ── Floor ─────────────────────────────────────────────────────────────────
-        if (sector.floorShape == FloorShape::VisualStairs && sector.stairProfile)
+        // When the floor is a portal, use the portal material UUID so the renderer
+        // binds the correct transparent/grate texture.  The geometry is identical.
         {
-            TaggedMeshBatch& batch = getBatch(sector.floorMaterialId);
-            appendStairSurface(batch.mesh.vertices, batch.mesh.indices, poly,
-                               sector.floorHeight, *sector.stairProfile,
-                               1.0f, 1.0f, 0.0f, 0.0f);
-        }
-        else
-        {
-            TaggedMeshBatch& batch = getBatch(sector.floorMaterialId);
-            appendHorizontalSurface(batch.mesh.vertices, batch.mesh.indices, poly,
-                                    std::span<const float>(floorH),
-                                    +1.0f, 1.0f, 1.0f, 0.0f, 0.0f);
+            const daedalus::UUID& floorMat =
+                (sector.floorPortalSectorId != INVALID_SECTOR_ID)
+                ? sector.floorPortalMaterialId
+                : sector.floorMaterialId;
+
+            if (sector.floorShape == FloorShape::VisualStairs && sector.stairProfile)
+            {
+                TaggedMeshBatch& batch = getBatch(floorMat);
+                appendStairSurface(batch.mesh.vertices, batch.mesh.indices, poly,
+                                   sector.floorHeight, *sector.stairProfile,
+                                   1.0f, 1.0f, 0.0f, 0.0f);
+            }
+            else
+            {
+                TaggedMeshBatch& batch = getBatch(floorMat);
+                appendHorizontalSurface(batch.mesh.vertices, batch.mesh.indices, poly,
+                                        std::span<const float>(floorH),
+                                        +1.0f, 1.0f, 1.0f, 0.0f, 0.0f);
+            }
         }
 
         // ── Ceiling ────────────────────────────────────────────────────────────
         {
-            TaggedMeshBatch& batch = getBatch(sector.ceilMaterialId);
+            const daedalus::UUID& ceilMat =
+                (sector.ceilPortalSectorId != INVALID_SECTOR_ID)
+                ? sector.ceilPortalMaterialId
+                : sector.ceilMaterialId;
+            TaggedMeshBatch& batch = getBatch(ceilMat);
             appendHorizontalSurface(batch.mesh.vertices, batch.mesh.indices, poly,
                                     std::span<const float>(ceilH),
                                     -1.0f, 1.0f, 1.0f, 0.0f, 0.0f);

@@ -33,6 +33,25 @@ public:
         return INVALID_SECTOR_ID;
     }
 
+    [[nodiscard]] SectorId findSectorAt(glm::vec3 xyz) const noexcept override
+    {
+        // Pass 1: sector that contains xyz in both XZ and Y.  This correctly
+        // disambiguates stacked (SoS) sectors that share the same XZ footprint.
+        const glm::vec2 xz{xyz.x, xyz.z};
+        for (SectorId sid = 0; sid < static_cast<SectorId>(m_data.sectors.size()); ++sid)
+        {
+            const Sector& sec = m_data.sectors[sid];
+            if (xyz.y >= sec.floorHeight && xyz.y <= sec.ceilHeight
+                && pointInSector(xz, sec))
+            {
+                return sid;
+            }
+        }
+        // Pass 2: fall back to XZ-only for flat maps (player may be above the
+        // highest sector, e.g. during a jump).  Return the first XZ match.
+        return findSector(xz);
+    }
+
 private:
     WorldMapData m_data;
 

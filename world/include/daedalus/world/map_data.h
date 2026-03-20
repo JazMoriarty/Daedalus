@@ -97,6 +97,16 @@ struct Sector
     // Defaults to FloorShape::Flat which reproduces the baseline flat floor.
     FloorShape              floorShape   = FloorShape::Flat;
     std::optional<StairProfile> stairProfile;  ///< Used when floorShape == VisualStairs.
+
+    // ─── Phase 1F-B: floor and ceiling portals (Sector-Over-Sector) ──────────────
+    // When valid, the floor or ceiling surface becomes a portal opening into the
+    // specified sector.  The surface is rendered using the portal material (e.g.
+    // a grate, glass, or water texture) rather than the solid floor/ceil material.
+    // INVALID_SECTOR_ID means no portal — the surface is solid (default).
+    SectorId floorPortalSectorId = INVALID_SECTOR_ID;  ///< Target sector below floor.
+    SectorId ceilPortalSectorId  = INVALID_SECTOR_ID;  ///< Target sector above ceiling.
+    UUID     floorPortalMaterialId;  ///< Material for the floor portal surface.
+    UUID     ceilPortalMaterialId;   ///< Material for the ceiling portal surface.
 };
 
 // ─── WorldMapData

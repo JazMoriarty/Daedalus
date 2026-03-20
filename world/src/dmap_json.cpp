@@ -54,7 +54,7 @@ namespace daedalus::world
 namespace
 {
 
-constexpr u32 k_JSON_VERSION = 2u;
+constexpr u32 k_JSON_VERSION = 3u;
 
 // ─── UUID helpers ─────────────────────────────────────────────────────────────
 
@@ -129,6 +129,15 @@ constexpr u32 k_JSON_VERSION = 2u;
             {"direction_angle",  sec.stairProfile->directionAngle},
         };
     }
+    // Phase 1F-B: floor and ceiling portal fields (omit when not set).
+    if (sec.floorPortalSectorId != INVALID_SECTOR_ID)
+        j["floor_portal_sector"] = static_cast<i64>(sec.floorPortalSectorId);
+    if (sec.ceilPortalSectorId != INVALID_SECTOR_ID)
+        j["ceil_portal_sector"] = static_cast<i64>(sec.ceilPortalSectorId);
+    if (sec.floorPortalSectorId != INVALID_SECTOR_ID)
+        j["floor_portal_material"] = uuidToString(sec.floorPortalMaterialId);
+    if (sec.ceilPortalSectorId != INVALID_SECTOR_ID)
+        j["ceil_portal_material"] = uuidToString(sec.ceilPortalMaterialId);
     return j;
 }
 
@@ -208,6 +217,21 @@ constexpr u32 k_JSON_VERSION = 2u;
             sp.directionAngle = jsp.value("direction_angle", sp.directionAngle);
             out.stairProfile  = sp;
         }
+        // Phase 1F-B: floor and ceiling portal fields (absent = INVALID / null UUID).
+        {
+            const i64 fp = jsec.value("floor_portal_sector", i64{-1});
+            out.floorPortalSectorId = (fp < 0) ? INVALID_SECTOR_ID
+                                               : static_cast<SectorId>(fp);
+        }
+        {
+            const i64 cp = jsec.value("ceil_portal_sector", i64{-1});
+            out.ceilPortalSectorId = (cp < 0) ? INVALID_SECTOR_ID
+                                              : static_cast<SectorId>(cp);
+        }
+        if (jsec.contains("floor_portal_material"))
+            out.floorPortalMaterialId = uuidFromString(jsec["floor_portal_material"].get<std::string>());
+        if (jsec.contains("ceil_portal_material"))
+            out.ceilPortalMaterialId = uuidFromString(jsec["ceil_portal_material"].get<std::string>());
         for (const auto& jw : jsec["walls"])
         {
             Wall w;

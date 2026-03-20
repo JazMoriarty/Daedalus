@@ -10,11 +10,22 @@
 //      c. Intersect the portal AABB with the current visible window.
 //      d. If the intersection is non-degenerate and the target sector has not
 //         been visited yet, recurse with the intersection as the new window.
-//   3. Recursion terminates at maxDepth or when no new sectors are reachable.
+//   3. After wall portals, check floor and ceiling portals (Phase 1F-B):
+//      Project the sector's full floor/ceiling polygon polygon at floorHeight/
+//      ceilHeight, compute its NDC AABB, intersect with the current window, and
+//      recurse into floorPortalSectorId / ceilPortalSectorId if non-empty.
+//   4. Recursion terminates at maxDepth or when no new sectors are reachable.
 //
 // Cycle guard: a flat visited-sector bitset (std::vector<bool>) ensures each
 // sector is added to the result at most once, preventing infinite loops in
 // bidirectional portal graphs.
+//
+// Note on clipping window representation: the visible window is maintained as
+// an AABB (min/max in NDC).  For wall portals this is conservative in the same
+// way as the baseline implementation.  The full convex-polygon clipper described
+// in the design spec (§Portal Traversal Extension for SoS) is a planned
+// tightening optimisation; the AABB approach is always conservative (never
+// incorrectly culls visible geometry) so it is the correct baseline.
 
 #include "daedalus/world/i_portal_traversal.h"
 
@@ -115,6 +126,46 @@ namespace
     return (outMax.x - outMin.x > k_epsilon) && (outMax.y - outMin.y > k_epsilon);
 }
 
+// Compute the 2D NDC AABB of a horizontal portal opening.
+// The opening is the sector polygon (polygonPts in XZ) at world Y = y.
+// Used for floor portals (y = sector.floorHeight) and ceiling portals
+// (y = sector.ceilHeight).
+// Returns false if the opening is entirely behind the camera.
+[[nodiscard]] bool portalHorizontalNDCBounds(
+    const std::vector<glm::vec2>& polygonPts,
+    float            y,
+    const glm::mat4& viewProj,
+    glm::vec2&       outMin,
+    glm::vec2&       outMax) noexcept
+{
+    glm::vec2 ndcMin( 2.0f,  2.0f);
+    glm::vec2 ndcMax(-2.0f, -2.0f);
+    bool anyVisible = false;
+    bool anyBehind  = false;
+
+    for (const auto& p : polygonPts)
+    {
+        const glm::vec3 ndc = projectToNDC({p.x, y, p.y}, viewProj);
+        if (ndc.z < 0.0f) { anyBehind = true; continue; }
+        ndcMin.x = std::min(ndcMin.x, ndc.x);
+        ndcMin.y = std::min(ndcMin.y, ndc.y);
+        ndcMax.x = std::max(ndcMax.x, ndc.x);
+        ndcMax.y = std::max(ndcMax.y, ndc.y);
+        anyVisible = true;
+    }
+
+    if (!anyVisible) { return false; }
+    if (anyBehind)
+    {
+        outMin = glm::vec2(-1.0f, -1.0f);
+        outMax = glm::vec2( 1.0f,  1.0f);
+        return true;
+    }
+    outMin = glm::clamp(ndcMin, glm::vec2(-1.0f), glm::vec2(1.0f));
+    outMax = glm::clamp(ndcMax, glm::vec2(-1.0f), glm::vec2(1.0f));
+    return true;
+}
+
 } // anonymous namespace
 
 // ─── PortalTraversal ──────────────────────────────────────────────────────────
@@ -167,45 +218,89 @@ private:
         visited[sectorId] = true;
         result.push_back({ sectorId, windowMin, windowMax });
 
-        const Sector& sector = mapData.sectors[sectorId];
-        const auto    n      = sector.walls.size();
+        const Sector& sector    = mapData.sectors[sectorId];
+        const auto    n         = sector.walls.size();
+        const auto    numSectors = static_cast<SectorId>(mapData.sectors.size());
 
+        // ── Wall portals ──────────────────────────────────────────────────────
         for (std::size_t wi = 0; wi < n; ++wi)
         {
             const Wall& wall = sector.walls[wi];
             if (wall.portalSectorId == INVALID_SECTOR_ID) { continue; }
-            if (wall.portalSectorId >= static_cast<SectorId>(mapData.sectors.size())) { continue; }
-            if (visited[wall.portalSectorId]) { continue; }
+            if (wall.portalSectorId >= numSectors)         { continue; }
+            if (visited[wall.portalSectorId])              { continue; }
 
             const glm::vec2 wallP1 = sector.walls[(wi + 1) % n].p0;
 
-            // Heights of the portal opening: the intersection of this sector's
-            // floor/ceil and the adjacent sector's floor/ceil.
-            const Sector& adj = mapData.sectors[wall.portalSectorId];
+            // Heights of the portal opening: intersection of both sectors.
+            const Sector& adj        = mapData.sectors[wall.portalSectorId];
             const float   portalFloor = std::max(sector.floorHeight, adj.floorHeight);
             const float   portalCeil  = std::min(sector.ceilHeight,  adj.ceilHeight);
-
             if (portalCeil <= portalFloor) { continue; }  // degenerate opening
 
             glm::vec2 portalMin, portalMax;
-            if (!portalNDCBounds(wall.p0, wallP1,
-                                 portalFloor, portalCeil,
+            if (!portalNDCBounds(wall.p0, wallP1, portalFloor, portalCeil,
                                  viewProj, portalMin, portalMax))
-            {
-                continue;  // entirely behind the camera
-            }
+            { continue; }
 
             glm::vec2 clippedMin, clippedMax;
-            if (!intersectWindows(windowMin, windowMax,
-                                  portalMin, portalMax,
+            if (!intersectWindows(windowMin, windowMax, portalMin, portalMax,
                                   clippedMin, clippedMax))
-            {
-                continue;  // portal outside visible window
-            }
+            { continue; }
 
             recurse(mapData, wall.portalSectorId, viewProj,
                     clippedMin, clippedMax,
                     depth + 1, maxDepth, visited, result);
+        }
+
+        // ── Floor portal (Phase 1F-B) ─────────────────────────────────────────
+        // The portal opening is the sector's full floor polygon at floorHeight.
+        if (sector.floorPortalSectorId != INVALID_SECTOR_ID
+            && sector.floorPortalSectorId < numSectors
+            && !visited[sector.floorPortalSectorId])
+        {
+            // Build the sector's XZ polygon for projection.
+            std::vector<glm::vec2> poly;
+            poly.reserve(n);
+            for (const auto& w : sector.walls) poly.push_back(w.p0);
+
+            glm::vec2 portalMin, portalMax;
+            if (portalHorizontalNDCBounds(poly, sector.floorHeight,
+                                          viewProj, portalMin, portalMax))
+            {
+                glm::vec2 clippedMin, clippedMax;
+                if (intersectWindows(windowMin, windowMax, portalMin, portalMax,
+                                     clippedMin, clippedMax))
+                {
+                    recurse(mapData, sector.floorPortalSectorId, viewProj,
+                            clippedMin, clippedMax,
+                            depth + 1, maxDepth, visited, result);
+                }
+            }
+        }
+
+        // ── Ceiling portal (Phase 1F-B) ───────────────────────────────────────
+        if (sector.ceilPortalSectorId != INVALID_SECTOR_ID
+            && sector.ceilPortalSectorId < numSectors
+            && !visited[sector.ceilPortalSectorId])
+        {
+            std::vector<glm::vec2> poly;
+            poly.reserve(n);
+            for (const auto& w : sector.walls) poly.push_back(w.p0);
+
+            glm::vec2 portalMin, portalMax;
+            if (portalHorizontalNDCBounds(poly, sector.ceilHeight,
+                                          viewProj, portalMin, portalMax))
+            {
+                glm::vec2 clippedMin, clippedMax;
+                if (intersectWindows(windowMin, windowMax, portalMin, portalMax,
+                                     clippedMin, clippedMax))
+                {
+                    recurse(mapData, sector.ceilPortalSectorId, viewProj,
+                            clippedMin, clippedMax,
+                            depth + 1, maxDepth, visited, result);
+                }
+            }
         }
     }
 };

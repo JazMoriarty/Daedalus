@@ -39,9 +39,21 @@ public:
     ///
     /// Uses a crossing-number point-in-polygon test on each sector's wall
     /// polygon. Returns INVALID_SECTOR_ID if the point is outside all sectors.
+    /// For flat (non-SoS) maps this is sufficient for all lookups.
     ///
     /// @param xz  The point to test: x = world X, y = world Z.
     [[nodiscard]] virtual SectorId findSector(glm::vec2 xz) const noexcept = 0;
+
+    /// Find which sector a 3D world-space point falls inside.
+    ///
+    /// Extends findSector to Sector-Over-Sector maps: the XZ point-in-polygon
+    /// test is intersected with a Y-range check (floorHeight ≤ y ≤ ceilHeight).
+    /// When multiple sectors share the same XZ footprint, only the one whose
+    /// vertical range contains the query Y is returned.  Falls back to pure XZ
+    /// behaviour (same as findSector) for maps with no vertical stacking.
+    ///
+    /// @param xyz  The point to test in world space (x = X, y = Y up, z = Z).
+    [[nodiscard]] virtual SectorId findSectorAt(glm::vec3 xyz) const noexcept = 0;
 
 protected:
     IWorldMap() = default;
