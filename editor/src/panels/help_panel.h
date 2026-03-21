@@ -26,6 +26,8 @@ private:
     void draw3DViewport();
     void drawTools();
     void drawSectorsWalls();
+    void drawAdvancedGeometry();
+    void drawDetailGeometry();
     void drawEntities();
     void drawLights();
     void drawPlayerStart();

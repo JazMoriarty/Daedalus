@@ -75,6 +75,8 @@ static const char* k_categories[] =
     "3D Viewport",
     "Tools",
     "Sectors & Walls",
+    "Advanced Geometry",
+    "Detail Geometry",
     "Entities",
     "Lights",
     "Player Start",
@@ -146,20 +148,22 @@ void HelpPanel::draw()
 
     switch (m_category)
     {
-    case  0: drawQuickStart();      break;
-    case  1: drawKeyboard();        break;
-    case  2: draw2DViewport();      break;
-    case  3: draw3DViewport();      break;
-    case  4: drawTools();           break;
-    case  5: drawSectorsWalls();    break;
-    case  6: drawEntities();        break;
-    case  7: drawLights();          break;
-    case  8: drawPlayerStart();     break;
-    case  9: drawPortalsLayers();   break;
-    case 10: drawPrefabs();         break;
-    case 11: drawAssetBrowser();    break;
-    case 12: drawRenderSettings();  break;
-    case 13: drawMapDoctor();       break;
+    case  0: drawQuickStart();       break;
+    case  1: drawKeyboard();         break;
+    case  2: draw2DViewport();       break;
+    case  3: draw3DViewport();       break;
+    case  4: drawTools();            break;
+    case  5: drawSectorsWalls();     break;
+    case  6: drawAdvancedGeometry(); break;
+    case  7: drawDetailGeometry();   break;
+    case  8: drawEntities();         break;
+    case  9: drawLights();           break;
+    case 10: drawPlayerStart();      break;
+    case 11: drawPortalsLayers();    break;
+    case 12: drawPrefabs();          break;
+    case 13: drawAssetBrowser();     break;
+    case 14: drawRenderSettings();   break;
+    case 15: drawMapDoctor();        break;
     default: break;
     }
 
@@ -205,8 +209,8 @@ void HelpPanel::drawQuickStart()
     ImGui::SameLine(0, 2);
     ImGui::Text("to activate the Draw Sector tool.  The cursor changes to a crosshair.");
     Step(2, "Click four points in the 2D viewport to trace the corners of a "
-            "room — click clockwise when viewed from above, starting at e.g. "
-            "(-5, -5), (5, -5), (5, 5), (-5, 5).");
+            "room — click counter-clockwise when viewed from above, starting at e.g. "
+            "(-5, -5), (-5, 5), (5, 5), (5, -5).");
     Step(3, "Press");
     Key("Enter");
     ImGui::SameLine(0, 2);
@@ -384,6 +388,23 @@ void HelpPanel::drawKeyboard()
     KeyRow("R",            "Rotate gizmo — drag yaw ring to rotate");
 
     ImGui::Spacing();
+    ImGui::SeparatorText("Advanced Geometry");
+    KeyRow("Ctrl+drag",    "Drag a wall midpoint to add / edit a Bezier curve handle (2D viewport)");
+
+    ImGui::Spacing();
+    ImGui::SeparatorText("Terrain Paint  (fly mode + Heightfield sector selected)");
+    Tip("These are not keyboard shortcuts but active controls while fly mode is running.");
+    KeyRow("LMB hold",     "Raise terrain within brush radius");
+    KeyRow("RMB hold",     "Lower terrain within brush radius");
+    KeyRow("Shift+LMB",    "Smooth terrain (blend toward local average)");
+    KeyRow("Alt+LMB",      "Flatten terrain (stamp the height at the brush anchor)");
+    KeyRow("Scroll",       "Adjust brush radius  (0.25 \xe2\x80\x93 20 m)");
+
+    ImGui::Spacing();
+    ImGui::SeparatorText("Vertex Height Handles  (3D viewport, Vertex selection, no fly mode)");
+    KeyRow("Scroll",       "Raise / lower a hovered floor or ceiling handle by 0.25 m per tick");
+
+    ImGui::Spacing();
     ImGui::SeparatorText("Map Tools");
     KeyRow("Cmd+Shift+M",  "Run Map Doctor");
     KeyRow("\\",            "Save + launch map in DaedalusApp (play test)");
@@ -447,9 +468,38 @@ void HelpPanel::draw2DViewport()
     Bullet("The coloured circle shows the light's radius at the current zoom level.");
 
     ImGui::Spacing();
-    ImGui::SeparatorText("Toolbar Buttons");
-    Bullet("The toolbar at the top of the panel shows the active tool and provides "
-           "quick access to Select, Draw Sector, and Vertex modes.");
+    ImGui::SeparatorText("Bezier Curve Arc Overlay");
+    Bullet("Walls with an active Bezier curve handle are drawn as a smooth arc "
+           "rather than a straight segment.");
+    Bullet("A cyan diamond handle marks the position of the control point, "
+           "connected to the wall midpoint by a faint stem line.  Drag the diamond "
+           "in the Properties panel to reposition it, or Ctrl+drag the wall midpoint "
+           "directly in the 2D viewport to create or move it.");
+    Tip("While Ctrl is held, small circles appear at the midpoint of every straight "
+        "wall as a hint that you can drag there to add a curve.");
+
+    ImGui::Spacing();
+    ImGui::SeparatorText("Detail Brush Footprints");
+    ImGui::TextWrapped(
+        "Detail brushes placed in a sector are shown as dashed XZ outlines "
+        "in the 2D viewport so their footprint is always visible at a glance:");
+    Bullet("Box / Wedge \xe2\x80\x94 purple dashed rectangle.");
+    Bullet("Cylinder \xe2\x80\x94 green dashed circle.");
+    Bullet("Arch Span \xe2\x80\x94 amber dashed rectangle.");
+    Tip("The outline is computed from the brush's world-space transform, so it "
+        "correctly reflects any rotation or non-uniform scale set in Properties.");
+
+    ImGui::Spacing();
+    ImGui::SeparatorText("Floor Layer Dimming  (Floor Layers panel)");
+    ImGui::TextWrapped(
+        "When the Floor Layers panel (Window > Floor Layers) has height "
+        "filtering enabled, sectors whose Y range [floorHeight, ceilHeight] "
+        "does not contain the current Edit Height are rendered at 20%% opacity.  "
+        "This makes multi-storey maps legible by keeping only the active floor "
+        "at full brightness.");
+    Bullet("Use the Edit Height slider to sweep through the map vertically.");
+    Bullet("Click a Floor Group in the list to jump the slider to that floor's midpoint.");
+    Bullet("Toggle Show All to turn filtering off and see everything at once.");
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -505,6 +555,39 @@ void HelpPanel::draw3DViewport()
     Bullet("R — rotate gizmo: yaw ring around the entity.");
     Bullet("Drag a handle to transform; release to commit an undoable command.");
     Tip("Gizmos are hidden during fly mode.  Press Tab to exit fly mode first.");
+
+    ImGui::Spacing();
+    ImGui::SeparatorText("Terrain Paint Brushes");
+    ImGui::TextWrapped(
+        "When a Heightfield-floor sector is selected and fly mode is active "
+        "(Tab to enter), the 3D viewport switches to terrain paint mode.  "
+        "The overlay text at the top confirms the active brush mode.");
+    Bullet("Left-mouse hold \xe2\x80\x94 Raise: lifts terrain within brush radius.");
+    Bullet("Right-mouse hold \xe2\x80\x94 Lower: pushes terrain down within brush radius.");
+    Bullet("Shift + Left-mouse \xe2\x80\x94 Smooth: blends heights toward the local average, "
+           "removing spikes and sharpness.");
+    Bullet("Alt + Left-mouse \xe2\x80\x94 Flatten: stamps every sample within the radius "
+           "to the height directly under the brush centre at drag-start.");
+    Bullet("Scroll wheel \xe2\x80\x94 adjusts brush radius from 0.25 m to 20 m.");
+    ImGui::TextWrapped(
+        "A coloured circle and crosshair show the brush position and radius in world space.  "
+        "Green = Raise, Red = Lower, Amber = Smooth or Flatten.  "
+        "The entire stroke from first click to release is a single undoable step.");
+    Tip("The brush hits the horizontal plane at the sector's floor height.  "
+        "Fly at a low angle pointing toward the terrain for best accuracy.");
+
+    ImGui::Spacing();
+    ImGui::SeparatorText("Per-Vertex Height Handles");
+    ImGui::TextWrapped(
+        "When the Vertex tool is active and a vertex is selected, height handles "
+        "appear in the 3D viewport at every polygon vertex of the owning sector.  "
+        "Hover a handle and scroll the mouse wheel to raise or lower it.");
+    Bullet("Cyan handle \xe2\x80\x94 floor height override at that vertex.");
+    Bullet("Magenta handle \xe2\x80\x94 ceiling height override at that vertex.");
+    Bullet("Each scroll tick adjusts the height by 0.25 m and pushes an undoable command.");
+    Tip("Setting a floor override on one vertex and not the others produces a sloped "
+        "floor that rises or falls toward that corner.  Use multiple overrides to "
+        "create ramps, saddle shapes, and warped rooms.");
 
     ImGui::Spacing();
     ImGui::SeparatorText("Render Pipeline Preview");
@@ -578,7 +661,38 @@ void HelpPanel::drawTools()
         "before attempting to link portals.");
 
     ImGui::Spacing();
-    // ─ Wall operations ───────────────────────────────────────────────
+    // ─ Vertex height handles ─────────────────────────────────────────
+    ImGui::SeparatorText("Per-Vertex Heights  (Vertex tool)");
+    ImGui::TextWrapped(
+        "With the Vertex tool active and a vertex selected in the 2D viewport, "
+        "height handles appear on every polygon vertex in the 3D viewport.  "
+        "Hover a handle and scroll the mouse wheel to raise or lower that vertex's "
+        "floor or ceiling independently of the sector scalar.");
+    Bullet("Cyan handle — floor height override.  Overrides the sector's Floor Height "
+           "at this vertex only, enabling sloped floors, ramps, and angled sills.");
+    Bullet("Magenta handle — ceiling height override.  Same idea for the ceiling.");
+    Bullet("You can also enable / clear overrides with checkboxes in the Properties "
+           "panel > Height Overrides section when a vertex is selected.");
+    Tip("Overrides are per-vertex: set one corner high and the rest low to create a "
+        "sloped floor.  Adjacent portal wall heights update automatically.");
+
+    ImGui::Spacing();
+    // ─ Bezier curve handles ─────────────────────────────────────────
+    ImGui::SeparatorText("Bezier Curve Handles  (Select / Draw Sector tool)");
+    ImGui::TextWrapped(
+        "Hold Ctrl and drag the midpoint of any wall in the 2D viewport to pull "
+        "out a Bezier control handle.  The wall immediately bends into a smooth arc; "
+        "both the 2D and 3D viewports update in real time.");
+    Bullet("One control point — quadratic Bezier (smooth arc).");
+    Bullet("Enable \"Cubic (add B)\" in Properties > Bezier Curve to add a second "
+           "control point for an S-curve.");
+    Bullet("Subdivision count (4–64) controls arc smoothness; adjust in Properties.");
+    Bullet("To remove a curve: uncheck \"Enable Curve\" in Properties > Bezier Curve.");
+    Tip("Portal walls can be curved.  The portal clipping window uses the chord "
+        "(straight line between endpoints) as a conservative approximation.");
+
+    ImGui::Spacing();
+    // ─ Wall operations ─────────────────────────────────────────────────────
     ImGui::SeparatorText("Wall Operations  (Select tool, wall selected)");
     Bullet("W key — split the selected wall at the 2D cursor position "
            "(the cursor is projected onto the wall).  Move the cursor to a "
@@ -635,6 +749,32 @@ void HelpPanel::drawSectorsWalls()
         "default white material.");
 
     ImGui::Spacing();
+    ImGui::SeparatorText("Floor Shape  (Properties panel > Floor Shape)");
+    ImGui::TextWrapped(
+        "Each sector's floor mesh can be generated in one of three ways:");
+    Bullet("Flat (default) — standard flat floor, optionally with per-vertex "
+           "height overrides for slopes and ramps.");
+    Bullet("Visual Stairs — the tessellator generates a stair-step mesh from "
+           "the Stair Profile settings (step count, riser height, tread depth, "
+           "direction angle).  Physics collision uses a linear ramp equivalent, "
+           "so the player walks smoothly up/down while the visuals show steps.");
+    Bullet("Heightfield — the floor is a terrain mesh generated from a sample "
+           "grid.  See Advanced Geometry for full details.");
+    Tip("The Staircase Generator panel (Window > Staircase Generator) can "
+        "apply a Stair Profile to the selected sector automatically, or "
+        "generate a chain of portal-linked step sectors.");
+
+    ImGui::Spacing();
+    ImGui::SeparatorText("Floor / Ceiling Portals  (Properties panel)");
+    ImGui::TextWrapped(
+        "A sector can open downward into another sector through its floor, or "
+        "upward through its ceiling.  This is the Sector-Over-Sector stacking "
+        "system.  See Advanced Geometry for the full workflow.");
+    Bullet("Floor portal ID — drag to the ID of the sector visible below.");
+    Bullet("Ceiling portal ID — drag to the ID of the sector visible above.");
+    Tip("Set the ID to -1 (none) to clear the portal and restore a solid surface.");
+
+    ImGui::Spacing();
     ImGui::SeparatorText("Sector Operations");
     Bullet("Cmd+C — copy the selected sector to the clipboard.");
     Bullet("Cmd+V — paste the clipboard sector at a grid-offset position.");
@@ -655,13 +795,18 @@ void HelpPanel::drawSectorsWalls()
     Bullet("Invisible — no geometry is tessellated for this wall; useful for "
            "invisible collision barriers.");
     Bullet("Mirror — the wall's quad is rendered as a planar mirror.  "
-           "The 3D viewport renders a reflected view into a 512×512 RT each frame.");
+           "The 3D viewport renders a reflected view into a 512\xc3\x97" "512 RT each frame.");
+    Bullet("No Physics — the wall has no collision shape.  Use for decorative "
+           "background panels, non-blocking architectural surfaces, and visual-only "
+           "detail walls.");
 
     ImGui::Spacing();
     ImGui::SeparatorText("Wall UV Mapping  (Properties panel, wall selected)");
     Bullet("UV Offset — shifts the texture in U (horizontal) and V (vertical).");
     Bullet("UV Scale — tiles the texture.  Values > 1 tile more, < 1 stretch.");
-    Bullet("UV Rotation — rotates the texture on the wall face (in radians).");
+    Bullet("UV Rotation — rotates the texture on the wall face (in degrees).  "
+           "The Properties panel displays and edits this value in degrees; it is stored "
+           "internally as radians in the map format.");
 
     ImGui::Spacing();
     ImGui::SeparatorText("Wall Materials  (Properties panel, wall selected)");
@@ -917,6 +1062,43 @@ void HelpPanel::drawPortalsLayers()
         "to fill the height difference on either side of the portal.");
 
     ImGui::Spacing();
+    ImGui::SeparatorText("Sector-Over-Sector (SoS) Floor / Ceiling Portals");
+    ImGui::TextWrapped(
+        "Any sector can open vertically into another sector through its floor or "
+        "ceiling.  This creates true multi-storey stacking — a balcony looking "
+        "down into a hall, a window in the floor of a room above a lower space, "
+        "or a grate you can see through.  The portal system handles vertical "
+        "traversal the same way it handles horizontal wall portals.");
+    Step(1, "Draw both sectors at the correct floor and ceiling heights.");
+    Step(2, "Select the upper sector with the Select tool.");
+    Step(3, "In Properties > Floor / Ceiling Portals, drag the \"Floor portal\" "
+            "ID field to the index of the lower sector (shown as text next to "
+            "the sector in the 2D viewport label, or visible in Properties header).");
+    Step(4, "Optionally set a portal material on the floor surface "
+            "(e.g. a grate or glass texture) using the Properties panel.");
+    Tip("For a transparent opening with no material, leave the material slot "
+        "empty.  The portal surface is rendered as a passthrough gap.");
+    Tip("The 2D viewport in \"Show All\" mode will show both sectors overlapping. "
+        "Enable the Floor Layers panel filter to isolate each floor for editing.");
+
+    ImGui::Spacing();
+    ImGui::SeparatorText("Floor Layers Panel  (Window > Floor Layers)");
+    ImGui::TextWrapped(
+        "The Floor Layers panel makes multi-storey maps legible in the 2D "
+        "viewport by dimming sectors that are not on the active working floor.");
+    Bullet("Edit Height slider — drag to set the current working Y level.  "
+           "Sectors whose [floorHeight, ceilHeight] range does not include this "
+           "value are drawn at 20%% opacity.");
+    Bullet("Floor Groups list — the editor automatically partitions sectors "
+           "into vertical stacks based on floor/ceiling portal links.  Click a "
+           "group to jump the Edit Height slider to that floor's midpoint.");
+    Bullet("Show All toggle — disables the filter and renders all floors at "
+           "full opacity.  Useful for cross-floor portal linking.");
+    Bullet("Named Presets — right-click the Edit Height slider to save the "
+           "current height as a named preset (Ground, Floor 1, Roof, etc.) for "
+           "quick switching during level design.");
+
+    ImGui::Spacing();
     ImGui::SeparatorText("LAYERS");
     ImGui::Spacing();
     ImGui::TextWrapped(
@@ -1156,6 +1338,194 @@ void HelpPanel::drawAssetBrowser()
            "the panel.  Click any thumbnail to assign it and close the picker.");
     Bullet("Press Escape or click Cancel in the banner to dismiss without "
            "making a change.");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Advanced Geometry
+// ─────────────────────────────────────────────────────────────────────────────
+
+void HelpPanel::drawAdvancedGeometry()
+{
+    ImGui::SeparatorText("ADVANCED GEOMETRY");
+    ImGui::Spacing();
+    ImGui::TextWrapped(
+        "Advanced geometry extends sectors beyond simple rectilinear rooms.  "
+        "These features can be combined freely: a sector can have a sloped "
+        "heightfield floor, curved walls, detail brush columns, and a vertical "
+        "portal to a sector above it simultaneously.");
+
+    // ─ Per-vertex heights / slopes ─────────────────────────────────
+    ImGui::Spacing();
+    ImGui::SeparatorText("Sloped Floors & Ceilings");
+    ImGui::TextWrapped(
+        "Any wall vertex can independently override the sector's flat floor or "
+        "ceiling height.  Setting one corner higher than the rest produces a "
+        "sloped surface across the whole polygon.");
+    Step(1, "Select the sector with the Select tool (S), then press V to "
+            "activate the Vertex tool.");
+    Step(2, "Click a vertex in the 2D viewport to select it.");
+    Step(3, "In the 3D viewport, hover one of the cyan (floor) or magenta "
+            "(ceiling) height handles and scroll the mouse wheel to raise or "
+            "lower it.  The floor/ceiling updates in real time.");
+    Step(4, "Alternatively, enable the Floor Override or Ceiling Override "
+            "checkbox in Properties > Height Overrides and drag the slider.");
+    Tip("Adjacent portal strip heights update automatically when a vertex "
+        "override changes, keeping steps and openings geometrically correct.");
+    Tip("To reset a vertex to the sector scalar, uncheck the override "
+        "checkbox.  The sector's Floor Height / Ceiling Height then applies.");
+
+    // ─ Visual stairs ────────────────────────────────────────────────
+    ImGui::Spacing();
+    ImGui::SeparatorText("Visual Stairs");
+    ImGui::TextWrapped(
+        "Switching a sector's Floor Shape to Visual Stairs generates a "
+        "stair-step mesh for visual fidelity while keeping physics as a "
+        "smooth linear ramp so the player does not jitter.");
+    Bullet("Step Count — number of steps (1–64).");
+    Bullet("Riser Height — vertical height of each step riser (metres).");
+    Bullet("Tread Depth — horizontal depth of each step tread (metres).");
+    Bullet("Direction Angle — which way the stair run goes in the XZ plane "
+           "(degrees, 0 = along +X axis).");
+    Tip("Best for monumental staircases, bleachers, and tiered seating.  "
+        "For physically navigable stairs the player walks sector-to-sector through, "
+        "use the Staircase Generator in Sector Chain mode instead.");
+
+    // ─ Staircase Generator ──────────────────────────────────────────
+    ImGui::Spacing();
+    ImGui::SeparatorText("Staircase Generator  (Window > Staircase Generator)");
+    ImGui::TextWrapped(
+        "The Staircase Generator panel automates the creation of both visual "
+        "and physical staircases from a set of parameters.  Select a sector "
+        "first, adjust the parameters, then click Generate.");
+    Bullet("Visual Stair mode — applies a Stair Profile to the selected sector's "
+           "floor (sets Floor Shape to Visual Stairs with the specified parameters).");
+    Bullet("Sector Chain mode — generates N new rectangular sectors linked by "
+           "wall portals, each stepped up by Riser Height.  The corridor runs in "
+           "the specified direction.  The full chain is a single undoable step.");
+
+    // ─ Curved walls ───────────────────────────────────────────────
+    ImGui::Spacing();
+    ImGui::SeparatorText("Curved Walls  (Bezier)");
+    ImGui::TextWrapped(
+        "Any wall can be bent into a smooth Bezier arc.  "
+        "The tessellator subdivides it into straight-segment quads so the "
+        "3D mesh is always smooth.");
+    Bullet("Ctrl+drag the midpoint of a wall in the 2D viewport to create a "
+           "quadratic Bezier curve (one control point).");
+    Bullet("Enable \"Cubic (add B)\" in Properties > Bezier Curve for an "
+           "S-curve with two independent control points.");
+    Bullet("Subdivisions (4–64) controls arc resolution.  Default 12 is smooth "
+           "enough for most curved walls.");
+    Bullet("Uncheck \"Enable Curve\" to restore the wall to a straight segment.");
+    Tip("Curved portal walls are supported.  The portal visibility system clips "
+        "to the chord (straight line) of the curve, which is slightly conservative "
+        "but never incorrectly reveals occluded content.");
+
+    // ─ Sector-Over-Sector ──────────────────────────────────────────
+    ImGui::Spacing();
+    ImGui::SeparatorText("Sector-Over-Sector (SoS)");
+    ImGui::TextWrapped(
+        "Two sectors can share the same XZ footprint at different heights by "
+        "opening a floor or ceiling portal between them.  The portal traversal "
+        "system resolves vertical visibility the same way as horizontal portals.");
+    Step(1, "Draw both sectors at their respective heights.");
+    Step(2, "Select the upper sector.  In Properties > Floor / Ceiling Portals, "
+            "set Floor portal ID to the index of the lower sector.");
+    Step(3, "Optionally assign a portal material (glass, grate) or leave empty "
+            "for an open gap.");
+    Tip("Use the Floor Layers panel (Window > Floor Layers) to filter the 2D "
+        "view while working on individual floors of a stacked map.");
+
+    // ─ Heightfield terrain ─────────────────────────────────────────
+    ImGui::Spacing();
+    ImGui::SeparatorText("Terrain Heightfield Floor");
+    ImGui::TextWrapped(
+        "Setting a sector's Floor Shape to Heightfield replaces the flat floor "
+        "with a regular grid of height samples.  The tessellator generates a "
+        "smooth mesh with per-vertex normals; the physics engine uses a native "
+        "heightfield collision shape.");
+    Step(1, "Select a sector.  In Properties > Floor Shape, choose Heightfield.");
+    Step(2, "Click \"Create 8\xc3\x97" "8 Heightfield\" to initialise a flat grid over the "
+            "sector's bounding box at the current floor height.");
+    Step(3, "In the Properties panel, adjust Grid Width and Grid Depth to set "
+            "the terrain resolution (2\xc3\x97 2 to 256\xc3\x97" "256 samples).");
+    Step(4, "Enter fly mode in the 3D viewport (Tab) while the sector is selected.  "
+            "Left-mouse to raise, right-mouse to lower, Shift+LMB to smooth, "
+            "Alt+LMB to flatten.  Scroll adjusts brush radius.");
+    Tip("The entire paint stroke from first click to release is stored as a "
+        "single undoable command.  Cmd+Z reverts the whole stroke at once.");
+    Tip("Increasing resolution bilinearly interpolates existing samples.  "
+        "Decreasing resolution averages them.  Use higher resolution only "
+        "where terrain detail is needed.");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Detail Geometry
+// ─────────────────────────────────────────────────────────────────────────────
+
+void HelpPanel::drawDetailGeometry()
+{
+    ImGui::SeparatorText("DETAIL GEOMETRY");
+    ImGui::Spacing();
+    ImGui::TextWrapped(
+        "Detail brushes are Layer 2 static geometry shapes placed within sectors "
+        "for architectural decoration and infill.  They are compiled into the "
+        "sector's GPU mesh batch at level-compile time and have zero CPU runtime "
+        "overhead.  They do not create portals or affect portal visibility.");
+
+    ImGui::Spacing();
+    ImGui::SeparatorText("Placing a Detail Brush");
+    Step(1, "Select a sector in the 2D viewport.");
+    Step(2, "Open the Object Browser panel and expand the Detail Geometry section.");
+    Step(3, "Click Box, Wedge, Cylinder, or Arch Span.  The brush is placed at "
+            "the 2D cursor position with default parameters.");
+    Step(4, "The brush is immediately visible in the 3D viewport.  "
+            "Its dashed XZ footprint is shown in the 2D viewport.");
+    Step(5, "Select the sector and open Properties.  Scroll to find the detail "
+            "brush list.  Adjust the transform (position, rotation, scale) and "
+            "type-specific parameters.");
+    Tip("Detail brushes are per-sector.  A brush placed in sector A is compiled "
+        "into sector A's mesh and is culled with it by portal visibility.");
+
+    ImGui::Spacing();
+    ImGui::SeparatorText("Brush Types");
+    Bullet("Box — an axis-aligned or rotated box.  "
+           "Configure half-extents on each axis.  "
+           "Good for ledges, plinths, raised floor patches, parapet walls.");
+    Bullet("Wedge — a box with one face sloped (triangular prism).  "
+           "Good for chamfered edges, angled sills, and ramp infill.");
+    Bullet("Cylinder — faceted cylinder (4–64 faces) with radius and height.  "
+           "Good for columns, pillars, bollards, and round pipes.");
+    Bullet("Arch Span — a curved arch band placed across an opening.  "
+           "Configure span width, arch height, band thickness, profile shape "
+           "(Semicircular / Gothic / Segmental), and segment count.  "
+           "Good for decorative doorway arches, alcove crowns, and window sills.");
+
+    ImGui::Spacing();
+    ImGui::SeparatorText("Brush Properties  (Properties panel, sector selected)");
+    Bullet("Transform — world-space position, rotation (via the transform matrix), "
+           "and scale are stored as a 4\xc3\x97" "4 matrix.  Edit position in the Properties "
+           "panel; rotation and scale support is through the matrix directly.");
+    Bullet("Material — a single PBR material UUID applied to all faces of the brush.");
+    Bullet("Collidable — if enabled, a physics collision shape is registered for "
+           "the brush as part of the sector's compound physics body.  "
+           "Disable for purely decorative geometry.");
+    Bullet("Cast Shadow — whether this brush contributes shadow geometry "
+           "to shadow map passes.");
+
+    ImGui::Spacing();
+    ImGui::SeparatorText("Removing a Brush");
+    Bullet("In Properties, find the brush in the sector's detail list and click "
+           "Remove.  This is undoable.");
+
+    ImGui::Spacing();
+    ImGui::SeparatorText("Compile Behaviour");
+    ImGui::TextWrapped(
+        "At level-compile time (\\) all detail brushes in a sector are merged "
+        "into the sector's material-batched GPU mesh.  They are not runtime ECS "
+        "objects — no components, no scripts, no physics bodies at the entity level.  "
+        "If Collidable is set, a static shape is added to the sector's compound "
+        "Jolt physics body.");
 }
 
 } // namespace daedalus::editor
