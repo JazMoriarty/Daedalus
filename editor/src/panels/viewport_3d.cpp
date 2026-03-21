@@ -881,7 +881,10 @@ void Viewport3D::draw(EditMapDocument&      doc,
         {
             const SelectionState& sel = doc.selection();
             world::SectorId terrSid   = world::INVALID_SECTOR_ID;
-            if (sel.uniformType() == SelectionType::Sector && !sel.items.empty())
+            // Terrain paint activates when a sector or its floor surface is selected.
+            if (!sel.items.empty() &&
+                (sel.items[0].type == SelectionType::Sector ||
+                 sel.items[0].type == SelectionType::Floor))
             {
                 const world::SectorId candidate = sel.items[0].sectorId;
                 const auto& sectors = doc.mapData().sectors;
@@ -1029,7 +1032,11 @@ void Viewport3D::draw(EditMapDocument&      doc,
                 }
             };
 
-            if (sel.uniformType() == SelectionType::Sector && !sel.items.empty())
+            // Frame any selection that references a sector (Sector, Floor, or Ceil).
+            if (!sel.items.empty() &&
+                (sel.items[0].type == SelectionType::Sector ||
+                 sel.items[0].type == SelectionType::Floor  ||
+                 sel.items[0].type == SelectionType::Ceil))
             {
                 for (const auto& item : sel.items)
                     expandSector(item.sectorId);
@@ -1719,17 +1726,19 @@ void Viewport3D::draw(EditMapDocument&      doc,
                     }
                     else
                     {
-                        // Floor or ceiling: select/deselect the owning sector.
-                        if (sel.uniformType() == SelectionType::Sector &&
-                            !sel.items.empty() &&
-                            sel.items[0].sectorId == hitSector &&
-                            m_selectedSurface == hitSurface)
-                            sel.clear();
+                        // Floor or ceiling: select that specific surface so the
+                        // property inspector can show floor- or ceiling-only UV controls.
+                        const SelectionType hitType =
+                            (hitSurface == HoveredSurface::Floor)
+                            ? SelectionType::Floor : SelectionType::Ceil;
+
+                        if (sel.hasSingleOf(hitType) &&
+                            sel.items[0].sectorId == hitSector)
+                            sel.clear();  // clicking same surface again deselects
                         else
                         {
                             sel.clear();
-                            sel.items.push_back({SelectionType::Sector,
-                                                 hitSector, 0});
+                            sel.items.push_back({hitType, hitSector, 0});
                             m_selectedSurface = hitSurface;
                         }
                     }
@@ -1990,7 +1999,10 @@ void Viewport3D::draw(EditMapDocument&      doc,
             drawWallOutline(wSid, wWi, yBot, yTop,
                             0, IM_COL32(255, 200, 0, 220));
         }
-        else if (sel2.uniformType() == SelectionType::Sector && !sel2.items.empty())
+        else if (!sel2.items.empty() &&
+                 (sel2.items[0].type == SelectionType::Sector ||
+                  sel2.items[0].type == SelectionType::Floor  ||
+                  sel2.items[0].type == SelectionType::Ceil))
         {
             const world::SectorId sid = sel2.items[0].sectorId;
             if (sid < static_cast<world::SectorId>(sectors.size()))

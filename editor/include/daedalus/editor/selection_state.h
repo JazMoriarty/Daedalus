@@ -18,12 +18,14 @@ namespace daedalus::editor
 enum class SelectionType : unsigned
 {
     None        = 0,
-    Sector      = 1,
+    Sector      = 1,  ///< Sector selected as a whole (2D viewport interior click).
     Wall        = 2,
     Vertex      = 3,
     Light       = 4,
     Entity      = 5,  ///< An editor-placed EntityDef.
     PlayerStart = 6,  ///< The map's player spawn point.
+    Floor       = 7,  ///< Sector floor surface selected (3D viewport click).
+    Ceil        = 8,  ///< Sector ceiling surface selected (3D viewport click).
 };
 
 /// Identifies exactly one selected object in the document.
@@ -102,20 +104,31 @@ struct SelectionState
     }
 
     /// True if the given sector is among the selected items.
+    /// Also returns true when the sector's floor (SelectionType::Floor) or ceiling
+    /// (SelectionType::Ceil) is selected, so the 2D viewport sector outline highlights
+    /// correctly regardless of which surface was clicked in the 3D viewport.
     [[nodiscard]] bool isSectorSelected(world::SectorId id) const noexcept
     {
         for (const auto& item : items)
-            if (item.type == SelectionType::Sector && item.sectorId == id)
+            if ((item.type == SelectionType::Sector ||
+                 item.type == SelectionType::Floor  ||
+                 item.type == SelectionType::Ceil)  &&
+                item.sectorId == id)
                 return true;
         return false;
     }
 
-    /// Returns the IDs of all selected sectors (items of type Sector).
+    /// Returns the IDs of all selected sectors.
+    /// Includes Floor and Ceil items because they always correspond to a specific sector;
+    /// callers that operate on the parent sector (copy, delete, rotate, etc.) naturally
+    /// apply to the owning sector regardless of which surface triggered the selection.
     [[nodiscard]] std::vector<world::SectorId> selectedSectors() const
     {
         std::vector<world::SectorId> result;
         for (const auto& item : items)
-            if (item.type == SelectionType::Sector)
+            if (item.type == SelectionType::Sector ||
+                item.type == SelectionType::Floor  ||
+                item.type == SelectionType::Ceil)
                 result.push_back(item.sectorId);
         return result;
     }

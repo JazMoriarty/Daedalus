@@ -320,9 +320,12 @@ static void drawMenuBar(EditMapDocument& doc,
             ImGui::Separator();
 
             const SelectionState& editSel    = doc.selection();
+            const SelectionType   editType   = editSel.uniformType();
             const bool            hasSectorSel =
-                editSel.uniformType() == SelectionType::Sector &&
-                !editSel.items.empty();
+                !editSel.items.empty() &&
+                (editType == SelectionType::Sector ||
+                 editType == SelectionType::Floor  ||
+                 editType == SelectionType::Ceil);
 
             if (ImGui::MenuItem("Copy", "Cmd+C", false, hasSectorSel))
                 doc.copySector(editSel.items[0].sectorId);
@@ -886,8 +889,10 @@ int main(int /*argc*/, char* /*argv*/[])
                                 // R in 3D viewport: rotate gizmo.
                                 vp3d.setGizmoMode(GizmoMode::Rotate);
                             }
-                            else if (sel.uniformType() == SelectionType::Sector &&
-                                     !sel.items.empty())
+                            else if (!sel.items.empty() &&
+                                     (sel.items[0].type == SelectionType::Sector ||
+                                      sel.items[0].type == SelectionType::Floor  ||
+                                      sel.items[0].type == SelectionType::Ceil))
                             {
                                 // R elsewhere: rotate selected sector.
                                 vp2d.openRotatePopup(sel.items[0].sectorId);
@@ -1345,10 +1350,13 @@ int main(int /*argc*/, char* /*argv*/[])
                         else if (sc == SDL_SCANCODE_BACKSPACE ||
                                  sc == SDL_SCANCODE_DELETE)
                         {
-                        // Delete — remove selected sector(s) or light.
+                            // Delete — remove selected sector(s) or light.
                             const SelectionState& sel = doc.selection();
-                            if (sel.uniformType() == SelectionType::Sector &&
-                                !sel.items.empty())
+                            const SelectionType delType = sel.uniformType();
+                            if (!sel.items.empty() &&
+                                (delType == SelectionType::Sector ||
+                                 delType == SelectionType::Floor  ||
+                                 delType == SelectionType::Ceil))
                             {
                                 // Delete sectors in reverse index order so earlier
                                 // indices stay valid as we remove later ones.
@@ -1379,7 +1387,7 @@ int main(int /*argc*/, char* /*argv*/[])
                             {
                                 doc.log("Delete — no sector, light, entity, or player start selected.");
                             }
-                        }
+                        }  // delete block
                         else if (sc == SDL_SCANCODE_G)
                         {
                             vp2d.setGridVisible(!vp2d.gridVisible());
@@ -1452,11 +1460,14 @@ int main(int /*argc*/, char* /*argv*/[])
                     if (sc == SDL_SCANCODE_C)
                     {
                         const SelectionState& sel = doc.selection();
-                        if (sel.uniformType() == SelectionType::Sector &&
-                            !sel.items.empty())
+                        const SelectionType copyType = sel.uniformType();
+                        if (!sel.items.empty() &&
+                            (copyType == SelectionType::Sector ||
+                             copyType == SelectionType::Floor  ||
+                             copyType == SelectionType::Ceil))
                             doc.copySector(sel.items[0].sectorId);
                         else
-                            doc.log("Cmd+C — Copy: select a sector first.");
+                            doc.log("Cmd+C \xe2\x80\x94 Copy: select a sector first.");
                     }
 
                     // Cmd+V — paste clipboard sector.
@@ -1478,8 +1489,11 @@ int main(int /*argc*/, char* /*argv*/[])
                     if (sc == SDL_SCANCODE_D)
                     {
                         const SelectionState& sel = doc.selection();
-                        if (sel.uniformType() == SelectionType::Sector &&
-                            !sel.items.empty())
+                        const SelectionType dupType = sel.uniformType();
+                        if (!sel.items.empty() &&
+                            (dupType == SelectionType::Sector ||
+                             dupType == SelectionType::Floor  ||
+                             dupType == SelectionType::Ceil))
                         {
                             doc.pushCommand(
                                 std::make_unique<CmdDuplicateSector>(

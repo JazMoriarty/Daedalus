@@ -41,8 +41,11 @@ void StaircaseGeneratorPanel::draw(EditMapDocument& doc)
 
     // Validate selection.
     const auto& sel      = doc.selection();
-    const bool  hasSec   = (sel.uniformType() == SelectionType::Sector &&
-                            !sel.items.empty());
+    const SelectionType selType = sel.uniformType();
+    const bool  hasSec   = !sel.items.empty() &&
+                           (selType == SelectionType::Sector ||
+                            selType == SelectionType::Floor  ||
+                            selType == SelectionType::Ceil);
     const world::SectorId sid = hasSec ? sel.items[0].sectorId : world::INVALID_SECTOR_ID;
 
     if (!hasSec)
