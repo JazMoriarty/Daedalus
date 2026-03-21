@@ -471,7 +471,7 @@ static void buildHeightArrays(const Sector&       sector,
     }
 }
 
-// ─── Bezier evaluation helpers (Phase 1F-C step 6) ──────────────────────────────
+// ─── Bezier evaluation helpers (Phase 1F-C step 6) ──────────────────────────────────────────
 
 // Evaluate a quadratic Bezier at parameter t ∈ [0, 1].
 // B(t) = (1−t)²·p0 + 2t(1−t)·ca + t²·p1
@@ -489,6 +489,71 @@ static void buildHeightArrays(const Sector&       sector,
 {
     const float mt = 1.0f - t;
     return mt*mt*mt*p0 + 3.0f*mt*mt*t*ca + 3.0f*mt*t*t*cb + t*t*t*p1;
+}
+
+// ─── buildExpandedPoly ───────────────────────────────────────────────────────────────────────
+// Builds the XZ polygon used for floor and ceiling tessellation, inserting
+// Bezier subdivision points for any curved walls.  For straight walls the
+// output is identical to iterating over wall.p0 values.
+//
+// This ensures the floor and ceiling surfaces exactly fill the space swept
+// by each wall, with no gap between the floor/ceiling edge and the curved
+// wall face when a wall bends inward or outward.
+//
+// floorHExp and ceilHExp are expanded height arrays aligned to the output
+// polygon (heights at interior subdivision points are linearly interpolated
+// between the wall's two endpoint heights).
+//
+// The base height arrays (one per wall vertex, from buildHeightArrays) must
+// be passed in and are still used by the wall tessellation code.
+static void buildExpandedPoly(
+    const Sector&              sector,
+    const std::vector<float>&  baseFloorH,
+    const std::vector<float>&  baseCeilH,
+    std::vector<glm::vec2>&    poly,
+    std::vector<float>&        floorHExp,
+    std::vector<float>&        ceilHExp)
+{
+    const std::size_t n = sector.walls.size();
+    poly.reserve(n);
+    floorHExp.reserve(n);
+    ceilHExp .reserve(n);
+
+    for (std::size_t wi = 0; wi < n; ++wi)
+    {
+        const Wall&     wall   = sector.walls[wi];
+        const glm::vec2 wallP1 = sector.walls[(wi + 1) % n].p0;
+
+        // Always emit this wall's start vertex.
+        poly.push_back(wall.p0);
+        floorHExp.push_back(baseFloorH[wi]);
+        ceilHExp .push_back(baseCeilH[wi]);
+
+        if (wall.curveControlA.has_value())
+        {
+            // Insert interior subdivision points (k = 1 .. nSeg-1).
+            // The endpoint at t=1 is wall[(wi+1)%n].p0 and is emitted in the
+            // next iteration, so it is deliberately NOT emitted here.
+            const u32         nSeg   = std::clamp(wall.curveSubdivisions, 4u, 64u);
+            const std::size_t wiNext = (wi + 1) % n;
+
+            for (u32 k = 1; k < nSeg; ++k)
+            {
+                const float t = static_cast<float>(k) / static_cast<float>(nSeg);
+
+                glm::vec2 pt;
+                if (wall.curveControlB)
+                    pt = evalBezierCubic(wall.p0, *wall.curveControlA,
+                                         *wall.curveControlB, wallP1, t);
+                else
+                    pt = evalBezierQuadratic(wall.p0, *wall.curveControlA, wallP1, t);
+
+                poly.push_back(pt);
+                floorHExp.push_back(baseFloorH[wi] + t * (baseFloorH[wiNext] - baseFloorH[wi]));
+                ceilHExp .push_back(baseCeilH [wi] + t * (baseCeilH [wiNext] - baseCeilH [wi]));
+            }
+        }
+    }
 }
 
 // ─── Detail brush geometry generators (Phase 1F-C step 9) ───────────────────────
@@ -883,14 +948,19 @@ std::vector<render::MeshData> tessellateMap(const WorldMapData& map)
 
         render::MeshData& mesh = result[si];
 
-        std::vector<glm::vec2> poly;
-        poly.reserve(n);
-        for (const auto& w : sector.walls) poly.push_back(w.p0);
-
+        // Build per-vertex base heights (one per wall, indexed by wall index).
+        // These are still used by the wall tessellation loop.
         std::vector<float> floorH, ceilH;
         buildHeightArrays(sector, floorH, ceilH);
 
-        // ── Floor ────────────────────────────────────────────────────────────
+        // Build the expanded polygon for floor/ceiling surfaces: curved walls
+        // contribute Bezier interior points so the horizontal surfaces fill
+        // the full area swept by each wall, with no gap at curved walls.
+        std::vector<glm::vec2> poly;
+        std::vector<float> floorHExp, ceilHExp;
+        buildExpandedPoly(sector, floorH, ceilH, poly, floorHExp, ceilHExp);
+
+        // ── Floor ────────────────────────────────────────────────────────────────────────────
         if (sector.floorShape == FloorShape::Heightfield && sector.heightfield)
         {
             appendHeightfieldFloor(mesh.vertices, mesh.indices, *sector.heightfield);
@@ -904,16 +974,17 @@ std::vector<render::MeshData> tessellateMap(const WorldMapData& map)
         else
         {
             appendHorizontalSurface(mesh.vertices, mesh.indices, poly,
-                                    std::span<const float>(floorH),
+                                    std::span<const float>(floorHExp),
                                     +1.0f, 1.0f, 1.0f, 0.0f, 0.0f);
         }
 
-        // ── Ceiling ────────────────────────────────────────────────────────────
+        // ── Ceiling ──────────────────────────────────────────────────────────────────────────
         appendHorizontalSurface(mesh.vertices, mesh.indices, poly,
-                                std::span<const float>(ceilH),
+                                std::span<const float>(ceilHExp),
                                 -1.0f, 1.0f, 1.0f, 0.0f, 0.0f);
 
-        // ── Walls ────────────────────────────────────────────────────────────
+        // ── Walls ──────────────────────────────────────────────────────────────────────────
+        // Wall tessellation uses base height arrays (indexed by wall index wi).
         for (std::size_t wi = 0; wi < n; ++wi)
         {
             const Wall&       wall   = sector.walls[wi];
@@ -1046,14 +1117,17 @@ std::vector<std::vector<TaggedMeshBatch>> tessellateMapTagged(const WorldMapData
             return result[si].back();
         };
 
-        std::vector<glm::vec2> poly;
-        poly.reserve(n);
-        for (const auto& w : sector.walls) poly.push_back(w.p0);
-
+        // Build per-vertex base heights (one per wall, indexed by wall index).
         std::vector<float> floorH, ceilH;
         buildHeightArrays(sector, floorH, ceilH);
 
-        // ── Floor ─────────────────────────────────────────────────────────────────
+        // Build expanded polygon: curved walls contribute Bezier interior points
+        // so floor/ceiling surfaces fill the space swept by each wall face.
+        std::vector<glm::vec2> poly;
+        std::vector<float> floorHExp, ceilHExp;
+        buildExpandedPoly(sector, floorH, ceilH, poly, floorHExp, ceilHExp);
+
+        // ── Floor ───────────────────────────────────────────────────────────────────────────────
         // When the floor is a portal, use the portal material UUID so the renderer
         // binds the correct transparent/grate texture.  The geometry is identical.
         {
@@ -1079,12 +1153,12 @@ std::vector<std::vector<TaggedMeshBatch>> tessellateMapTagged(const WorldMapData
             {
                 TaggedMeshBatch& batch = getBatch(floorMat);
                 appendHorizontalSurface(batch.mesh.vertices, batch.mesh.indices, poly,
-                                        std::span<const float>(floorH),
+                                        std::span<const float>(floorHExp),
                                         +1.0f, 1.0f, 1.0f, 0.0f, 0.0f);
             }
         }
 
-        // ── Ceiling ────────────────────────────────────────────────────────────
+        // ── Ceiling ───────────────────────────────────────────────────────────────────────────
         {
             const daedalus::UUID& ceilMat =
                 (sector.ceilPortalSectorId != INVALID_SECTOR_ID)
@@ -1092,11 +1166,12 @@ std::vector<std::vector<TaggedMeshBatch>> tessellateMapTagged(const WorldMapData
                 : sector.ceilMaterialId;
             TaggedMeshBatch& batch = getBatch(ceilMat);
             appendHorizontalSurface(batch.mesh.vertices, batch.mesh.indices, poly,
-                                    std::span<const float>(ceilH),
+                                    std::span<const float>(ceilHExp),
                                     -1.0f, 1.0f, 1.0f, 0.0f, 0.0f);
         }
 
-        // ── Walls (with curved subdivision, Phase 1F-C) ─────────────────────────
+        // ── Walls (with curved subdivision, Phase 1F-C) ─────────────────────────────────
+        // Wall tessellation uses the base height arrays (indexed by wall index wi).
         for (std::size_t wi = 0; wi < n; ++wi)
         {
             const Wall&       wall   = sector.walls[wi];

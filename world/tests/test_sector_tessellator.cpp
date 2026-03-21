@@ -382,10 +382,12 @@ TEST(SectorTessellatorTest, CurvedWallProducesMoreQuadsThanStraight)
 
     // Curved wall: south wall produces 8 segments × 4 vertices = 32 verts for that wall.
     // Remaining 3 straight walls: 3 × 4 = 12 verts.
-    // Floor + ceiling: 4 + 4 = 8 verts.
-    // Total: 32 + 12 + 8 = 52.
-    EXPECT_EQ(curvedMesh[0].vertices.size(), 52u)
-        << "Curved wall with 8 subdivisions should produce 52 total vertices";
+    // Floor + ceiling polygon: the south wall contributes 7 interior Bezier points
+    // (k=1..7 for nSeg=8), so the polygon has 4 + 7 = 11 points.
+    // Floor: 11 verts.  Ceiling: 11 verts.  Total: 32 + 12 + 11 + 11 = 66.
+    EXPECT_EQ(curvedMesh[0].vertices.size(), 66u)
+        << "Curved wall with 8 subdivisions should produce 66 total vertices "
+           "(expanded floor/ceiling polygon follows the curve)";
 
     // Curved sector must produce strictly more wall vertices than flat.
     EXPECT_GT(curvedMesh[0].vertices.size(), flatMesh[0].vertices.size())
@@ -410,8 +412,9 @@ TEST(SectorTessellatorTest, CurvedWallNormalsAreUnitLength)
     const auto meshes = tessellateMap(map);
     ASSERT_FALSE(meshes.empty());
 
-    // Skip floor (4v) and ceiling (4v); check all wall vertices.
-    for (std::size_t i = 8; i < meshes[0].vertices.size(); ++i)
+    // Floor/ceiling polygon is now expanded (15 pts each for 12 segs);
+    // all surface normals must be unit-length regardless.
+    for (std::size_t i = 0; i < meshes[0].vertices.size(); ++i)
     {
         const auto& v = meshes[0].vertices[i];
         const float len = std::sqrt(v.normal[0]*v.normal[0] +
@@ -488,6 +491,51 @@ TEST(SectorTessellatorTest, DetailCylinderFaceCount)
     // Total: 8 + 16 + 48 = 72.
     EXPECT_EQ(totalVerts, 72u)
         << "Cylinder(N=8) should add 48 verts to a flat 4-wall sector (total 72)";
+}
+
+// Curved wall floor/ceiling expansion: the floor and ceiling polygon must
+// contain more than N vertices when any wall has a Bezier curve, so the
+// horizontal surfaces fill the space swept by the curved wall and leave
+// no gap between the floor/ceiling edge and the wall face.
+TEST(SectorTessellatorTest, CurvedWallFloorExpandsToFollowCurve)
+{
+    // Flat reference: 4 straight walls.
+    const WorldMapData flatMap = makeSingleRoomMap();
+    const auto flatMesh = tessellateMap(flatMap);
+    ASSERT_EQ(flatMesh.size(), 1u);
+    // Flat sector: floor = 4 verts (one per wall vertex).
+    // The floor is the first appendHorizontalSurface call, so its vertices
+    // occupy indices [0, N_floor).
+
+    // Curved map: south wall has 8 subdivisions.
+    WorldMapData curvedMap;
+    Sector sec;
+    sec.floorHeight = 0.0f; sec.ceilHeight = 4.0f;
+    Wall w0; w0.p0 = {-5,-5};
+    w0.curveControlA    = glm::vec2{0.0f, -8.0f};
+    w0.curveSubdivisions = 8u;   // 8 segs → 7 interior points
+    sec.walls.push_back(w0);
+    Wall w1; w1.p0 = { 5,-5}; sec.walls.push_back(w1);
+    Wall w2; w2.p0 = { 5, 5}; sec.walls.push_back(w2);
+    Wall w3; w3.p0 = {-5, 5}; sec.walls.push_back(w3);
+    curvedMap.sectors.push_back(std::move(sec));
+
+    const auto curvedMesh = tessellateMap(curvedMap);
+    ASSERT_EQ(curvedMesh.size(), 1u);
+
+    // The curved sector must produce more total vertices than the flat sector
+    // specifically because the floor/ceiling polygon is expanded.
+    EXPECT_GT(curvedMesh[0].vertices.size(), flatMesh[0].vertices.size())
+        << "Curved sector must produce more vertices than flat (floor/ceiling expansion)";
+
+    // The flat sector has floor + ceiling = 8 verts.  The curved sector has
+    // 11 + 11 = 22 floor/ceiling verts.  So the difference in total vertex count
+    // must be at least the 14 extra polygon points (7 per surface × 2).
+    const std::size_t flatTotal   = flatMesh[0].vertices.size();
+    const std::size_t curvedTotal = curvedMesh[0].vertices.size();
+    EXPECT_GE(curvedTotal - flatTotal, 14u)
+        << "Floor+ceiling polygon expansion should add at least 14 vertices "
+           "(7 interior Bezier points per surface × 2 surfaces)";
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
