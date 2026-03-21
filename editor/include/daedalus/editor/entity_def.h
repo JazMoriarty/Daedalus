@@ -116,7 +116,8 @@ struct ParticleEmitterParams
     float     softRange     = 0.0f;   ///< Depth fade distance for soft particles (0 = disabled).
     float     emissiveStart = 1.0f;  ///< Emissive multiplier at birth (1 = fully self-lit, 0 = scene-lit only).
     float     emissiveEnd   = 0.0f;  ///< Emissive multiplier at death.
-    bool      emitsLight    = false; ///< When true, inject a dynamic point light at the emitter origin each frame.
+    bool      emitsLight      = false;  ///< When true, inject a dynamic point light at the emitter origin each frame.
+    float     emitLightRadius = 15.0f;  ///< Radius (metres) of the injected point light.  Default 15 m covers a typical room.
     float shadowDensity = 0.0f; ///< Beer-Lambert absorption coefficient for density shadow volumes (RT mode only). 0 = no shadow cost.
 };
 

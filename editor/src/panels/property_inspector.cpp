@@ -1831,6 +1831,24 @@ void PropertyInspector::draw(EditMapDocument&      doc,
                     }
                 }
 
+                // Light radius — only shown when emitsLight is enabled.
+                if (ed.particle.emitsLight)
+                {
+                    float lightRadius = ed.particle.emitLightRadius;
+                    ImGui::SetNextItemWidth(-1.0f);
+                    bool lrChanged = dragFloatUndo("##pelightr", &lightRadius, 0.5f,
+                                                   1.0f, 100.0f, "Light Radius: %.1f m");
+                    if (ImGui::IsItemActivated()) s_preDragParticle = ed;
+                    if (ImGui::IsItemActive() || ImGui::IsItemEdited())
+                        ed.particle.emitLightRadius = lightRadius;
+                    if (lrChanged)
+                    {
+                        EntityDef newDef = ed;
+                        doc.pushCommand(std::make_unique<CmdSetEntityProps>(
+                            doc, ei, s_preDragParticle, newDef));
+                    }
+                }
+
                 ImGui::Spacing();
                 ImGui::SeparatorText("Shadow Volume (RT)");
 

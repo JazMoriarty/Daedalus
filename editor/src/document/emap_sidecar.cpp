@@ -213,8 +213,9 @@ nlohmann::json vec2ToJson(const glm::vec2& v)
         {"particle_soft_range",      ed.particle.softRange},
         {"particle_emissive_start",  ed.particle.emissiveStart},
         {"particle_emissive_end",    ed.particle.emissiveEnd},
-        {"particle_emits_light",     ed.particle.emitsLight},
-        {"particle_shadow_density",  ed.particle.shadowDensity},
+        {"particle_emits_light",       ed.particle.emitsLight},
+        {"particle_emit_light_radius", ed.particle.emitLightRadius},
+        {"particle_shadow_density",    ed.particle.shadowDensity},
     };
 }
 
@@ -282,10 +283,12 @@ nlohmann::json vec2ToJson(const glm::vec2& v)
                                  ? je["particle_emissive_start"].get<float>() : 1.0f;
     ed.particle.emissiveEnd    = je.contains("particle_emissive_end")
                                  ? je["particle_emissive_end"].get<float>()   : 0.0f;
-    ed.particle.emitsLight     = je.contains("particle_emits_light")
-                                 ? je["particle_emits_light"].get<bool>()     : false;
-    ed.particle.shadowDensity  = je.contains("particle_shadow_density")
-                                 ? je["particle_shadow_density"].get<float>() : 0.0f;
+    ed.particle.emitsLight       = je.contains("particle_emits_light")
+                                   ? je["particle_emits_light"].get<bool>()         : false;
+    ed.particle.emitLightRadius  = je.contains("particle_emit_light_radius")
+                                   ? je["particle_emit_light_radius"].get<float>()  : 15.0f;
+    ed.particle.shadowDensity    = je.contains("particle_shadow_density")
+                                   ? je["particle_shadow_density"].get<float>()     : 0.0f;
     return ed;
 }
 

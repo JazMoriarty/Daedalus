@@ -554,15 +554,17 @@ void EntityGpuCache::populateSceneView(render::SceneView&            scene,
             c.emissiveEnd     = p.emissiveEnd;
 
             // If this emitter is flagged as a light emitter, inject a dynamic
-            // point light at the emitter origin.  Intensity is derived from the
-            // birth-emissive multiplier so the "lights off" slider kills the light too.
+            // point light at the emitter origin.  The radius is controlled by
+            // p.emitLightRadius (default 15 m — covers a typical room).
+            // Intensity is proportional to emissiveStart so the emissive slider
+            // scales both the particle glow and the injected light together.
             if (p.emitsLight)
             {
                 render::PointLight pl;
                 pl.position  = def.position;
                 pl.color     = glm::vec3(p.colorStart);
-                pl.radius    = 5.0f;
-                pl.intensity = p.emissiveStart * 10.0f;
+                pl.radius    = p.emitLightRadius;
+                pl.intensity = p.emissiveStart * p.emitLightRadius * 1.5f;
                 scene.pointLights.push_back(pl);
             }
 
