@@ -801,6 +801,53 @@ void Viewport2D::draw(EditMapDocument& doc,
             // Selection ring.
             if (lightSel)
                 dl->AddCircle(spi, kIconR + 3.0f, IM_COL32(255, 255, 255, 200), 24, 1.5f);
+
+            // Spotlight direction cone (top-down XZ projection).
+            // When the light points nearly straight up/down, the XZ component is tiny;
+            // a dot marker indicates vertical aim rather than a degenerate cone.
+            if (ld.type == LightType::Spot)
+            {
+                const float xzLen = std::sqrt(ld.direction.x * ld.direction.x +
+                                              ld.direction.z * ld.direction.z);
+                const ImU32 coneCol  = lightSel
+                    ? IM_COL32(255, 255, 140, 200) : IM_COL32(255, 220, 80, 110);
+                const ImU32 coneFill = lightSel
+                    ? IM_COL32(255, 255, 140,  45) : IM_COL32(255, 220, 80,  22);
+
+                if (xzLen < 0.1f)
+                {
+                    // Pointing nearly straight up/down — small ring to indicate vertical aim.
+                    dl->AddCircle(spi, kIconR * 0.55f, coneCol, 6, 1.2f);
+                }
+                else
+                {
+                    // Project direction onto XZ plane and normalise.
+                    // mapToScreen maps worldX → screenX, worldZ → screenY, so the
+                    // XZ projection maps directly to screen X/Y coordinates.
+                    const float invLen = 1.0f / xzLen;
+                    const float dirX = ld.direction.x * invLen;
+                    const float dirZ = ld.direction.z * invLen;
+
+                    // Cap cone length to 60 px; scale by the horizontal component.
+                    const float coneLen =
+                        std::min(ld.range * m_zoom * xzLen * 0.5f, 60.0f);
+
+                    // Rotate ±outerConeAngle around the XZ direction to get the
+                    // two cone-edge endpoints.
+                    const float cosH = std::cos(ld.outerConeAngle);
+                    const float sinH = std::sin(ld.outerConeAngle);
+                    const ImVec2 coneL{
+                        sp.x + (dirX * cosH - dirZ * sinH) * coneLen,
+                        sp.y + (dirX * sinH + dirZ * cosH) * coneLen};
+                    const ImVec2 coneR{
+                        sp.x + (dirX * cosH + dirZ * sinH) * coneLen,
+                        sp.y + (-dirX * sinH + dirZ * cosH) * coneLen};
+
+                    dl->AddTriangleFilled(spi, coneL, coneR, coneFill);
+                    dl->AddLine(spi, coneL, coneCol, 1.2f);
+                    dl->AddLine(spi, coneR, coneCol, 1.2f);
+                }
+            }
         }
     }
 

@@ -1546,19 +1546,44 @@ void PropertyInspector::draw(EditMapDocument&      doc,
             ImGui::Spacing();
             ImGui::SeparatorText("Spot Cone");
             {
-                glm::vec3 dir      = ld.direction;
-                float     innerDeg = glm::degrees(ld.innerConeAngle);
-                float     outerDeg = glm::degrees(ld.outerConeAngle);
-                float     range    = ld.range;
+                // Direction: yaw and pitch angle controls.
+                // World convention: X = east, Y = up, Z = north.
+                //   yaw   = rotation around Y axis; 0° = pointing along +Z (north).
+                //   pitch = elevation above horizontal; -90° = straight down.
+                const float dirPitch = std::asin(std::clamp(ld.direction.y, -1.0f, 1.0f));
+                const float dirYaw   = (std::cos(dirPitch) > 1e-5f)
+                    ? std::atan2(ld.direction.x, ld.direction.z) : 0.0f;
+                float yawDeg   = glm::degrees(dirYaw);
+                float pitchDeg = glm::degrees(dirPitch);
+
+                // Recompute a normalised direction vector from yaw/pitch degrees.
+                auto dirFromAngles = [](float yDeg, float pDeg) -> glm::vec3
+                {
+                    const float yw = glm::radians(yDeg);
+                    const float py = glm::radians(pDeg);
+                    return glm::vec3(std::cos(py) * std::sin(yw),
+                                     std::sin(py),
+                                     std::cos(py) * std::cos(yw));
+                };
 
                 ImGui::SetNextItemWidth(-1.0f);
-                bool dirChanged = dragFloat3Undo("##ldir", &dir.x, 0.01f, 0.0f, 0.0f, "%.2f");
+                bool yawChanged = dragFloatUndo("##ldiryaw", &yawDeg, 0.5f, 0.0f, 0.0f,
+                                               "Yaw: %.1f\xc2\xb0");
                 if (ImGui::IsItemActivated()) s_preDragLight = ld;
                 if (ImGui::IsItemActive() || ImGui::IsItemEdited())
-                {
-                    const float len = glm::length(dir);
-                    ld.direction = (len > 1e-5f) ? (dir / len) : glm::vec3(0.0f, -1.0f, 0.0f);
-                }
+                    ld.direction = dirFromAngles(yawDeg, pitchDeg);
+
+                ImGui::SetNextItemWidth(-1.0f);
+                bool pitchChanged = dragFloatUndo("##ldirpitch", &pitchDeg, 0.5f, -90.0f, 90.0f,
+                                                  "Pitch: %.1f\xc2\xb0");
+                if (ImGui::IsItemActivated()) s_preDragLight = ld;
+                if (ImGui::IsItemActive() || ImGui::IsItemEdited())
+                    ld.direction = dirFromAngles(yawDeg, pitchDeg);
+
+                bool dirChanged = yawChanged || pitchChanged;
+                float innerDeg = glm::degrees(ld.innerConeAngle);
+                float outerDeg = glm::degrees(ld.outerConeAngle);
+                float range    = ld.range;
 
                 ImGui::SetNextItemWidth(-1.0f);
                 bool innerChanged = dragFloatUndo("##linnercone", &innerDeg, 0.5f, 0.0f, 0.0f,
