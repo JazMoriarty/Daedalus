@@ -350,6 +350,12 @@ nlohmann::json vec2ToJson(const glm::vec2& v)
         {"ambient_color",      vec3ToJson(s.ambientColor)},
         {"ambient_intensity",  s.ambientIntensity},
         {"sector_flags",       static_cast<uint32_t>(s.flags)},
+        {"floor_uv_offset",    vec2ToJson(s.floorUvOffset)},
+        {"floor_uv_scale",     vec2ToJson(s.floorUvScale)},
+        {"floor_uv_rotation",  s.floorUvRotation},
+        {"ceil_uv_offset",     vec2ToJson(s.ceilUvOffset)},
+        {"ceil_uv_scale",      vec2ToJson(s.ceilUvScale)},
+        {"ceil_uv_rotation",   s.ceilUvRotation},
         {"walls",              std::move(jwalls)},
     };
 }
@@ -366,6 +372,12 @@ nlohmann::json vec2ToJson(const glm::vec2& v)
     s.ambientColor         = vec3FromJson(js["ambient_color"]);
     s.ambientIntensity     = js["ambient_intensity"].get<float>();
     s.flags                = static_cast<world::SectorFlags>(js["sector_flags"].get<uint32_t>());
+    if (js.contains("floor_uv_offset"))   s.floorUvOffset   = vec2FromJson(js["floor_uv_offset"]);
+    if (js.contains("floor_uv_scale"))    s.floorUvScale    = vec2FromJson(js["floor_uv_scale"]);
+    if (js.contains("floor_uv_rotation")) s.floorUvRotation = js["floor_uv_rotation"].get<float>();
+    if (js.contains("ceil_uv_offset"))    s.ceilUvOffset    = vec2FromJson(js["ceil_uv_offset"]);
+    if (js.contains("ceil_uv_scale"))     s.ceilUvScale     = vec2FromJson(js["ceil_uv_scale"]);
+    if (js.contains("ceil_uv_rotation"))  s.ceilUvRotation  = js["ceil_uv_rotation"].get<float>();
     for (const auto& jw : js["walls"])
         s.walls.push_back(wallFromJson(jw));
     return s;

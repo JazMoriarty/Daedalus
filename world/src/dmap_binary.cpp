@@ -98,6 +98,14 @@
 //     [8]  worldMin   f32[2]
 //     [8]  worldMax   f32[2]
 //     [gridWidth*gridDepth*4]  samples  f32[]   (uncompressed; .dlevel compresses via zlib)
+//
+//   v6 sector additions (appended after v5 heightfield, omitted when reading v1–v5):
+//   [8]  floorUvOffset    f32[2]
+//   [8]  floorUvScale     f32[2]
+//   [4]  floorUvRotation  f32
+//   [8]  ceilUvOffset     f32[2]
+//   [8]  ceilUvScale      f32[2]
+//   [4]  ceilUvRotation   f32
 
 #include "daedalus/world/dmap_io.h"
 
@@ -111,7 +119,7 @@ namespace
 {
 
 constexpr u32 k_MAGIC   = 0x50414D44u;  // 'D','M','A','P' as little-endian u32
-constexpr u32 k_VERSION = 5u;
+constexpr u32 k_VERSION = 6u;
 
 // ─── Write helpers ────────────────────────────────────────────────────────────
 
@@ -315,6 +323,13 @@ std::expected<void, DmapError> saveDmap(const WorldMapData&         map,
             // Samples: raw f32 array (uncompressed in .dmap; .dlevel compresses via zlib).
             for (const f32 s : hf.samples) w.write(s);
         }
+        // v6: floor and ceiling UV mapping
+        w.writeVec2(sec.floorUvOffset);
+        w.writeVec2(sec.floorUvScale);
+        w.write(sec.floorUvRotation);
+        w.writeVec2(sec.ceilUvOffset);
+        w.writeVec2(sec.ceilUvScale);
+        w.write(sec.ceilUvRotation);
     }
 
     if (!ofs) { return std::unexpected(DmapError::WriteError); }
@@ -520,6 +535,16 @@ std::expected<WorldMapData, DmapError> loadDmap(const std::filesystem::path& pat
                     if (!r.read(hf.samples[k])) return std::unexpected(DmapError::ParseError);
                 sec.heightfield = std::move(hf);
             }
+        }
+        // v6: floor and ceiling UV mapping (defaults already set by Sector constructor)
+        if (version >= 6)
+        {
+            if (!r.readVec2(sec.floorUvOffset) || !r.readVec2(sec.floorUvScale) ||
+                !r.read(sec.floorUvRotation))
+                return std::unexpected(DmapError::ParseError);
+            if (!r.readVec2(sec.ceilUvOffset) || !r.readVec2(sec.ceilUvScale) ||
+                !r.read(sec.ceilUvRotation))
+                return std::unexpected(DmapError::ParseError);
         }
     }
 

@@ -43,6 +43,7 @@ target_sources(DaedalusEdit PRIVATE
     src/document/commands/cmd_place_prefab.cpp
     src/document/commands/cmd_set_wall_material.cpp
     src/document/commands/cmd_set_sector_material.cpp
+    src/document/commands/cmd_set_sector_surface_uv.cpp
     src/document/commands/cmd_set_map_meta.cpp
     src/document/commands/cmd_set_map_defaults.cpp
     src/document/commands/cmd_set_global_ambient.cpp
@@ -187,6 +188,7 @@ if(DAEDALUS_PLATFORM_MACOS)
         src/document/commands/cmd_place_prefab.cpp
         src/document/commands/cmd_set_wall_material.cpp
         src/document/commands/cmd_set_sector_material.cpp
+        src/document/commands/cmd_set_sector_surface_uv.cpp
         src/document/commands/cmd_set_map_meta.cpp
         src/document/commands/cmd_set_map_defaults.cpp
         src/document/commands/cmd_set_global_ambient.cpp

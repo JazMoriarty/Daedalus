@@ -179,6 +179,14 @@ struct Sector
     UUID floorMaterialId;    ///< Floor surface material.
     UUID ceilMaterialId;     ///< Ceiling surface material.
 
+    // ─── UV mapping for floor and ceiling ─────────────────────────────────────
+    glm::vec2 floorUvOffset   = {0.0f, 0.0f};  ///< Floor texture coordinate offset.
+    glm::vec2 floorUvScale    = {1.0f, 1.0f};  ///< Floor texture coordinate scale.
+    f32       floorUvRotation = 0.0f;           ///< Floor UV rotation in radians.
+    glm::vec2 ceilUvOffset    = {0.0f, 0.0f};  ///< Ceiling texture coordinate offset.
+    glm::vec2 ceilUvScale     = {1.0f, 1.0f};  ///< Ceiling texture coordinate scale.
+    f32       ceilUvRotation  = 0.0f;           ///< Ceiling UV rotation in radians.
+
     // ─── Lighting ─────────────────────────────────────────────────────────
     glm::vec3 ambientColor     = {0.05f, 0.05f, 0.08f};
     f32       ambientIntensity = 1.0f;

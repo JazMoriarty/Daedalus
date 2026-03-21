@@ -135,7 +135,8 @@ static void appendHorizontalSurface(
     std::span<const float>                 heights,
     float normalY,
     float uScale, float vScale,
-    float uOff,   float vOff) noexcept
+    float uOff,   float vOff,
+    float uvRotation = 0.0f) noexcept
 {
     const u32 n = static_cast<u32>(polygonPts.size());
     if (n < 3 || heights.size() < n) return;
@@ -143,15 +144,23 @@ static void appendHorizontalSurface(
     const u32   base = static_cast<u32>(verts.size());
     const float tx   = (normalY > 0.0f) ? 1.0f : -1.0f;
 
+    const float cosR = std::cos(uvRotation);
+    const float sinR = std::sin(uvRotation);
+
     for (u32 i = 0; i < n; ++i)
     {
         const float px = polygonPts[i].x;
         const float pz = polygonPts[i].y;
         const float py = heights[i];
+        // UV: scale → translate → rotate (same convention as wall UV).
+        // When uvRotation == 0 the output is identical to the previous code.
+        const float u_t = px / uScale + uOff;
+        const float v_t = pz / vScale + vOff;
+        const float u_f = u_t * cosR - v_t * sinR;
+        const float v_f = u_t * sinR + v_t * cosR;
         verts.push_back(makeVertex(px, py, pz,
                                    0.0f, normalY, 0.0f,
-                                   px / uScale + uOff,
-                                   pz / vScale + vOff,
+                                   u_f, v_f,
                                    tx, 0.0f, 0.0f, 1.0f));
     }
 
@@ -1026,15 +1035,23 @@ std::vector<render::MeshData> tessellateMap(const WorldMapData& map)
         }
         else
         {
+            const float fuS = sector.floorUvScale.x > 0.0f ? sector.floorUvScale.x : 1.0f;
+            const float fvS = sector.floorUvScale.y > 0.0f ? sector.floorUvScale.y : 1.0f;
             appendHorizontalSurface(mesh.vertices, mesh.indices, poly,
                                     std::span<const float>(floorHExp),
-                                    +1.0f, 1.0f, 1.0f, 0.0f, 0.0f);
+                                    +1.0f, fuS, fvS,
+                                    sector.floorUvOffset.x, sector.floorUvOffset.y,
+                                    sector.floorUvRotation);
         }
 
-        // ── Ceiling ──────────────────────────────────────────────────────────────────────────
+        // ── Ceiling ─────────────────────────────────────────────────────────────────────────
+        const float cuS = sector.ceilUvScale.x > 0.0f ? sector.ceilUvScale.x : 1.0f;
+        const float cvS = sector.ceilUvScale.y > 0.0f ? sector.ceilUvScale.y : 1.0f;
         appendHorizontalSurface(mesh.vertices, mesh.indices, poly,
                                 std::span<const float>(ceilHExp),
-                                -1.0f, 1.0f, 1.0f, 0.0f, 0.0f);
+                                -1.0f, cuS, cvS,
+                                sector.ceilUvOffset.x, sector.ceilUvOffset.y,
+                                sector.ceilUvRotation);
 
         // ── Walls ──────────────────────────────────────────────────────────────────────────
         // Wall tessellation uses base height arrays (indexed by wall index wi).
@@ -1226,23 +1243,31 @@ std::vector<std::vector<TaggedMeshBatch>> tessellateMapTagged(const WorldMapData
             }
             else
             {
+                const float fuS2 = sector.floorUvScale.x > 0.0f ? sector.floorUvScale.x : 1.0f;
+                const float fvS2 = sector.floorUvScale.y > 0.0f ? sector.floorUvScale.y : 1.0f;
                 TaggedMeshBatch& batch = getBatch(floorMat);
                 appendHorizontalSurface(batch.mesh.vertices, batch.mesh.indices, poly,
                                         std::span<const float>(floorHExp),
-                                        +1.0f, 1.0f, 1.0f, 0.0f, 0.0f);
+                                        +1.0f, fuS2, fvS2,
+                                        sector.floorUvOffset.x, sector.floorUvOffset.y,
+                                        sector.floorUvRotation);
             }
         }
 
-        // ── Ceiling ───────────────────────────────────────────────────────────────────────────
+        // ── Ceiling ───────────────────────────────────────────────────────────────────────────────────
         {
             const daedalus::UUID& ceilMat =
                 (sector.ceilPortalSectorId != INVALID_SECTOR_ID)
                 ? sector.ceilPortalMaterialId
                 : sector.ceilMaterialId;
+            const float cuS2 = sector.ceilUvScale.x > 0.0f ? sector.ceilUvScale.x : 1.0f;
+            const float cvS2 = sector.ceilUvScale.y > 0.0f ? sector.ceilUvScale.y : 1.0f;
             TaggedMeshBatch& batch = getBatch(ceilMat);
             appendHorizontalSurface(batch.mesh.vertices, batch.mesh.indices, poly,
                                     std::span<const float>(ceilHExp),
-                                    -1.0f, 1.0f, 1.0f, 0.0f, 0.0f);
+                                    -1.0f, cuS2, cvS2,
+                                    sector.ceilUvOffset.x, sector.ceilUvOffset.y,
+                                    sector.ceilUvRotation);
         }
 
         // ── Walls (with curved subdivision, Phase 1F-C) ─────────────────────────────────

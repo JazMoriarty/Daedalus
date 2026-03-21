@@ -26,6 +26,7 @@
 #include "document/commands/cmd_set_player_start.h"
 #include "document/commands/cmd_set_wall_material.h"
 #include "document/commands/cmd_set_sector_material.h"
+#include "document/commands/cmd_set_sector_surface_uv.h"
 #include "document/commands/cmd_set_map_meta.h"
 #include "document/commands/cmd_set_map_defaults.h"
 #include "document/commands/cmd_set_global_ambient.h"
@@ -310,7 +311,95 @@ void PropertyInspector::draw(EditMapDocument&      doc,
             editSectorMat("Ceiling##sm", sector.ceilMaterialId,  SectorSurface::Ceil);
         }
 
-        // ── Floor Shape ────────────────────────────────────────────────────────────
+        // ── UV Mapping ─────────────────────────────────────────────────────────────────────
+        ImGui::Spacing();
+        ImGui::SeparatorText("UV Mapping");
+        {
+            // Statics capture pre-drag values for undo (same pattern as wall UV).
+            static glm::vec2 s_origFloorOff{}, s_origFloorSc{}, s_origCeilOff{}, s_origCeilSc{};
+            static float     s_origFloorRot = 0.0f, s_origCeilRot = 0.0f;
+
+            constexpr float kRad2DegUV = 180.0f / 3.14159265f;
+            constexpr float kDeg2RadUV = 3.14159265f / 180.0f;
+
+            auto editSurfaceUV = [&](const char* header,
+                                     SectorSurface surf,
+                                     glm::vec2& uvOff, glm::vec2& uvSc, float& uvRot,
+                                     glm::vec2& origOff, glm::vec2& origSc, float& origRot)
+            {
+                if (!ImGui::CollapsingHeader(header)) return;
+                ImGui::PushID(header);
+
+                ImGui::TextDisabled("Offset");
+                ImGui::SetNextItemWidth(-1.0f);
+                bool offCommitted = dragFloat2Undo("##suvoff", &uvOff.x, 0.01f, 0.0f, 0.0f, "%.3f");
+                if (ImGui::IsItemActivated()) origOff = uvOff;
+                if (ImGui::IsItemActive() || ImGui::IsItemEdited())
+                    { sector.floorUvOffset = (surf == SectorSurface::Floor) ? uvOff : sector.floorUvOffset;
+                      sector.ceilUvOffset  = (surf == SectorSurface::Ceil)  ? uvOff : sector.ceilUvOffset;
+                      doc.markDirty(); }
+                if (offCommitted)
+                {
+                    const glm::vec2 finalOff = uvOff;
+                    uvOff = origOff;
+                    if (surf == SectorSurface::Floor) sector.floorUvOffset = origOff;
+                    else                              sector.ceilUvOffset  = origOff;
+                    doc.pushCommand(std::make_unique<CmdSetSectorSurfaceUV>(
+                        doc, sid, surf, finalOff, uvSc, uvRot));
+                }
+
+                ImGui::TextDisabled("Scale");
+                ImGui::SetNextItemWidth(-1.0f);
+                bool scCommitted = dragFloat2Undo("##suvsc", &uvSc.x, 0.01f, 0.0f, 0.0f, "%.3f");
+                if (ImGui::IsItemActivated()) origSc = uvSc;
+                if (ImGui::IsItemActive() || ImGui::IsItemEdited())
+                    { if (surf == SectorSurface::Floor) sector.floorUvScale = uvSc;
+                      else                              sector.ceilUvScale  = uvSc;
+                      doc.markDirty(); }
+                if (scCommitted)
+                {
+                    const glm::vec2 finalSc = uvSc;
+                    uvSc = origSc;
+                    if (surf == SectorSurface::Floor) sector.floorUvScale = origSc;
+                    else                              sector.ceilUvScale  = origSc;
+                    doc.pushCommand(std::make_unique<CmdSetSectorSurfaceUV>(
+                        doc, sid, surf, uvOff, finalSc, uvRot));
+                }
+
+                float uvRotDeg = uvRot * kRad2DegUV;
+                ImGui::SetNextItemWidth(-1.0f);
+                bool rotCommitted = dragFloatUndo("##suvrot", &uvRotDeg, 0.5f, 0.0f, 0.0f,
+                                                  "Rotation: %.1f\xc2\xb0");
+                if (ImGui::IsItemActivated()) origRot = uvRot;
+                if (ImGui::IsItemActive() || ImGui::IsItemEdited())
+                {
+                    uvRot = uvRotDeg * kDeg2RadUV;
+                    if (surf == SectorSurface::Floor) sector.floorUvRotation = uvRot;
+                    else                              sector.ceilUvRotation  = uvRot;
+                    doc.markDirty();
+                }
+                if (rotCommitted)
+                {
+                    const float finalRot = uvRot;
+                    uvRot = origRot;
+                    if (surf == SectorSurface::Floor) sector.floorUvRotation = origRot;
+                    else                              sector.ceilUvRotation  = origRot;
+                    doc.pushCommand(std::make_unique<CmdSetSectorSurfaceUV>(
+                        doc, sid, surf, uvOff, uvSc, finalRot));
+                }
+
+                ImGui::PopID();
+            };
+
+            editSurfaceUV("Floor UV",   SectorSurface::Floor,
+                          sector.floorUvOffset, sector.floorUvScale, sector.floorUvRotation,
+                          s_origFloorOff, s_origFloorSc, s_origFloorRot);
+            editSurfaceUV("Ceiling UV", SectorSurface::Ceil,
+                          sector.ceilUvOffset,  sector.ceilUvScale,  sector.ceilUvRotation,
+                          s_origCeilOff, s_origCeilSc, s_origCeilRot);
+        }
+
+        // ── Floor Shape ──────────────────────────────────────────────────────
         ImGui::Spacing();
         ImGui::SeparatorText("Floor Shape");
         {
