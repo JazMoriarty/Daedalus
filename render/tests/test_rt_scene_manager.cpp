@@ -146,7 +146,7 @@ TEST(SVGFConstantsGPU, DefaultValues)
     SVGFConstantsGPU c{};
     EXPECT_FLOAT_EQ(c.alpha, 0.05f);
     EXPECT_FLOAT_EQ(c.momentsAlpha, 0.2f);
-    EXPECT_FLOAT_EQ(c.phiColor, 10.0f);
+    EXPECT_FLOAT_EQ(c.phiColor, 4.0f);
     EXPECT_FLOAT_EQ(c.phiNormal, 128.0f);
     EXPECT_FLOAT_EQ(c.phiDepth, 1.0f);
     EXPECT_EQ(c.stepWidth, 1u);
