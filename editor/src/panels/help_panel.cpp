@@ -76,6 +76,7 @@ static const char* k_categories[] =
     "Tools",
     "Sectors & Walls",
     "Advanced Geometry",
+    "Sector-Over-Sector",
     "Detail Geometry",
     "Entities",
     "Lights",
@@ -154,16 +155,17 @@ void HelpPanel::draw()
     case  3: draw3DViewport();       break;
     case  4: drawTools();            break;
     case  5: drawSectorsWalls();     break;
-    case  6: drawAdvancedGeometry(); break;
-    case  7: drawDetailGeometry();   break;
-    case  8: drawEntities();         break;
-    case  9: drawLights();           break;
-    case 10: drawPlayerStart();      break;
-    case 11: drawPortalsLayers();    break;
-    case 12: drawPrefabs();          break;
-    case 13: drawAssetBrowser();     break;
-    case 14: drawRenderSettings();   break;
-    case 15: drawMapDoctor();        break;
+    case  6: drawAdvancedGeometry();    break;
+    case  7: drawSectorOverSector();    break;
+    case  8: drawDetailGeometry();      break;
+    case  9: drawEntities();            break;
+    case 10: drawLights();              break;
+    case 11: drawPlayerStart();         break;
+    case 12: drawPortalsLayers();       break;
+    case 13: drawPrefabs();             break;
+    case 14: drawAssetBrowser();        break;
+    case 15: drawRenderSettings();      break;
+    case 16: drawMapDoctor();           break;
     default: break;
     }
 
@@ -1337,6 +1339,189 @@ void HelpPanel::drawAssetBrowser()
            "the panel.  Click any thumbnail to assign it and close the picker.");
     Bullet("Press Escape or click Cancel in the banner to dismiss without "
            "making a change.");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Sector-Over-Sector
+// ─────────────────────────────────────────────────────────────────────────────
+
+void HelpPanel::drawSectorOverSector()
+{
+    ImGui::SeparatorText("SECTOR-OVER-SECTOR (SoS)");
+    ImGui::Spacing();
+    ImGui::TextWrapped(
+        "Sector-Over-Sector (SoS) is the technique for building multi-storey "
+        "spaces where rooms sit vertically above or beside other rooms and the "
+        "player can see across the height difference.  There are two distinct "
+        "forms: wall-based SoS (step rooms at different heights connected by a "
+        "wall portal) and floor/ceiling portal SoS (rooms with the same XZ "
+        "footprint stacked directly above one another).");
+    ImGui::Spacing();
+    ImGui::TextWrapped(
+        "Both forms use the same portal traversal system used for horizontal "
+        "wall portals.  The renderer only draws sectors that are reachable from "
+        "the camera's sector through the portal graph, so SoS geometry is "
+        "just as efficient as any other room connection.");
+
+    // ── Method 1: Wall portals between sectors at different heights ────────
+    ImGui::Spacing();
+    ImGui::SeparatorText("Method 1  \xe2\x80\x94  Wall-Based SoS (Step Rooms)");
+    ImGui::TextWrapped(
+        "The simplest form of SoS.  Two sectors share a portal wall but sit at "
+        "different floor or ceiling heights.  The tessellator automatically "
+        "fills the height difference with upper and lower wall strips, so the "
+        "player sees the correct wall geometry above or below the portal opening. "
+        "This is how you build balconies, raised platforms, sunken courtyards, "
+        "and step-down corridors.");
+
+    ImGui::Spacing();
+    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.80f, 0.80f, 0.50f, 1.0f));
+    ImGui::TextUnformatted("  Example: a room (floor=0, ceil=4) connected to a raised"
+                           " alcove (floor=2, ceil=5).");
+    ImGui::PopStyleColor();
+    Tip("Looking from the room into the alcove: a lower strip of height 2 "
+        "fills the bottom of the opening (alcove floor is higher). "
+        "Looking back into the room: an upper strip of height 1 fills the "
+        "top (alcove ceiling is higher than room ceiling).");
+
+    ImGui::Spacing();
+    Step(1, "Draw the lower sector (e.g. floor=0, ceil=4).  This is the main room.");
+    Step(2, "Draw the upper sector (e.g. floor=2, ceil=5) so that one of its walls "
+            "is exactly co-linear with one wall of the lower sector.  Use grid "
+            "snapping to align the vertices precisely.");
+    Step(3, "If the shared edge is only part of a longer wall, select that wall and "
+            "press W to split it at the junction points so a matching sub-wall segment "
+            "exists on both sectors.");
+    Step(4, "Select the shared wall on either sector with the Select tool.");
+    Step(5, "In Properties > Portal, click Link Portal.  The editor auto-detects "
+            "the matching wall and links both sides.");
+    Step(6, "In the 3D viewport, fly through the opening.  The upper and lower wall "
+            "strips appear automatically wherever the floor or ceiling heights differ "
+            "across the portal.");
+    Tip("Assign materials to the Upper and Lower wall slots in Properties to "
+        "texture the step strips independently from the main wall face.");
+    Tip("There is no limit to the height difference.  A sector at floor=0 can "
+        "portal directly into a sector at floor=20 if needed.");
+
+    // ── Method 2: Floor / ceiling portals (true stacking) ─────────────────
+    ImGui::Spacing();
+    ImGui::SeparatorText("Method 2  \xe2\x80\x94  Floor / Ceiling Portal SoS (True Stacking)");
+    ImGui::TextWrapped(
+        "True SoS places two sectors at the same XZ footprint but at different "
+        "heights — one directly above the other.  A floor portal on the upper "
+        "sector opens downward into the lower sector, and/or a ceiling portal on "
+        "the lower sector opens upward into the upper one.  This is how you build "
+        "a balcony floor you can look down through, a window in the ceiling, or a "
+        "transparent grate separating two levels.");
+
+    ImGui::Spacing();
+    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.80f, 0.80f, 0.50f, 1.0f));
+    ImGui::TextUnformatted("  Example: ground floor (floor=0, ceil=3) with "
+                           "a mezzanine (floor=3, ceil=6) above it.");
+    ImGui::PopStyleColor();
+
+    ImGui::Spacing();
+    Step(1, "Draw the lower sector (e.g. floor=0, ceil=3).");
+    Step(2, "Draw the upper sector (e.g. floor=3, ceil=6) with the same four "
+            "corner vertices as the lower sector.  Use vertex snapping (the green "
+            "snap ring) to align precisely.  Both sectors occupy the same XZ space "
+            "but live at different Y ranges, which is valid.");
+    Tip("In the 2D viewport both sectors will appear directly on top of each other. "
+        "Use the Floor Layers panel (Window > Floor Layers) to filter by Edit "
+        "Height so you see only the floor you are currently editing.");
+    Step(3, "Select the upper sector with the Select tool.");
+    Step(4, "In Properties > Floor / Ceiling Portals, drag the \"Floor portal\" "
+            "ID field to the sector index of the lower sector.  The sector index "
+            "is shown in the Properties panel header (\"Index: N\") when the "
+            "sector is selected.");
+    Step(5, "Optionally, select the lower sector and set its \"Ceiling portal\" ID "
+            "to the upper sector.  This lets the portal traversal recurse both ways "
+            "(looking up from below as well as down from above).");
+    Step(6, "Assign a material to the floor surface of the upper sector if you want "
+            "a physical surface there (e.g. a glass floor or grate texture).  Leave "
+            "the material empty for an open gap.  Apply it via Properties > Floor.");
+    Step(7, "Enter fly mode in the 3D viewport (Tab) and use Q / E to move between "
+            "heights.  When above the upper sector's floor you should see the lower "
+            "sector through the floor portal.  When below the lower sector's ceiling "
+            "you should see the upper sector through the ceiling portal (if set).");
+    Tip("The camera sector detection uses your full 3D position (including Y height) "
+        "to correctly identify which stacked sector you are in, so portal traversal "
+        "always starts from the right floor.");
+    Tip("A floor portal surface renders as a solid mesh unless the material "
+        "applied to it has transparency (e.g. a glass or grate PBR material). "
+        "The portal connection is what lets you SEE through it regardless "
+        "of the surface material.");
+
+    // ── Partial floor / ceiling openings ──────────────────────────────────
+    ImGui::Spacing();
+    ImGui::SeparatorText("Partial Floor / Ceiling Openings");
+    ImGui::TextWrapped(
+        "A floor or ceiling portal covers the entire XZ footprint of its sector. "
+        "To create an opening that covers only part of a floor — a grate in the "
+        "centre of a room, a window in a corner, a narrow slot — you subdivide "
+        "the space so that only the opening area is its own sector.");
+
+    ImGui::Spacing();
+    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.80f, 0.80f, 0.50f, 1.0f));
+    ImGui::TextUnformatted("  Example: a 10x10 room with a 2x2 grate in the centre.");
+    ImGui::PopStyleColor();
+
+    ImGui::Spacing();
+    Step(1, "Draw the four solid-floor sectors that surround the opening: a north "
+            "strip, south strip, east strip, and west strip.  Together they tile "
+            "the room floor, leaving a 2x2 gap in the centre untouched.");
+    Tip("Alternatively draw two L-shaped sectors that together frame the gap. "
+        "Any layout that leaves the opening's XZ footprint free will work.");
+    Step(2, "Draw a fifth sector whose XZ footprint exactly matches the opening "
+            "(the 2x2 gap).  Give it the same floor and ceiling heights as the "
+            "surrounding room.");
+    Step(3, "Portal-link the shared walls between the five sectors so the room is "
+            "fully connected (W key to split walls at junction points, then "
+            "Link Portal on each shared edge).");
+    Step(4, "Select the 2x2 opening sector.  In Properties > Floor / Ceiling "
+            "Portals, set the Floor portal ID to the sector below.");
+    Step(5, "Assign a grate or glass material to the floor of the opening sector.");
+    Tip("The surrounding four sectors have solid floors and are never connected "
+        "to the sector below.  Only the opening sector carries the portal, so "
+        "the player sees through only that 2x2 area.");
+    Tip("This same technique applies to ceiling openings: subdivide the ceiling "
+        "area, set a ceiling portal only on the sub-sector that represents the "
+        "opening, and portal-link the sub-sectors horizontally.");
+
+    // ── Combining both methods ─────────────────────────────────────────────
+    ImGui::Spacing();
+    ImGui::SeparatorText("Combining Both Methods");
+    ImGui::TextWrapped(
+        "Wall-based SoS and floor/ceiling portal SoS can be combined freely.  "
+        "A typical multi-storey building will use wall portals to connect rooms "
+        "on the same floor, a staircase (Sector Chain mode in the Staircase "
+        "Generator) to connect floors via wall portals, and a floor portal on "
+        "the mezzanine to let the player look down into the ground floor.  "
+        "There is no limit on the number of levels or the depth of vertical portal "
+        "chains — each floor simply carries its own portal link to the floor "
+        "above or below it.");
+
+    // ── Tips & gotchas ────────────────────────────────────────────────────
+    ImGui::Spacing();
+    ImGui::SeparatorText("Tips & Gotchas");
+    Bullet("Map Doctor will flag two sectors as overlapping if their XZ polygons "
+           "intersect at the SAME height range.  Stacked sectors at different Y "
+           "ranges (e.g. floor=0/ceil=3 and floor=3/ceil=6) do NOT trigger this "
+           "warning — they are valid SoS geometry.");
+    Bullet("The Floor Layers panel (Window > Floor Layers) is essential when "
+           "editing stacked maps.  Set the Edit Height slider to the midpoint of "
+           "the floor you are working on; sectors on other floors dim to 20%% so "
+           "you can click and edit without accidentally selecting the wrong level.");
+    Bullet("Sector index numbers change if you add or remove sectors earlier in "
+           "the list.  After structural edits, verify that floor/ceiling portal "
+           "IDs in Properties still point to the intended sectors.");
+    Bullet("A floor portal set to an invalid or -1 ID simply renders a solid "
+           "floor with no portal connection.  Set the ID to -1 to close a portal "
+           "you no longer need.");
+    Bullet("When the camera is exactly on the boundary between two stacked sectors "
+           "(Y = their shared height), the camera sector detection falls back to the "
+           "first XZ match, which may produce a one-frame flicker.  Keep the player "
+           "spawn and camera well inside a sector's Y range to avoid this.");
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

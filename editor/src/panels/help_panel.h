@@ -27,6 +27,7 @@ private:
     void drawTools();
     void drawSectorsWalls();
     void drawAdvancedGeometry();
+    void drawSectorOverSector();
     void drawDetailGeometry();
     void drawEntities();
     void drawLights();
