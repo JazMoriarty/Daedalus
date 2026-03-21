@@ -957,15 +957,25 @@ void PropertyInspector::draw(EditMapDocument&      doc,
                     }
                 }
 
-                // ── Subdivisions ─────────────────────────────────────────────────────
+                // ── Subdivisions (live-update for real-time 3D feedback) ──────────────
                 int subdivs = static_cast<int>(wall.curveSubdivisions);
+                static int s_origSubdivs = 12;
                 ImGui::SetNextItemWidth(-1.0f);
-                if (dragIntUndo("##curvesub", &subdivs, 0.5f, 4, 64, "Subdivisions: %d") &&
-                    static_cast<uint32_t>(subdivs) != wall.curveSubdivisions)
+                const bool subdivCommitted = dragIntUndo("##curvesub", &subdivs, 0.5f, 4, 64, "Subdivisions: %d");
+                if (ImGui::IsItemActivated())
+                    s_origSubdivs = static_cast<int>(wall.curveSubdivisions);
+                if (ImGui::IsItemActive() || ImGui::IsItemEdited())
                 {
+                    wall.curveSubdivisions = static_cast<uint32_t>(std::clamp(subdivs, 4, 64));
+                    doc.markDirty();
+                }
+                if (subdivCommitted && subdivs != s_origSubdivs)
+                {
+                    const uint32_t finalSubdivs = wall.curveSubdivisions;
+                    // Restore original so CmdSetWallCurve captures the correct old value.
+                    wall.curveSubdivisions = static_cast<uint32_t>(s_origSubdivs);
                     doc.pushCommand(std::make_unique<CmdSetWallCurve>(
-                        doc, sid, wi, wall.curveControlA, wall.curveControlB,
-                        static_cast<uint32_t>(subdivs)));
+                        doc, sid, wi, wall.curveControlA, wall.curveControlB, finalSubdivs));
                 }
             }
         }
