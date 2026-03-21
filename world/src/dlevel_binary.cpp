@@ -200,7 +200,7 @@ namespace
 {
 
 constexpr u32 k_MAGIC   = 0x4C564C44u;  // 'D','L','V','L' as little-endian u32
-constexpr u32 k_VERSION = 7u;  // v7: added fogScattering, fogNear, fogFar to render settings
+constexpr u32 k_VERSION = 8u;  // v8: Phase 1F — curved walls, slopes, portals, detail brushes, heightfields
 
 // ─── Write helpers ────────────────────────────────────────────────────────────
 
@@ -312,9 +312,10 @@ std::expected<void, DlevelError> saveDlevel(const LevelPackData&         pack,
     w.writeVec3(pack.map.globalAmbientColor);
     w.write(pack.map.globalAmbientIntensity);
 
-    // ── Sectors (identical layout to .dmap v1) ──────────────────────────────
+    // ── Sectors ─────────────────────────────────────────────────────────────
     for (const Sector& sec : pack.map.sectors)
     {
+        // ─ Existing header (unchanged, matches v1-v7) ─────────────────────
         w.write(static_cast<u32>(sec.walls.size()));
         w.write(static_cast<u32>(sec.flags));
         w.write(sec.floorHeight);
@@ -326,6 +327,7 @@ std::expected<void, DlevelError> saveDlevel(const LevelPackData&         pack,
 
         for (const Wall& wall : sec.walls)
         {
+            // ─ Existing wall fields (unchanged) ─────────────────────────
             w.writeVec2(wall.p0);
             w.write(static_cast<u32>(wall.flags));
             w.write(wall.portalSectorId);
@@ -335,6 +337,92 @@ std::expected<void, DlevelError> saveDlevel(const LevelPackData&         pack,
             w.writeVec2(wall.uvOffset);
             w.writeVec2(wall.uvScale);
             w.write(wall.uvRotation);
+        }
+
+        // ─ Phase 1F sector extension (v8+) ───────────────────────────────
+        w.write(static_cast<u32>(sec.floorShape));
+        w.write(sec.floorPortalSectorId);
+        w.write(sec.ceilPortalSectorId);
+        w.writeUUID(sec.floorPortalMaterialId);
+        w.writeUUID(sec.ceilPortalMaterialId);
+
+        // Stair profile (optional)
+        const u32 hasStair = sec.stairProfile.has_value() ? 1u : 0u;
+        w.write(hasStair);
+        if (hasStair)
+        {
+            w.write(sec.stairProfile->stepCount);
+            w.write(sec.stairProfile->riserHeight);
+            w.write(sec.stairProfile->treadDepth);
+            w.write(sec.stairProfile->directionAngle);
+        }
+
+        // Heightfield (optional)
+        const u32 hasHF = (sec.heightfield.has_value() &&
+                           !sec.heightfield->samples.empty()) ? 1u : 0u;
+        w.write(hasHF);
+        if (hasHF)
+        {
+            const HeightfieldFloor& hf = *sec.heightfield;
+            w.write(hf.gridWidth);
+            w.write(hf.gridDepth);
+            w.writeVec2(hf.worldMin);
+            w.writeVec2(hf.worldMax);
+            const u32 sampleCount = hf.gridWidth * hf.gridDepth;
+            w.write(sampleCount);
+            for (u32 s = 0; s < sampleCount && s < static_cast<u32>(hf.samples.size()); ++s)
+                w.write(hf.samples[s]);
+        }
+
+        // Detail brushes
+        w.write(static_cast<u32>(sec.details.size()));
+        for (const DetailBrush& db : sec.details)
+        {
+            // mat4 transform (16 floats, column-major)
+            for (int col = 0; col < 4; ++col)
+                for (int row = 0; row < 4; ++row)
+                    w.write(db.transform[col][row]);
+            w.write(static_cast<u32>(db.type));
+            // DetailBrushGeomParams (all fields, type-specific ones defaulted)
+            w.write(db.geom.halfExtents.x); w.write(db.geom.halfExtents.y); w.write(db.geom.halfExtents.z);
+            w.write(db.geom.slopeAxis);
+            w.write(db.geom.radius);
+            w.write(db.geom.height);
+            w.write(db.geom.segmentCount);
+            w.write(db.geom.spanWidth);
+            w.write(db.geom.archHeight);
+            w.write(db.geom.thickness);
+            w.write(static_cast<u32>(db.geom.archProfile));
+            w.write(db.geom.archSegments);
+            w.writeUUID(db.geom.meshAssetId);
+            w.writeUUID(db.materialId);
+            w.write(static_cast<u32>(db.collidable   ? 1u : 0u));
+            w.write(static_cast<u32>(db.castsShadow  ? 1u : 0u));
+        }
+
+        // Phase 1F per-wall extension (one block per wall, in wall order)
+        for (const Wall& wall : sec.walls)
+        {
+            // Floor height override
+            const u32 hasFloorOvr = wall.floorHeightOverride.has_value() ? 1u : 0u;
+            w.write(hasFloorOvr);
+            w.write(wall.floorHeightOverride.value_or(0.0f));
+            // Ceiling height override
+            const u32 hasCeilOvr = wall.ceilHeightOverride.has_value() ? 1u : 0u;
+            w.write(hasCeilOvr);
+            w.write(wall.ceilHeightOverride.value_or(0.0f));
+            // Bezier curve control point A
+            const u32 hasCurveA = wall.curveControlA.has_value() ? 1u : 0u;
+            w.write(hasCurveA);
+            w.writeVec2(wall.curveControlA.value_or(glm::vec2{0.0f, 0.0f}));
+            // Bezier curve control point B
+            const u32 hasCurveB = wall.curveControlB.has_value() ? 1u : 0u;
+            w.write(hasCurveB);
+            w.writeVec2(wall.curveControlB.value_or(glm::vec2{0.0f, 0.0f}));
+            // Subdivisions
+            w.write(wall.curveSubdivisions);
+            // Back material (portal back face)
+            w.writeUUID(wall.backMaterialId);
         }
     }
 
@@ -550,8 +638,8 @@ std::expected<LevelPackData, DlevelError> loadDlevel(const std::filesystem::path
         return std::unexpected(DlevelError::ParseError);
     }
     if (magic != k_MAGIC) { return std::unexpected(DlevelError::ParseError); }
-    // Accept v5, v6, and v7
-    if (version != 5u && version != 6u && version != 7u) { return std::unexpected(DlevelError::VersionMismatch); }
+    // Accept v5 through v8.
+    if (version < 5u || version > 8u) { return std::unexpected(DlevelError::VersionMismatch); }
 
     u32 entityCount = 0;
     if (!r.read(entityCount)) { return std::unexpected(DlevelError::ParseError); }
@@ -600,6 +688,111 @@ std::expected<LevelPackData, DlevelError> loadDlevel(const std::filesystem::path
             if (!r.readVec2(wall.uvOffset) || !r.readVec2(wall.uvScale) ||
                 !r.read(wall.uvRotation))
                 return std::unexpected(DlevelError::ParseError);
+        }
+
+        // ─ Phase 1F sector extension (v8+; defaults applied for older versions) ─
+        if (version >= 8u)
+        {
+            u32 floorShapeRaw = 0;
+            if (!r.read(floorShapeRaw)) return std::unexpected(DlevelError::ParseError);
+            sec.floorShape = static_cast<FloorShape>(floorShapeRaw);
+
+            if (!r.read(sec.floorPortalSectorId) || !r.read(sec.ceilPortalSectorId))
+                return std::unexpected(DlevelError::ParseError);
+            if (!r.readUUID(sec.floorPortalMaterialId) ||
+                !r.readUUID(sec.ceilPortalMaterialId))
+                return std::unexpected(DlevelError::ParseError);
+
+            // Stair profile
+            u32 hasStair = 0;
+            if (!r.read(hasStair)) return std::unexpected(DlevelError::ParseError);
+            if (hasStair)
+            {
+                StairProfile sp;
+                if (!r.read(sp.stepCount)      || !r.read(sp.riserHeight) ||
+                    !r.read(sp.treadDepth)      || !r.read(sp.directionAngle))
+                    return std::unexpected(DlevelError::ParseError);
+                sec.stairProfile = sp;
+            }
+
+            // Heightfield
+            u32 hasHF = 0;
+            if (!r.read(hasHF)) return std::unexpected(DlevelError::ParseError);
+            if (hasHF)
+            {
+                HeightfieldFloor hf;
+                u32 sampleCount = 0;
+                if (!r.read(hf.gridWidth) || !r.read(hf.gridDepth))
+                    return std::unexpected(DlevelError::ParseError);
+                if (!r.readVec2(hf.worldMin) || !r.readVec2(hf.worldMax))
+                    return std::unexpected(DlevelError::ParseError);
+                if (!r.read(sampleCount)) return std::unexpected(DlevelError::ParseError);
+                hf.samples.resize(sampleCount);
+                for (u32 s = 0; s < sampleCount; ++s)
+                    if (!r.read(hf.samples[s])) return std::unexpected(DlevelError::ParseError);
+                sec.heightfield = std::move(hf);
+            }
+
+            // Detail brushes
+            u32 detailCount = 0;
+            if (!r.read(detailCount)) return std::unexpected(DlevelError::ParseError);
+            sec.details.resize(detailCount);
+            for (u32 di = 0; di < detailCount; ++di)
+            {
+                DetailBrush& db = sec.details[di];
+                // mat4 transform
+                for (int col = 0; col < 4; ++col)
+                    for (int row = 0; row < 4; ++row)
+                        if (!r.read(db.transform[col][row]))
+                            return std::unexpected(DlevelError::ParseError);
+                u32 typeRaw = 0;
+                if (!r.read(typeRaw)) return std::unexpected(DlevelError::ParseError);
+                db.type = static_cast<DetailBrushType>(typeRaw);
+                // DetailBrushGeomParams
+                if (!r.read(db.geom.halfExtents.x) || !r.read(db.geom.halfExtents.y) ||
+                    !r.read(db.geom.halfExtents.z)  || !r.read(db.geom.slopeAxis))
+                    return std::unexpected(DlevelError::ParseError);
+                if (!r.read(db.geom.radius)       || !r.read(db.geom.height)       ||
+                    !r.read(db.geom.segmentCount)  || !r.read(db.geom.spanWidth))
+                    return std::unexpected(DlevelError::ParseError);
+                if (!r.read(db.geom.archHeight)   || !r.read(db.geom.thickness))
+                    return std::unexpected(DlevelError::ParseError);
+                u32 archProfileRaw = 0;
+                if (!r.read(archProfileRaw) || !r.read(db.geom.archSegments))
+                    return std::unexpected(DlevelError::ParseError);
+                db.geom.archProfile = static_cast<ArchProfile>(archProfileRaw);
+                if (!r.readUUID(db.geom.meshAssetId))
+                    return std::unexpected(DlevelError::ParseError);
+                if (!r.readUUID(db.materialId)) return std::unexpected(DlevelError::ParseError);
+                u32 collidableRaw = 0, shadowRaw = 0;
+                if (!r.read(collidableRaw) || !r.read(shadowRaw))
+                    return std::unexpected(DlevelError::ParseError);
+                db.collidable  = (collidableRaw != 0u);
+                db.castsShadow = (shadowRaw     != 0u);
+            }
+
+            // Phase 1F per-wall extension
+            for (u32 wi = 0; wi < wallCount; ++wi)
+            {
+                Wall& wall = sec.walls[wi];
+                u32 hasFloorOvr = 0, hasCeilOvr = 0, hasCurveA = 0, hasCurveB = 0;
+                float floorOvrVal = 0.0f, ceilOvrVal = 0.0f;
+                glm::vec2 curveA{}, curveB{};
+                u32 curveSubdivs = 12u;
+
+                if (!r.read(hasFloorOvr) || !r.read(floorOvrVal)) return std::unexpected(DlevelError::ParseError);
+                if (!r.read(hasCeilOvr)  || !r.read(ceilOvrVal))  return std::unexpected(DlevelError::ParseError);
+                if (!r.read(hasCurveA)   || !r.readVec2(curveA))  return std::unexpected(DlevelError::ParseError);
+                if (!r.read(hasCurveB)   || !r.readVec2(curveB))  return std::unexpected(DlevelError::ParseError);
+                if (!r.read(curveSubdivs))                         return std::unexpected(DlevelError::ParseError);
+                if (!r.readUUID(wall.backMaterialId))               return std::unexpected(DlevelError::ParseError);
+
+                if (hasFloorOvr) wall.floorHeightOverride = floorOvrVal;
+                if (hasCeilOvr)  wall.ceilHeightOverride  = ceilOvrVal;
+                if (hasCurveA)   wall.curveControlA       = curveA;
+                if (hasCurveB)   wall.curveControlB       = curveB;
+                wall.curveSubdivisions = curveSubdivs;
+            }
         }
     }
 

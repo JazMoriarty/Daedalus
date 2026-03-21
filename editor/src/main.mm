@@ -914,15 +914,26 @@ int main(int /*argc*/, char* /*argv*/[])
                                     uuids.insert(sector.floorMaterialId);
                                 if (sector.ceilMaterialId.isValid())
                                     uuids.insert(sector.ceilMaterialId);
-                                for (const auto& wall : sector.walls)
-                                {
-                                    if (wall.frontMaterialId.isValid())
-                                        uuids.insert(wall.frontMaterialId);
-                                    if (wall.upperMaterialId.isValid())
-                                        uuids.insert(wall.upperMaterialId);
-                                    if (wall.lowerMaterialId.isValid())
-                                        uuids.insert(wall.lowerMaterialId);
-                                }
+                        for (const auto& wall : sector.walls)
+                            {
+                                if (wall.frontMaterialId.isValid())
+                                    uuids.insert(wall.frontMaterialId);
+                                if (wall.upperMaterialId.isValid())
+                                    uuids.insert(wall.upperMaterialId);
+                                if (wall.lowerMaterialId.isValid())
+                                    uuids.insert(wall.lowerMaterialId);
+                                if (wall.backMaterialId.isValid())
+                                    uuids.insert(wall.backMaterialId);
+                            }
+                        // Phase 1F: floor/ceiling portal surface materials
+                        if (sector.floorPortalMaterialId.isValid())
+                            uuids.insert(sector.floorPortalMaterialId);
+                        if (sector.ceilPortalMaterialId.isValid())
+                            uuids.insert(sector.ceilPortalMaterialId);
+                        // Phase 1F: detail brush materials
+                        for (const auto& db : sector.details)
+                            if (db.materialId.isValid())
+                                uuids.insert(db.materialId);
                             }
 
                             // ── Build LevelPackData ───────────────────────────────
