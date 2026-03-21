@@ -265,51 +265,121 @@ void PropertyInspector::draw(EditMapDocument&      doc,
                     doc, sid, sector.ambientColor, intensity));
         }
 
-        // ── Materials ────────────────────────────────────────────────────────────────────
-        ImGui::Spacing();
-        ImGui::SeparatorText("Materials");
+        // ── Floor surface ────────────────────────────────────────────────────────────────────────────────
+        // ── Ceiling surface ──────────────────────────────────────────────────────────────────────────
+        // Full Floor and Ceiling sub-panels (material + UV mapping + action buttons).
+        // Identical to clicking the surface in the 3D viewport but both surfaces
+        // are accessible in one place when the sector is selected from the 2D view.
+        // Statics capture the pre-drag state for undo (same pattern as wall/surface UV).
+        static glm::vec2 s_secFloorUvOff{}, s_secFloorUvSc{};
+        static float     s_secFloorUvRot = 0.0f;
+        static glm::vec2 s_secCeilUvOff{},  s_secCeilUvSc{};
+        static float     s_secCeilUvRot  = 0.0f;
+
+        auto drawSectorSurface = [&](const char* header,
+                                     SectorSurface surf,
+                                     daedalus::UUID& matId,
+                                     glm::vec2& uvOff, glm::vec2& uvSc, float& uvRot,
+                                     glm::vec2& origOff, glm::vec2& origSc, float& origRot)
         {
-            // Shared helper: thumbnail preview + Browse + clear row for a sector material.
-            auto editSectorMat = [&](const char* label, const daedalus::UUID& current,
-                                     SectorSurface surface)
+            if (!ImGui::CollapsingHeader(header)) return;
+            ImGui::PushID(header);
+
+            // Material row.
             {
-                ImGui::PushID(label);
-                // Thumbnail (32x32).
-                rhi::ITexture* thumb = current.isValid()
-                    ? catalog.getOrLoadThumbnail(current, device) : nullptr;
-                if (thumb)
-                    ImGui::Image(reinterpret_cast<ImTextureID>(thumb->nativeHandle()), ImVec2(32, 32));
-                else
-                    ImGui::Dummy(ImVec2(32, 32));
+                rhi::ITexture* thumb = matId.isValid()
+                    ? catalog.getOrLoadThumbnail(matId, device) : nullptr;
+                if (thumb) ImGui::Image(reinterpret_cast<ImTextureID>(thumb->nativeHandle()), ImVec2(32, 32));
+                else       ImGui::Dummy(ImVec2(32, 32));
                 ImGui::SameLine();
                 ImGui::BeginGroup();
-                ImGui::TextUnformatted(label);
-                if (current.isValid())
-                {
-                    const MaterialEntry* entry = catalog.find(current);
-                    ImGui::TextDisabled("%s", entry ? entry->displayName.c_str() : "(unknown)");
-                }
-                else
-                    ImGui::TextDisabled("(none)");
-                if (ImGui::SmallButton("Browse##sm"))
-                {
-                    const daedalus::UUID capId = current;
-                    const char* surfLbl = (surface == SectorSurface::Floor) ? "Floor" : "Ceiling";
-                    assetBrowser.openPicker([&doc, sid, surface, capId](const UUID& uuid) {
-                        (void)capId;
-                        doc.pushCommand(std::make_unique<CmdSetSectorMaterial>(doc, sid, surface, uuid));
-                    }, surfLbl);
+                if (matId.isValid()) {
+                    const MaterialEntry* e = catalog.find(matId);
+                    ImGui::TextDisabled("%s", e ? e->displayName.c_str() : "(unknown)");
+                } else ImGui::TextDisabled("(none)");
+                if (ImGui::SmallButton("Browse##secmat")) {
+                    const SectorSurface capSurf = surf;
+                    const char* lbl = (surf == SectorSurface::Floor) ? "Floor" : "Ceiling";
+                    assetBrowser.openPicker([&doc, sid, capSurf](const UUID& uuid) {
+                        doc.pushCommand(std::make_unique<CmdSetSectorMaterial>(doc, sid, capSurf, uuid));
+                    }, lbl);
                 }
                 ImGui::SameLine();
-                if (ImGui::SmallButton("X##sm") && current.isValid())
-                    doc.pushCommand(std::make_unique<CmdSetSectorMaterial>(doc, sid, surface, daedalus::UUID{}));
+                if (ImGui::SmallButton("X##secmat") && matId.isValid())
+                    doc.pushCommand(std::make_unique<CmdSetSectorMaterial>(doc, sid, surf, daedalus::UUID{}));
                 ImGui::EndGroup();
-                ImGui::PopID();
-            };
-            editSectorMat("Floor##sm",   sector.floorMaterialId, SectorSurface::Floor);
+            }
+
+            // UV mapping.
             ImGui::Spacing();
-            editSectorMat("Ceiling##sm", sector.ceilMaterialId,  SectorSurface::Ceil);
-        }
+            ImGui::TextDisabled("UV Mapping");
+            constexpr float kR2D = 180.0f / glm::pi<float>();
+            constexpr float kD2R = glm::pi<float>() / 180.0f;
+
+            ImGui::TextDisabled("Offset"); ImGui::SetNextItemWidth(-1.0f);
+            glm::vec2 offEdit = uvOff;
+            bool offC = dragFloat2Undo("##secuvoff", &offEdit.x, 0.01f, 0.0f, 0.0f, "%.3f");
+            if (ImGui::IsItemActivated())            origOff = uvOff;
+            if (ImGui::IsItemActive() || ImGui::IsItemEdited()) { uvOff = offEdit; doc.markDirty(); }
+            if (offC) { const glm::vec2 fo = uvOff; uvOff = origOff;
+                doc.pushCommand(std::make_unique<CmdSetSectorSurfaceUV>(doc, sid, surf, fo, uvSc, uvRot)); }
+
+            ImGui::TextDisabled("Scale"); ImGui::SetNextItemWidth(-1.0f);
+            glm::vec2 scEdit = uvSc;
+            bool scC = dragFloat2Undo("##secuvsc", &scEdit.x, 0.01f, 0.0f, 0.0f, "%.3f");
+            if (ImGui::IsItemActivated())            origSc = uvSc;
+            if (ImGui::IsItemActive() || ImGui::IsItemEdited()) { uvSc = scEdit; doc.markDirty(); }
+            if (scC) { const glm::vec2 fs = uvSc; uvSc = origSc;
+                doc.pushCommand(std::make_unique<CmdSetSectorSurfaceUV>(doc, sid, surf, uvOff, fs, uvRot)); }
+
+            float rotDeg = uvRot * kR2D; ImGui::SetNextItemWidth(-1.0f);
+            bool rotC = dragFloatUndo("##secuvrot", &rotDeg, 0.5f, 0.0f, 0.0f, "Rotation: %.1f\xc2\xb0");
+            if (ImGui::IsItemActivated())            origRot = uvRot;
+            if (ImGui::IsItemActive() || ImGui::IsItemEdited()) { uvRot = rotDeg * kD2R; doc.markDirty(); }
+            if (rotC) { const float fr = uvRot; uvRot = origRot;
+                doc.pushCommand(std::make_unique<CmdSetSectorSurfaceUV>(doc, sid, surf, uvOff, uvSc, fr)); }
+
+            // UV buttons.
+            ImGui::Spacing();
+            { const MaterialEntry* pp = catalog.find(matId);
+              const bool hd = pp && pp->texWidth > 0 && pp->texHeight > 0;
+              if (!hd) ImGui::BeginDisabled();
+              if (ImGui::SmallButton("Pixel Perfect##spp") && hd)
+                  doc.pushCommand(std::make_unique<CmdSetSectorSurfaceUV>(
+                      doc, sid, surf, uvOff,
+                      computePixelPerfectUVScale(pp->texWidth, pp->texHeight), uvRot));
+              if (!hd) ImGui::EndDisabled(); }
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Fit Surface##sfit")) {
+                float minX= 1e9f, maxX=-1e9f, minZ= 1e9f, maxZ=-1e9f;
+                for (const auto& w : sector.walls) {
+                    minX=std::min(minX,w.p0.x); maxX=std::max(maxX,w.p0.x);
+                    minZ=std::min(minZ,w.p0.y); maxZ=std::max(maxZ,w.p0.y); }
+                doc.pushCommand(std::make_unique<CmdSetSectorSurfaceUV>(
+                    doc, sid, surf, glm::vec2{0,0},
+                    glm::vec2{maxX>minX?maxX-minX:1.f, maxZ>minZ?maxZ-minZ:1.f}, 0.f)); }
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Square##ssq"))
+                doc.pushCommand(std::make_unique<CmdSetSectorSurfaceUV>(
+                    doc, sid, surf, uvOff, glm::vec2{uvSc.x, uvSc.x}, uvRot));
+            { const MaterialEntry* de = catalog.find(matId);
+              if (de && de->texWidth > 0 && de->texHeight > 0)
+                  ImGui::TextDisabled("%.0f px/u  %.0f px/v",
+                      static_cast<float>(de->texWidth)  / std::max(uvSc.x, 1e-6f),
+                      static_cast<float>(de->texHeight) / std::max(uvSc.y, 1e-6f)); }
+
+            ImGui::PopID();
+        };
+
+        ImGui::Spacing();
+        drawSectorSurface("Floor",   SectorSurface::Floor,
+                          sector.floorMaterialId,
+                          sector.floorUvOffset, sector.floorUvScale, sector.floorUvRotation,
+                          s_secFloorUvOff, s_secFloorUvSc, s_secFloorUvRot);
+        drawSectorSurface("Ceiling", SectorSurface::Ceil,
+                          sector.ceilMaterialId,
+                          sector.ceilUvOffset,  sector.ceilUvScale,  sector.ceilUvRotation,
+                          s_secCeilUvOff, s_secCeilUvSc, s_secCeilUvRot);
 
         // ── Floor Shape
         ImGui::Spacing();
@@ -483,39 +553,176 @@ void PropertyInspector::draw(EditMapDocument&      doc,
                         sector.ceilPortalSectorId);
         }
 
-        // ── Wall list ──────────────────────────────────────────────────────────────
+        // ── Wall list ────────────────────────────────────────────────────────
+        // Each wall expands to UV, materials, flags, and portal — the same controls
+        // available when clicking the wall in the 3D viewport, presented inline so
+        // the designer never has to leave the sector view.
         ImGui::Spacing();
         ImGui::SeparatorText("Walls");
 
-        for (std::size_t wi = 0; wi < sector.walls.size(); ++wi)
+        // Statics for wall list UV pre-drag state (ImGui single-active-item model
+        // ensures only one drag is in flight at a time, so these are safely shared
+        // across all wall rows).
+        static glm::vec2 s_wlUvOff{}, s_wlUvSc{};
+        static float     s_wlUvRot = 0.0f;
+
+        const std::size_t wn = sector.walls.size();
+        for (std::size_t wi = 0; wi < wn; ++wi)
         {
-            const world::Wall& wall = sector.walls[wi];
+            world::Wall& wl = sector.walls[wi];
+            const glm::vec2 wP0 = wl.p0;
+            const glm::vec2 wP1 = sector.walls[(wi + 1) % wn].p0;
             ImGui::PushID(static_cast<int>(wi));
 
-            if (ImGui::TreeNode("Wall", "Wall %zu  (%.1f, %.1f)",
-                                wi, wall.p0.x, wall.p0.y))
+            const bool wallOpen = ImGui::TreeNode("Wall", "Wall %zu  (%.1f, %.1f)",
+                                                  wi, wP0.x, wP0.y);
+            if (wallOpen)
             {
-                auto toggleWF = [&](const char* lbl, world::WallFlags bit)
+                const float wLen = glm::length(wP1 - wP0);
+                const float wHt  = sector.ceilHeight - sector.floorHeight;
+                constexpr float kR2D2 = 180.0f / glm::pi<float>();
+                constexpr float kD2R2 = glm::pi<float>() / 180.0f;
+
+                // ── UV Mapping ───────────────────────────────────────────────────
+                if (ImGui::CollapsingHeader("UV Mapping##wl"))
                 {
-                    bool v = hasFlag(wall.flags, bit);
-                    if (ImGui::Checkbox(lbl, &v))
+                    ImGui::TextDisabled("Offset"); ImGui::SetNextItemWidth(-1.0f);
+                    glm::vec2 oe = wl.uvOffset;
+                    bool oC = dragFloat2Undo("##wluvoff", &oe.x, 0.01f, 0, 0, "%.3f");
+                    if (ImGui::IsItemActivated())            s_wlUvOff = wl.uvOffset;
+                    if (ImGui::IsItemActive()||ImGui::IsItemEdited()) { wl.uvOffset=oe; doc.markDirty(); }
+                    if (oC) { const glm::vec2 f=wl.uvOffset; wl.uvOffset=s_wlUvOff;
+                        doc.pushCommand(std::make_unique<CmdSetWallUV>(doc,sid,wi,f,wl.uvScale,wl.uvRotation)); }
+
+                    ImGui::TextDisabled("Scale"); ImGui::SetNextItemWidth(-1.0f);
+                    glm::vec2 se = wl.uvScale;
+                    bool sC = dragFloat2Undo("##wluvsc", &se.x, 0.01f, 0, 0, "%.3f");
+                    if (ImGui::IsItemActivated())            s_wlUvSc = wl.uvScale;
+                    if (ImGui::IsItemActive()||ImGui::IsItemEdited()) { wl.uvScale=se; doc.markDirty(); }
+                    if (sC) { const glm::vec2 f=wl.uvScale; wl.uvScale=s_wlUvSc;
+                        doc.pushCommand(std::make_unique<CmdSetWallUV>(doc,sid,wi,wl.uvOffset,f,wl.uvRotation)); }
+
+                    float rd = wl.uvRotation * kR2D2; ImGui::SetNextItemWidth(-1.0f);
+                    bool rC = dragFloatUndo("##wluvrot", &rd, 0.5f, 0, 0, "Rotation: %.1f\xc2\xb0");
+                    if (ImGui::IsItemActivated())            s_wlUvRot = wl.uvRotation;
+                    if (ImGui::IsItemActive()||ImGui::IsItemEdited()) { wl.uvRotation=rd*kD2R2; doc.markDirty(); }
+                    if (rC) { const float f=wl.uvRotation; wl.uvRotation=s_wlUvRot;
+                        doc.pushCommand(std::make_unique<CmdSetWallUV>(doc,sid,wi,wl.uvOffset,wl.uvScale,f)); }
+
+                    ImGui::Spacing();
+                    { const MaterialEntry* pp = catalog.find(wl.frontMaterialId);
+                      const bool hd = pp && pp->texWidth > 0 && pp->texHeight > 0;
+                      if (!hd) ImGui::BeginDisabled();
+                      if (ImGui::SmallButton("Pixel Perfect##wlpp") && hd)
+                          doc.pushCommand(std::make_unique<CmdSetWallUV>(doc,sid,wi,wl.uvOffset,
+                              computePixelPerfectUVScale(pp->texWidth,pp->texHeight),wl.uvRotation));
+                      if (!hd) ImGui::EndDisabled(); }
+                    ImGui::SameLine();
+                    if (ImGui::SmallButton("Fit Wall##wlfw"))
+                        doc.pushCommand(std::make_unique<CmdSetWallUV>(doc,sid,wi,
+                            glm::vec2{0,0}, glm::vec2{wLen,wHt}, 0.f));
+                    ImGui::SameLine();
+                    if (ImGui::SmallButton("Square##wlsq"))
+                        doc.pushCommand(std::make_unique<CmdSetWallUV>(doc,sid,wi,
+                            wl.uvOffset, glm::vec2{wl.uvScale.x,wl.uvScale.x}, wl.uvRotation));
+                    { const MaterialEntry* de = catalog.find(wl.frontMaterialId);
+                      if (de && de->texWidth > 0 && de->texHeight > 0)
+                          ImGui::TextDisabled("%.0f px/u  %.0f px/v",
+                              (float)de->texWidth /std::max(wl.uvScale.x,1e-6f),
+                              (float)de->texHeight/std::max(wl.uvScale.y,1e-6f)); }
+                }
+
+                // ── Materials ───────────────────────────────────────────────────
+                if (ImGui::CollapsingHeader("Materials##wl"))
+                {
+                    auto editWM = [&](const char* lbl, const daedalus::UUID& cur, WallSurface ws)
                     {
-                        const world::WallFlags nf = v
-                            ? (wall.flags | bit)
-                            : static_cast<world::WallFlags>(
-                                  static_cast<unsigned>(wall.flags) &
-                                  ~static_cast<unsigned>(bit));
-                        doc.pushCommand(std::make_unique<CmdSetWallFlags>(
-                            doc, sid, wi, nf));
+                        ImGui::PushID(lbl);
+                        rhi::ITexture* th = cur.isValid()
+                            ? catalog.getOrLoadThumbnail(cur, device) : nullptr;
+                        if (th) ImGui::Image(reinterpret_cast<ImTextureID>(th->nativeHandle()), ImVec2(24,24));
+                        else    ImGui::Dummy(ImVec2(24,24));
+                        ImGui::SameLine();
+                        ImGui::BeginGroup();
+                        ImGui::TextUnformatted(lbl);
+                        if (cur.isValid()) {
+                            const MaterialEntry* e = catalog.find(cur);
+                            ImGui::TextDisabled("%s", e ? e->displayName.c_str() : "(unknown)");
+                        } else ImGui::TextDisabled("(none)");
+                        if (ImGui::SmallButton("Browse##wm"))
+                            assetBrowser.openPicker([&doc,&catalog,sid,wi,ws](const UUID& u){
+                                const auto& sec=doc.mapData().sectors;
+                                if(sid>=sec.size()||wi>=sec[sid].walls.size()) return;
+                                const auto& w2=sec[sid].walls[wi];
+                                const glm::vec2 pp0=w2.p0, pp1=sec[sid].walls[(wi+1)%sec[sid].walls.size()].p0;
+                                glm::vec2 ns{glm::length(pp1-pp0), sec[sid].ceilHeight-sec[sid].floorHeight};
+                                const MaterialEntry* me=catalog.find(u);
+                                if(me&&me->texWidth>0) ns=computePixelPerfectUVScale(me->texWidth,me->texHeight);
+                                std::vector<std::unique_ptr<ICommand>> st;
+                                st.push_back(std::make_unique<CmdSetWallMaterial>(doc,sid,wi,ws,u));
+                                st.push_back(std::make_unique<CmdSetWallUV>(doc,sid,wi,glm::vec2{0,0},ns,0.f));
+                                doc.pushCommand(std::make_unique<CompoundCommand>("Apply Wall Material",std::move(st)));
+                            }, lbl);
+                        ImGui::SameLine();
+                        if (ImGui::SmallButton("X##wm") && cur.isValid())
+                            doc.pushCommand(std::make_unique<CmdSetWallMaterial>(doc,sid,wi,ws,daedalus::UUID{}));
+                        ImGui::EndGroup();
+                        ImGui::PopID();
+                    };
+                    editWM("Front##wl", wl.frontMaterialId, WallSurface::Front);
+                    ImGui::Spacing();
+                    editWM("Upper##wl", wl.upperMaterialId, WallSurface::Upper);
+                    ImGui::Spacing();
+                    editWM("Lower##wl", wl.lowerMaterialId, WallSurface::Lower);
+                    ImGui::Spacing();
+                    editWM("Back##wl",  wl.backMaterialId,  WallSurface::Back);
+                }
+
+                // ── Flags ────────────────────────────────────────────────────────────
+                if (ImGui::CollapsingHeader("Flags##wl"))
+                {
+                    auto tgWF = [&](const char* lbl, world::WallFlags bit) {
+                        bool v = hasFlag(wl.flags, bit);
+                        if (ImGui::Checkbox(lbl, &v))
+                            doc.pushCommand(std::make_unique<CmdSetWallFlags>(doc, sid, wi,
+                                v ? (wl.flags | bit)
+                                  : static_cast<world::WallFlags>(
+                                        static_cast<unsigned>(wl.flags) & ~static_cast<unsigned>(bit))));
+                    };
+                    tgWF("Blocking",    world::WallFlags::Blocking);
+                    tgWF("Two-sided",   world::WallFlags::TwoSided);
+                    tgWF("Climbable",   world::WallFlags::Climbable);
+                    tgWF("Trigger Zone",world::WallFlags::TriggerZone);
+                    tgWF("Invisible",   world::WallFlags::Invisible);
+                    tgWF("Mirror",      world::WallFlags::Mirror);
+                    tgWF("No Physics",  world::WallFlags::NoPhysics);
+                }
+
+                // ── Portal ──────────────────────────────────────────────────────────────
+                if (wl.portalSectorId == world::INVALID_SECTOR_ID)
+                {
+                    ImGui::TextDisabled("No portal.");
+                    if (ImGui::SmallButton("Link Portal##wl")) {
+                        const auto [mSid, mWi] = geometry::findMatchingWall(sid, wi, doc.mapData());
+                        if (mSid != world::INVALID_SECTOR_ID)
+                            doc.pushCommand(std::make_unique<CmdLinkPortal>(doc,sid,wi,mSid,mWi));
+                        else doc.log("Link Portal: no matching wall found.");
                     }
-                };
-                toggleWF("Blocking",    world::WallFlags::Blocking);
-                toggleWF("Two-sided",   world::WallFlags::TwoSided);
-                toggleWF("Climbable",   world::WallFlags::Climbable);
-                toggleWF("Trigger Zone",world::WallFlags::TriggerZone);
-                toggleWF("Invisible",   world::WallFlags::Invisible);
-                toggleWF("Mirror",      world::WallFlags::Mirror);
-                toggleWF("No Physics",  world::WallFlags::NoPhysics);
+                }
+                else
+                {
+                    ImGui::Text("\xe2\x86\x92 Sector %u", static_cast<unsigned>(wl.portalSectorId));
+                    if (ImGui::SmallButton("Unlink Portal##wl")) {
+                        const world::SectorId pSid = wl.portalSectorId;
+                        std::size_t pWi = 0; bool found = false;
+                        if (pSid < doc.mapData().sectors.size())
+                            for (std::size_t pw=0; pw<doc.mapData().sectors[pSid].walls.size(); ++pw)
+                                if (doc.mapData().sectors[pSid].walls[pw].portalSectorId==sid)
+                                    { pWi=pw; found=true; break; }
+                        doc.pushCommand(std::make_unique<CmdUnlinkPortal>(
+                            doc, sid, wi, found?pSid:world::INVALID_SECTOR_ID, pWi));
+                    }
+                }
 
                 ImGui::TreePop();
             }

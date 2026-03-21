@@ -2004,13 +2004,30 @@ void Viewport3D::draw(EditMapDocument&      doc,
                   sel2.items[0].type == SelectionType::Floor  ||
                   sel2.items[0].type == SelectionType::Ceil))
         {
-            const world::SectorId sid = sel2.items[0].sectorId;
+            const world::SectorId   sid     = sel2.items[0].sectorId;
+            const SelectionType     selType = sel2.items[0].type;
+            constexpr ImU32 kSelCol = IM_COL32(255, 200, 0, 220);
+
             if (sid < static_cast<world::SectorId>(sectors.size()))
             {
-                const float selY = (m_selectedSurface == HoveredSurface::Ceil)
-                    ? sectors[sid].ceilHeight
-                    : sectors[sid].floorHeight;
-                drawSectorOutline(sid, selY, IM_COL32(255, 200, 0, 220));
+                const world::Sector& selSec = sectors[sid];
+
+                if (selType == SelectionType::Sector)
+                {
+                    // Whole sector selected from the 2D viewport: outline every wall
+                    // at full height and draw both floor and ceiling polygons so the
+                    // designer can see the complete 3D bounding of the sector.
+                    for (std::size_t wi = 0; wi < selSec.walls.size(); ++wi)
+                        drawWallOutline(sid, wi,
+                                        selSec.floorHeight, selSec.ceilHeight,
+                                        0, kSelCol);
+                    drawSectorOutline(sid, selSec.floorHeight, kSelCol);
+                    drawSectorOutline(sid, selSec.ceilHeight,  kSelCol);
+                }
+                else if (selType == SelectionType::Floor)
+                    drawSectorOutline(sid, selSec.floorHeight, kSelCol);
+                else  // Ceil
+                    drawSectorOutline(sid, selSec.ceilHeight,  kSelCol);
             }
         }
         
