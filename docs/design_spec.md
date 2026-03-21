@@ -436,6 +436,85 @@ Assets are resolved UUID → GPU texture entirely from the pack; no filesystem p
 
 For distribution, all `.dlevel` files and shared compiled assets are bundled into a `.dpak` archive — a flat binary container analogous to Build's `.GRP` group file. DaedalusApp accepts either a standalone `.dlevel` path (development) or a `.dpak` path (distribution).
 
+### Advanced World Geometry Architecture
+
+> **Implementation status:** Phase 1F — planned. The current baseline (`Sector` with scalar `floorHeight`/`ceilHeight`, flat triangle-fan tessellation, straight walls only) is fully functional for simple rectilinear rooms. Phase 1F extends it to slopes, curves, Sector-Over-Sector stacking via vertical portals, detail brushes, and outdoor terrain. No renderer changes are required — the tessellator produces the same `StaticMeshVertex` interleaved geometry regardless of source complexity.
+
+#### Architecture: Two-Layer Geometry Model
+
+Daedalus uses a strict two-layer geometry model.
+
+**Layer 1 — Sector geometry** (current): floors, ceilings, walls, and portals. Defines all navigable space. Every element participates in portal visibility culling, physics collision, and pathfinding. Stored in `WorldMapData::sectors`. The portal traversal algorithm operates exclusively on Layer 1 topology and sector adjacency.
+
+**Layer 2 — Detail geometry** (Phase 1F): static mesh shapes placed within sectors for architectural decoration and infill. Does not define portals or navigable space. Automatically culled for free by the parent sector's portal window — no extra visibility work. Optionally participates in shadow casting and physics collision. Compiled into the sector's tagged GPU mesh batch at level-compile time with zero runtime overhead. Stored per-sector as `Sector::details`.
+
+**Key invariant:** the portal graph never needs to know about slopes, curves, heightfields, or detail brushes. Those are entirely the tessellator's domain. The portal system only ever queries sector topology — which walls are portals and which sectors they connect.
+
+#### Known Baseline Limitations (Must Fix First)
+
+Two documented limitations in `sector_tessellator.cpp` are prerequisites for all other Phase 1F geometry work:
+
+- **Concave polygons [CRITICAL]**: the current triangle-fan from vertex 0 only produces correct results for convex sectors. Concave sectors generate visually incorrect output (this is documented inside the file). Fix: replace with ear-clipping triangulation. This is a hard prerequisite for everything else.
+- **Scalar floor/ceiling heights [BLOCKING FOR SLOPES]**: `Sector::floorHeight` and `Sector::ceilHeight` are single scalars. There is no mechanism to encode per-vertex height variation. Fix: add optional per-vertex height overrides to `Wall` (see data model changes below).
+
+#### Required Data Model Changes
+
+All changes are **additive** — no existing fields are removed. Backwards compatibility is maintained: maps that set none of the new fields produce identical output to the current tessellator. Changes span `world/include/daedalus/world/map_data.h` and `world/include/daedalus/world/world_types.h`.
+
+**Additions to `Wall`:**
+- `floorHeightOverride` (`std::optional<f32>`) — overrides the sector's `floorHeight` at this wall's start vertex. `std::nullopt` = use sector scalar default. Drives per-vertex floor slopes and ramps.
+- `ceilHeightOverride` (`std::optional<f32>`) — same for ceiling height at this wall's start vertex.
+- `curveControlA` (`std::optional<glm::vec2>`) — first Bezier control point in XZ map space. Absent = straight line segment as today.
+- `curveControlB` (`std::optional<glm::vec2>`) — second Bezier control point. When only `curveControlA` is present, the wall is a quadratic Bezier curve. When both are present, cubic. The tessellator subdivides into N straight-segment quads (configurable per wall via `curveSubdivisions`, default 12).
+- `curveSubdivisions` (`u32`, default 12) — segment count for Bezier subdivision. Range 4–64.
+
+**Additions to `Sector`:**
+- `floorPortalSectorId` (`SectorId`, default `INVALID_SECTOR_ID`) — when valid, the floor surface becomes a portal opening downward into this sector. The floor is rendered as a portal-material surface (grate, glass, water) rather than a solid mesh.
+- `ceilPortalSectorId` (`SectorId`, default `INVALID_SECTOR_ID`) — same, opening upward into the sector above.
+- `floorPortalMaterialId` (`UUID`) — material UUID for the floor portal surface.
+- `ceilPortalMaterialId` (`UUID`) — material UUID for the ceiling portal surface.
+- `floorShape` (`FloorShape` enum, default `Flat`) — controls the floor mesh generation strategy used by the tessellator.
+- `heightfield` (`std::optional<HeightfieldFloor>`) — terrain sample grid, used when `floorShape == Heightfield`.
+- `stairProfile` (`std::optional<StairProfile>`) — stair geometry parameters, used when `floorShape == VisualStairs`.
+- `details` (`std::vector<DetailBrush>`) — Layer 2 static geometry compiled into this sector's GPU mesh at level-compile time.
+
+**New types in `world_types.h`:**
+- `FloorShape` enum: `Flat` (default, current behaviour), `Heightfield` (terrain mesh from a sample grid), `VisualStairs` (stair-step mesh with physics collision treated as an equivalent linear ramp).
+- `HeightfieldFloor` struct: `gridWidth` (u32), `gridDepth` (u32), `samples` (flat `std::vector<f32>`, size `gridWidth × gridDepth`), `worldMin` (glm::vec2), `worldMax` (glm::vec2) bounding the sector's XZ footprint. Max resolution 256×256.
+- `StairProfile` struct: `stepCount` (u32), `riserHeight` (f32), `treadDepth` (f32), `directionAngle` (f32, radians from world +X axis — sets stair run orientation within the sector footprint).
+- `DetailBrush` struct: `transform` (glm::mat4, world-space), `type` (`DetailBrushType` enum), type-specific parameter union (see below), `materialId` (UUID), `collidable` (bool — whether a physics shape is generated), `castsShadow` (bool).
+- `DetailBrushType` enum: `Box` (half-extents glm::vec3), `Wedge` (half-extents + slope axis index), `Cylinder` (radius, height, segment count u32), `ArchSpan` (spanWidth, archHeight, thickness, profile enum [`Semicircular`, `Gothic`, `Segmental`], segmentCount u32), `ImportedMesh` (UUID reference to a GLTF asset pre-compiled by the asset pipeline).
+
+**`WallFlags` additions:**
+- `NoPhysics` — wall exists visually but generates no collision shape. For decorative panels, background planes, and non-blocking architectural surfaces.
+
+**`SectorFlags` additions:**
+- `HasHeightfield` — floor uses terrain mesh generation. Set automatically by the editor when `floorShape == Heightfield`; should not be set manually.
+- `MovingSector` — sector has runtime motion applied (elevator, door, crusher). The game layer writes a `SectorMotion` translation/rotation offset each tick; the tessellator re-uploads geometry with the offset applied. Implemented in Phase 2, not Phase 1F.
+- `Exterior` — large-scale outdoor sector. Portal traversal defers to frustum-plus-distance culling for this sector. Phase 1F-D deferred item; see phase breakdown.
+
+#### Tessellator Implementation Order
+
+Steps must be implemented in this sequence. Each is independently testable and does not require subsequent steps to compile.
+
+1. **Ear-clipping tessellation** — replace the triangle-fan in `appendHorizontalSurface`. Must handle all convex and concave simple polygons, colinear vertices, and both CCW winding (floor, normal up) and CW winding (ceiling, normal down). Full unit test coverage: convex quad, concave L-shape, concave T-shape, concave U-shape, and star polygon.
+2. **Per-vertex floor/ceiling heights** — `appendHorizontalSurface` accepts a `std::span<const f32>` heights array alongside the polygon points. When all overrides are `std::nullopt`, the sector scalar is broadcast and output is identical to today.
+3. **Trapezoidal wall quads** — `appendWallQuad` accepts per-end floor and ceiling heights instead of sector-level scalars. Walls become trapezoids or parallelograms. UV V-coordinate is adjusted: it interpolates the physical wall height linearly from bottom-left to top-right so textures do not shear on sloped walls.
+4. **Sloped portal strip heights** — upper and lower strip computation reads per-vertex height overrides at each wall endpoint rather than comparing sector scalars.
+5. **Floor and ceiling portals** — when `Sector::floorPortalSectorId` is valid, the tessellator outputs a portal-material surface quad for the floor (rendered as transparent/translucent) instead of a solid mesh. Same for ceiling portals.
+6. **Curved wall subdivision** — when `Wall::curveControlA` is set, evaluate the Bezier at `curveSubdivisions` uniformly spaced parameter values and call `appendWallQuad` for each successive segment. Normals computed from the local Bezier tangent at each segment midpoint.
+7. **Heightfield floor mesh** — when `floorShape == Heightfield`, generate a `(gridWidth−1) × (gridDepth−1)` grid of quads from `HeightfieldFloor::samples`. Per-vertex normals computed by central differencing across the grid. UV coordinates map to the grid's world-space XZ extent.
+8. **Visual stair mesh** — when `floorShape == VisualStairs`, generate `stepCount` pairs of tread quads and riser quads from `StairProfile`. The physics shape for this sector registers as the linear ramp equivalent (start height to end height over the stair run distance).
+9. **Detail brush compilation** — for each `DetailBrush` in `Sector::details`, procedurally generate or import the mesh geometry and append into the sector's tagged mesh batch under the brush's `materialId`. If `collidable` is true, emit a physics shape descriptor alongside the mesh.
+
+#### Portal Traversal Extension for Sector-Over-Sector
+
+`world/src/portal_traversal.cpp` currently clips a screen-space AABB window as it crosses wall portals. This is a 2D rectangle clipping operation. For floor and ceiling portals, the algorithm must be generalised:
+
+- The portal clipping window becomes a **2D convex polygon in NDC space** rather than an AABB. Wall portals clip the polygon left/right; floor/ceiling portals clip it top/bottom. The recursive traversal structure and portal-depth limit (`MAX_PORTAL_DEPTH`) are unchanged.
+- For a floor portal, the projected opening polygon is the sector's floor footprint projected into NDC through the camera matrices. The traversal recurses into `floorPortalSectorId` with this polygon as the new clipping window.
+- **Sector membership** for the camera must change: currently it is a point-in-polygon XZ test. With stacked sectors sharing the same XZ footprint, it must also check the Y range. Sector membership lookup becomes a `(XZ point-in-polygon) AND (Y in [floorHeight, ceilHeight])` query. The world map lookup interface must expose this.
+
 ---
 
 ## Module: DaedalusEdit (The Editor)
@@ -516,6 +595,78 @@ To create a portal: select the wall on one sector that faces another sector and 
 Portal walls are drawn in cyan in the 2D view with a double-arrow indicator. A portal wall may carry a transparent/translucent material (glass, bars) or no material at all (open passage). Upper and lower wall strips always carry materials.
 
 Sector-Over-Sector stacking works by placing sectors at different heights and linking them by a floor/ceiling portal — no special case, the same portal system handles all vertical connections.
+
+### Multi-Floor 2D View
+
+When a map contains vertically stacked sectors (Sector-Over-Sector), the 2D overhead view would otherwise show all floors overlaid and become unreadable. A **floor layer selector** panel (dockable, default above the 2D viewport) filters the view based on an edit height.
+
+- **Edit height slider** — drag or type to set the current working height in world Y units. Sectors whose Y range `[floorHeight, ceilHeight]` does not include this value are shown at 20% opacity. Newly drawn sectors are placed with their floor at the nearest grid snap to this height.
+- **Floor presets** — designer-named snap points (Ground, Floor 1, Mezzanine, Roof, etc.) for quick switching between levels. Right-click the slider to save the current height as a named preset.
+- **Show All** toggle — renders all floors at full opacity for top-level spatial reasoning and cross-floor portal linking.
+- **Vertical range lock** — optionally restricts the 2D view to sectors within ±N units of the edit height, hiding everything outside that band. N is configurable (default ±4 units).
+
+The 3D viewport is never filtered; all floors render at all times.
+
+### Slope Tool
+
+Activate with **O**. Operates on the currently selected sector's floor or ceiling.
+
+**Hinge-based slope:** with a sector selected, click any wall within it to designate it as the hinge. A slope angle field appears in the Property Inspector. Adjusting the angle (in degrees, positive = far side rises) computes the correct `Wall::floorHeightOverride` and `ceilHeightOverride` values for all non-hinge vertices and retessellates the sector in real time. The 3D viewport updates live as the angle slider moves. This replicates Build 2's slope workflow exactly.
+
+**Per-vertex slope:** in Vertex tool mode (V), height handles are displayed at each polygon vertex in the 3D viewport — one handle for floor, one for ceiling, colour-coded. Hover a handle and scroll the mouse wheel to raise or lower it, or click the handle to type an absolute Y value. Multiple handles can be multi-selected and moved together. This enables multi-slope floors (saddle shapes, warped rooms, curved ramped surfaces approximated by vertex offsets).
+
+Adjacent portal strip heights update automatically whenever vertex heights change — no manual intervention required.
+
+### Staircase Generator
+
+Accessible via right-click on a selected sector → **Generate Stairs…**, or from the **Tools** menu. Generates a complete staircase and is fully undoable as a single compound command.
+
+**Sector-chain stairs:** creates N new sectors connected by portals, each stepped up from the previous. The player physically walks through portal-to-portal as they climb — stairs are true 3D space, with correct collision and portal visibility at every step.
+- Inputs: step count, total height rise, total horizontal run, stair width, tread material UUID, riser material UUID, side wall material UUID.
+- Output: N new sectors at computed heights and positions, all portals linked, positioned within the currently selected sector's footprint (or spanning between two selected sectors if two are selected). Undo collapses all created sectors as one operation.
+
+**Visual stair floor:** converts the selected sector's floor to `FloorShape::VisualStairs`, populating `Sector::stairProfile` from dialog inputs. The tessellator generates a stair-step mesh for visual fidelity; physics treats the surface as a linear ramp for gameplay simplicity.
+- Inputs: step count, riser height, tread depth, direction angle, tread material UUID, riser material UUID.
+- Best for: monumental staircases, bleachers, tiered seating, exterior ceremonial steps.
+
+### Curved Wall Handles
+
+In Select tool (S) or Draw tool (D) mode, **Ctrl+drag** the midpoint indicator of any wall to pull out a Bezier control handle. This writes `Wall::curveControlA` and causes the wall to render as a smooth arc in both the 2D and 3D viewports.
+
+- A single Ctrl+drag produces a quadratic Bezier (one control point). Holding **Ctrl+Alt** while dragging a second handle position on the opposite side of the midpoint produces a cubic Bezier (`curveControlA` + `curveControlB`).
+- The 2D viewport renders the full smooth arc. A faint overlay of the tessellation segments is visible when zoomed in.
+- Per-wall subdivision count (default 12, range 4–64) is editable in the Wall Properties panel in the Property Inspector.
+- Portal walls can be curved. The portal traversal clips against the chord of the curve, which is a correct conservative approximation — it may cull geometry that peeks around a tight curve but never incorrectly renders occluded content.
+- To remove a curve: double-click the handle in the 2D viewport, or clear the control points in the Wall Properties panel.
+
+### Detail Brush Placement
+
+Detail brushes (Layer 2 geometry) are placed from the Object Browser under the **Detail Geometry** category, using the same drag-and-drop and click-to-place workflow as entities. Activate placement mode with **B**.
+
+**Available primitive types:**
+- **Box** — configurable half-extents on each axis. Good for ledges, plinths, raised floor patches, parapet walls.
+- **Wedge** — a box with one face sloped. Good for chamfered edges, ramps, angled window sills, roof slopes.
+- **Cylinder** — faceted cylinder with radius, height, and face count (4–64 faces). Good for pillars, columns, pipe ends, bollards.
+- **Arch Span** — a curved arch profile placed straddling a portal wall, with configurable span width, arch height, wall thickness, profile shape (Semicircular, Gothic pointed, Segmental flat), and segment count. Creates a decorative doorway arch without requiring additional sectors.
+- **Imported Mesh** — a UUID-referenced GLTF asset baked into the sector mesh at level-compile time. For one-off architectural details that don't fit the primitive set.
+
+In the **3D viewport**, selected detail brushes show their bounding box and T/R/Y gizmos (same shortcuts as entity transforms). In the **2D viewport**, they show their XZ footprint as a dashed outline with a fill colour indicating their type.
+
+**Property Inspector for detail brushes:** transform (position, rotation, scale), type and type-specific parameters (extents, radius, arch profile, etc.), material UUID, Collidable toggle, Cast Shadow toggle.
+
+**Compile behaviour:** at level-compile time all detail brushes in a sector are merged into the sector's material-batched GPU mesh. They are not runtime objects — no ECS components, no CPU overhead per frame. If `collidable` is true, a static physics shape is added to the sector's compound physics body.
+
+### Outdoor Terrain Painting
+
+Any sector can opt into terrain floor generation by enabling **Terrain Floor** in the Sector Properties panel. This sets `floorShape = Heightfield` and initialises a `HeightfieldFloor` at a resolution of 1 sample per grid unit, capped at 256×256.
+
+**Terrain paint tools** are active when a terrain sector is selected and the 3D viewport has mouse capture:
+- **Raise brush** — left-drag raises terrain within the brush radius. Strength and radius adjustable via scroll wheel and Property Inspector sliders.
+- **Lower brush** — right-drag lowers terrain. Clamps to a minimum of `sector.floorHeight − 0.1` (prevents punching through the physics floor baseline).
+- **Smooth brush** — Gaussian-weights heights toward the local average within the radius. Removes sharp spikes and artist errors.
+- **Flatten brush** — sets all heights within radius to the height sampled at the brush's anchor point (centre of the brush at the moment drag begins). Good for creating flat platform areas within terrain.
+
+Grid resolution is adjustable in Sector Properties. Increasing resolution (up to 256×256) bilinearly interpolates existing samples. Decreasing resolution averages samples. Physics collision uses a Jolt Physics native heightfield shape — no triangle mesh approximation is needed.
 
 ### 3D Viewport — Navigation
 
@@ -652,6 +803,9 @@ F5 triggers a background level compile — the editor assembles a temporary `.dl
 | Ctrl+Shift+M | Map Doctor |
 | F5 | Compile and test |
 | F9 | Multi-user session host/join |
+| O | Slope tool (hinge-based and per-vertex) |
+| B | Detail brush placement mode |
+| Ctrl+drag wall midpoint | Add / edit Bezier curve handle on wall |
 
 ---
 
@@ -757,6 +911,58 @@ RHI acceleration structure interface (`IAccelerationStructure`, `IRenderDevice` 
 Metal backend AS implementation. RT scene manager (BLAS/TLAS build, material table).
 Path tracing compute shader. SVGF denoiser (temporal accumulation, spatial variance, à-trous wavelet).
 `RenderMode` enum + `SceneView` integration. FrameRenderer RT branch. Editor/app toggle.
+
+### Phase 1F — Advanced World Geometry
+
+Extends DaedalusWorld and DaedalusEdit beyond simple rectilinear rooms. No changes to DaedalusRender are required — the tessellator produces identical `StaticMeshVertex` interleaved geometry regardless of how complex the source world data is. All architectural design decisions, required data model changes, tessellator evolution order, and portal traversal extensions are fully specified in the **Advanced World Geometry Architecture** section of the DaedalusWorld module above. This phase section records milestones and dependencies only.
+
+**Prerequisites before any 1F milestone begins:**
+- `sector_tessellator.cpp` ear-clipping replacement (currently triangle-fan; documented as broken for concave polygons).
+- Per-vertex height override fields (`floorHeightOverride`, `ceilHeightOverride`) added to `Wall` in `map_data.h`.
+- These two items are hard prerequisites for every subsequent milestone. All tests in `world/tests/test_sector_tessellator.cpp` must pass for convex and concave polygon cases before proceeding.
+
+**Phase 1F-A — Tessellator Foundations and Slopes** *(no dependencies other than prerequisites above)*
+- Ear-clipping tessellation live and fully tested.
+- Per-vertex heights in `Wall`. Tessellator updated: sloped floors/ceilings (step 2), trapezoidal wall quads (step 3), sloped portal strip heights (step 4) — per tessellator evolution order in the architecture section.
+- `Sector::floorShape`, `Sector::stairProfile`, and `FloorShape::VisualStairs` added. Visual stair mesh tessellation (step 8).
+- **Editor:** Slope Tool (O key). Hinge-based slope in Property Inspector with real-time 3D feedback. Per-vertex height handles in 3D viewport in Vertex mode (V). Staircase Generator dialog — visual stair floor mode.
+- **Serialisation:** `Wall::floorHeightOverride`, `ceilHeightOverride`, `Sector::stairProfile` added to `.emap`, `.dmap`, and `.dlevel` formats.
+- **Tests:** `test_sector_tessellator.cpp` — concave polygons, sloped floors, sloped portal strips, visual stair mesh.
+
+**Phase 1F-B — Sector-Over-Sector and Floor/Ceiling Portals** *(requires 1F-A)*
+- `Sector::floorPortalSectorId`, `ceilPortalSectorId`, `floorPortalMaterialId`, `ceilPortalMaterialId` added to `map_data.h`.
+- Tessellator: floor/ceiling portal surface generation (step 5 in tessellator evolution order).
+- Portal traversal generalised: clipping window becomes a 2D convex NDC polygon; floor/ceiling portals recurse vertically. Sector membership test extended to check Y range.
+- `SectorFlags::HasHeightfield` and `SectorFlags::MovingSector` added (MovingSector is data-model only in this phase; simulation deferred to Phase 2).
+- **Editor:** Floor/ceiling portal linking in Property Inspector. Multi-floor 2D view with edit-height slider and floor preset system. Floor layer selector panel. Staircase Generator — sector-chain mode (creates linked sector series).
+- **Serialisation:** all new `Sector` portal fields added to `.emap`, `.dmap`, and `.dlevel`.
+- **Tests:** `test_portal_traversal.cpp` — SoS portal recursion, vertical clipping window, stacked sector membership query.
+
+**Phase 1F-C — Curved Walls and Detail Geometry** *(requires 1F-A; independent of 1F-B)*
+- `Wall::curveControlA`, `curveControlB`, `curveSubdivisions` added to `map_data.h`.
+- Tessellator: curved wall Bezier subdivision (step 6 in tessellator evolution order).
+- `Sector::details` (`std::vector<DetailBrush>`) and all related types (`DetailBrush`, `DetailBrushType`, `HeightfieldFloor`, `StairProfile`) added.
+- Tessellator: detail brush compilation (step 9). Box, Wedge, Cylinder, ArchSpan primitives. ImportedMesh via GLTF UUID reference.
+- Physics shapes for collidable detail brushes registered as part of the sector's static compound body.
+- `WallFlags::NoPhysics` added.
+- **Editor:** Curved wall handle editing (Ctrl+drag wall midpoint). Detail brush placement mode (B key), Object Browser Detail Geometry category, gizmos in 3D viewport, dashed XZ footprint in 2D viewport.
+- **Serialisation:** `Wall` curve fields, `Sector::details` added to all three formats.
+- **Tests:** `test_sector_tessellator.cpp` — curved wall quads, normal correctness, detail brush primitive meshes.
+
+**Phase 1F-D — Outdoor Terrain** *(requires 1F-A and 1F-C)*
+- `Sector::heightfield` (`std::optional<HeightfieldFloor>`) added. `FloorShape::Heightfield` active.
+- Tessellator: heightfield floor mesh generation (step 7 in tessellator evolution order).
+- Jolt Physics heightfield shape registered for `HasHeightfield` sectors — native heightfield collision, no triangle mesh approximation.
+- Normal map generation pipeline extended: central-difference normals baked into heightfield mesh vertices; optionally baked to a normal map texture at level-compile time.
+- **Editor:** Terrain Floor toggle in Sector Properties. Raise, Lower, Smooth, and Flatten paint brushes active in 3D viewport when a terrain sector is selected. Grid resolution controls in Sector Properties panel.
+- **Serialisation:** `HeightfieldFloor` sample grid serialised in `.emap` and `.dmap` (uncompressed for edit round-trip); compressed with zlib in `.dlevel`.
+- **Tests:** `test_sector_tessellator.cpp` — heightfield quad grid dimensions, normal computation. `test_dmap_io.cpp` — heightfield round-trip serialisation.
+
+**Phase 1F-E — Large-Scale Exterior Spaces** *(deferred; requires 1F-D)*
+- `SectorFlags::Exterior` active. Portal traversal defers to frustum+distance culling for exterior sectors and their visible neighbours.
+- Sector–exterior boundary portal handling (interior room exits to open exterior).
+- LOD support for large exterior meshes (deferred tessellation at multiple resolutions).
+- *(Full design to be written when Phase 1F-D is complete and exterior space requirements are clearer.)*
 
 ### Phase 2 — Game Layer
 

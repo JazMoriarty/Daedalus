@@ -7,6 +7,11 @@
 #include "document/commands/cmd_set_sector_ambient.h"
 #include "document/commands/cmd_set_sector_flags.h"
 #include "document/commands/cmd_set_wall_flags.h"
+#include "document/commands/cmd_set_vertex_height.h"
+#include "document/commands/cmd_set_sector_floor_shape.h"
+#include "document/commands/cmd_set_floor_portal.h"
+#include "document/commands/cmd_set_wall_curve.h"
+#include "document/commands/cmd_set_heightfield.h"
 #include "document/commands/cmd_set_wall_uv.h"
 #include "daedalus/editor/compound_command.h"
 #include "uv_utils.h"
@@ -305,6 +310,178 @@ void PropertyInspector::draw(EditMapDocument&      doc,
             editSectorMat("Ceiling##sm", sector.ceilMaterialId,  SectorSurface::Ceil);
         }
 
+        // ── Floor Shape ────────────────────────────────────────────────────────────
+        ImGui::Spacing();
+        ImGui::SeparatorText("Floor Shape");
+        {
+            static const char* k_shapeLabels[] = {"Flat", "Visual Stairs", "Heightfield"};
+            int shapeIdx = static_cast<int>(sector.floorShape);
+            ImGui::SetNextItemWidth(-1.0f);
+            if (ImGui::Combo("##floorshape", &shapeIdx, k_shapeLabels, 3))
+            {
+                const auto newShape = static_cast<world::FloorShape>(shapeIdx);
+                if (newShape != sector.floorShape)
+                {
+                    std::optional<world::StairProfile> newProfile;
+                    if (newShape == world::FloorShape::VisualStairs)
+                        newProfile = world::StairProfile{};
+                    doc.pushCommand(std::make_unique<CmdSetSectorFloorShape>(
+                        doc, sid, newShape, newProfile));
+                }
+            }
+
+            if (sector.floorShape == world::FloorShape::VisualStairs &&
+                sector.stairProfile.has_value())
+            {
+                world::StairProfile profile = *sector.stairProfile;
+                ImGui::Spacing();
+                ImGui::TextDisabled("Stair Profile");
+
+                int steps = static_cast<int>(profile.stepCount);
+                ImGui::SetNextItemWidth(-1.0f);
+                if (dragIntUndo("##stairsteps", &steps, 0.5f, 1, 64, "Steps: %d") &&
+                    static_cast<unsigned>(steps) != profile.stepCount)
+                {
+                    world::StairProfile np = profile;
+                    np.stepCount = static_cast<unsigned>(steps);
+                    doc.pushCommand(std::make_unique<CmdSetSectorFloorShape>(
+                        doc, sid, world::FloorShape::VisualStairs, np));
+                }
+
+                float riser = profile.riserHeight;
+                ImGui::SetNextItemWidth(-1.0f);
+                if (dragFloatUndo("##stairriser", &riser, 0.01f, 0.01f, 4.0f, "Riser: %.2f m") &&
+                    riser != profile.riserHeight)
+                {
+                    world::StairProfile np = profile;
+                    np.riserHeight = riser;
+                    doc.pushCommand(std::make_unique<CmdSetSectorFloorShape>(
+                        doc, sid, world::FloorShape::VisualStairs, np));
+                }
+
+                float tread = profile.treadDepth;
+                ImGui::SetNextItemWidth(-1.0f);
+                if (dragFloatUndo("##stairtread", &tread, 0.01f, 0.01f, 8.0f, "Tread: %.2f m") &&
+                    tread != profile.treadDepth)
+                {
+                    world::StairProfile np = profile;
+                    np.treadDepth = tread;
+                    doc.pushCommand(std::make_unique<CmdSetSectorFloorShape>(
+                        doc, sid, world::FloorShape::VisualStairs, np));
+                }
+
+                constexpr float kRad2Deg = 180.0f / glm::pi<float>();
+                constexpr float kDeg2Rad = glm::pi<float>() / 180.0f;
+                float angleDeg = profile.directionAngle * kRad2Deg;
+                ImGui::SetNextItemWidth(-1.0f);
+                if (dragFloatUndo("##stairangle", &angleDeg, 1.0f, 0.0f, 0.0f,
+                                  "Direction: %.1f\xc2\xb0"))
+                {
+                    world::StairProfile np = profile;
+                    np.directionAngle = angleDeg * kDeg2Rad;
+                    doc.pushCommand(std::make_unique<CmdSetSectorFloorShape>(
+                        doc, sid, world::FloorShape::VisualStairs, np));
+                }
+            }
+
+            if (sector.floorShape == world::FloorShape::Heightfield)
+            {
+                ImGui::Spacing();
+                ImGui::TextDisabled("Heightfield Grid");
+
+                if (!sector.heightfield.has_value())
+                {
+                    ImGui::TextDisabled("(no heightfield data)");
+                    if (ImGui::Button("Create 8\xc3\x97" "8 Heightfield"))
+                    {
+                        world::HeightfieldFloor hf;
+                        hf.gridWidth = 8u;
+                        hf.gridDepth = 8u;
+                        // Bound the grid to the sector polygon's axis-aligned bounding box.
+                        glm::vec2 mn{1e9f, 1e9f}, mx{-1e9f, -1e9f};
+                        for (const auto& w : sector.walls)
+                        {
+                            mn.x = std::min(mn.x, w.p0.x); mn.y = std::min(mn.y, w.p0.y);
+                            mx.x = std::max(mx.x, w.p0.x); mx.y = std::max(mx.y, w.p0.y);
+                        }
+                        hf.worldMin = mn;
+                        hf.worldMax = mx;
+                        hf.samples.assign(hf.gridWidth * hf.gridDepth, sector.floorHeight);
+                        doc.pushCommand(std::make_unique<CmdSetHeightfield>(doc, sid, hf));
+                    }
+                }
+                else
+                {
+                    const world::HeightfieldFloor& hf = *sector.heightfield;
+                    ImGui::Text("Grid: %u \xc3\x97 %u  (%zu samples)",
+                                hf.gridWidth, hf.gridDepth, hf.samples.size());
+
+                    int gw = static_cast<int>(hf.gridWidth);
+                    int gd = static_cast<int>(hf.gridDepth);
+                    bool gwChg = false, gdChg = false;
+                    ImGui::SetNextItemWidth(-1.0f);
+                    gwChg = dragIntUndo("##hfgw", &gw, 0.5f, 2, 256, "Width: %d");
+                    ImGui::SetNextItemWidth(-1.0f);
+                    gdChg = dragIntUndo("##hfgd", &gd, 0.5f, 2, 256, "Depth: %d");
+                    if ((gwChg || gdChg) &&
+                        (static_cast<uint32_t>(gw) != hf.gridWidth ||
+                         static_cast<uint32_t>(gd) != hf.gridDepth))
+                    {
+                        world::HeightfieldFloor nhf = hf;
+                        nhf.gridWidth = static_cast<uint32_t>(gw);
+                        nhf.gridDepth = static_cast<uint32_t>(gd);
+                        nhf.samples.assign(nhf.gridWidth * nhf.gridDepth, sector.floorHeight);
+                        doc.pushCommand(std::make_unique<CmdSetHeightfield>(doc, sid, nhf));
+                    }
+
+                    if (ImGui::Button("Clear Heightfield"))
+                        doc.pushCommand(std::make_unique<CmdSetHeightfield>(
+                            doc, sid, std::nullopt));
+                }
+            }
+        }
+
+        // ── Floor / Ceiling Portals ─────────────────────────────────────────────────
+        ImGui::Spacing();
+        ImGui::SeparatorText("Floor / Ceiling Portals");
+        {
+            // Helper: draw linked/unlinked state and an ID drag field for one portal.
+            const auto editHPortal = [&](const char* label,
+                                         HPortalSurface  surf,
+                                         world::SectorId curTarget)
+            {
+                ImGui::PushID(label);
+                const bool linked = (curTarget != world::INVALID_SECTOR_ID);
+                if (linked)
+                    ImGui::Text("%s \xe2\x86\x92 Sector %u", label,
+                                static_cast<unsigned>(curTarget));
+                else
+                    ImGui::TextDisabled("%s: (none)", label);
+
+                // Integer drag: -1 means no link, >=0 is a sector index.
+                const int maxSec = static_cast<int>(doc.mapData().sectors.size()) - 1;
+                int tgtInt = linked ? static_cast<int>(curTarget) : -1;
+                ImGui::SetNextItemWidth(-1.0f);
+                if (dragIntUndo("##hptgt", &tgtInt, 0.5f, -1, std::max(maxSec, 0),
+                                tgtInt < 0 ? "ID: (none)" : "ID: %d"))
+                {
+                    const world::SectorId newTgt = (tgtInt < 0)
+                        ? world::INVALID_SECTOR_ID
+                        : static_cast<world::SectorId>(tgtInt);
+                    if (newTgt != curTarget)
+                        doc.pushCommand(std::make_unique<CmdSetFloorPortal>(
+                            doc, sid, surf, newTgt, UUID{}));
+                }
+                ImGui::PopID();
+            };
+
+            editHPortal("Floor portal",   HPortalSurface::Floor,
+                        sector.floorPortalSectorId);
+            ImGui::Spacing();
+            editHPortal("Ceiling portal", HPortalSurface::Ceiling,
+                        sector.ceilPortalSectorId);
+        }
+
         // ── Wall list ──────────────────────────────────────────────────────────────
         ImGui::Spacing();
         ImGui::SeparatorText("Walls");
@@ -337,6 +514,7 @@ void PropertyInspector::draw(EditMapDocument&      doc,
                 toggleWF("Trigger Zone",world::WallFlags::TriggerZone);
                 toggleWF("Invisible",   world::WallFlags::Invisible);
                 toggleWF("Mirror",      world::WallFlags::Mirror);
+                toggleWF("No Physics",  world::WallFlags::NoPhysics);
 
                 ImGui::TreePop();
             }
@@ -389,6 +567,7 @@ void PropertyInspector::draw(EditMapDocument&      doc,
             toggleWF("Trigger Zone",world::WallFlags::TriggerZone);
             toggleWF("Invisible",   world::WallFlags::Invisible);
             toggleWF("Mirror",      world::WallFlags::Mirror);
+            toggleWF("No Physics",  world::WallFlags::NoPhysics);
         }
 
         ImGui::Spacing();
@@ -682,6 +861,100 @@ void PropertyInspector::draw(EditMapDocument&      doc,
                 }
             }
         }
+
+        // ── Bezier Curve ──────────────────────────────────────────────────────────────
+        ImGui::Spacing();
+        ImGui::SeparatorText("Bezier Curve");
+        {
+            const bool hasCurve = wall.curveControlA.has_value();
+            bool curveEnabled = hasCurve;
+            if (ImGui::Checkbox("Enable Curve##cv", &curveEnabled))
+            {
+                if (curveEnabled)
+                {
+                    // Default control point at the wall midpoint.
+                    const glm::vec2 mid =
+                        (wall.p0 + sectors[sid].walls[(wi + 1) % n].p0) * 0.5f;
+                    doc.pushCommand(std::make_unique<CmdSetWallCurve>(
+                        doc, sid, wi, mid, std::nullopt, wall.curveSubdivisions));
+                }
+                else
+                {
+                    doc.pushCommand(std::make_unique<CmdSetWallCurve>(
+                        doc, sid, wi, std::nullopt, std::nullopt, wall.curveSubdivisions));
+                }
+            }
+
+            if (hasCurve)
+            {
+                // ── Control point A ───────────────────────────────────────────────
+                glm::vec2 cpA = *wall.curveControlA;
+                static glm::vec2 s_origCpA = {};
+                ImGui::TextDisabled("Control A (X, Z)");
+                ImGui::SetNextItemWidth(-1.0f);
+                const bool cpACommitted = dragFloat2Undo("##cpa", &cpA.x, 0.05f, 0.0f, 0.0f, "%.3f");
+                if (ImGui::IsItemActivated()) s_origCpA = *wall.curveControlA;
+                if (ImGui::IsItemActive() || ImGui::IsItemEdited())
+                    { wall.curveControlA = cpA; doc.markDirty(); }
+                if (cpACommitted && cpA != s_origCpA)
+                {
+                    const glm::vec2 finalCpA = *wall.curveControlA;
+                    wall.curveControlA = s_origCpA;
+                    doc.pushCommand(std::make_unique<CmdSetWallCurve>(
+                        doc, sid, wi, finalCpA, wall.curveControlB, wall.curveSubdivisions));
+                }
+
+                // ── Optional control point B (cubic Bezier) ───────────────────────
+                const bool hasCpB = wall.curveControlB.has_value();
+                bool cpBEnabled = hasCpB;
+                if (ImGui::Checkbox("Cubic (add B)##cpb", &cpBEnabled))
+                {
+                    if (cpBEnabled)
+                    {
+                        const glm::vec2 mid =
+                            (wall.p0 + sectors[sid].walls[(wi + 1) % n].p0) * 0.5f;
+                        doc.pushCommand(std::make_unique<CmdSetWallCurve>(
+                            doc, sid, wi, wall.curveControlA, mid, wall.curveSubdivisions));
+                    }
+                    else
+                    {
+                        doc.pushCommand(std::make_unique<CmdSetWallCurve>(
+                            doc, sid, wi, wall.curveControlA, std::nullopt,
+                            wall.curveSubdivisions));
+                    }
+                }
+
+                if (hasCpB)
+                {
+                    glm::vec2 cpB = *wall.curveControlB;
+                    static glm::vec2 s_origCpB = {};
+                    ImGui::TextDisabled("Control B (X, Z)");
+                    ImGui::SetNextItemWidth(-1.0f);
+                    const bool cpBCommitted = dragFloat2Undo("##cpb2", &cpB.x, 0.05f, 0.0f, 0.0f, "%.3f");
+                    if (ImGui::IsItemActivated()) s_origCpB = *wall.curveControlB;
+                    if (ImGui::IsItemActive() || ImGui::IsItemEdited())
+                        { wall.curveControlB = cpB; doc.markDirty(); }
+                    if (cpBCommitted && cpB != s_origCpB)
+                    {
+                        const glm::vec2 finalCpB = *wall.curveControlB;
+                        wall.curveControlB = s_origCpB;
+                        doc.pushCommand(std::make_unique<CmdSetWallCurve>(
+                            doc, sid, wi, wall.curveControlA, finalCpB, wall.curveSubdivisions));
+                    }
+                }
+
+                // ── Subdivisions ─────────────────────────────────────────────────────
+                int subdivs = static_cast<int>(wall.curveSubdivisions);
+                ImGui::SetNextItemWidth(-1.0f);
+                if (dragIntUndo("##curvesub", &subdivs, 0.5f, 4, 64, "Subdivisions: %d") &&
+                    static_cast<uint32_t>(subdivs) != wall.curveSubdivisions)
+                {
+                    doc.pushCommand(std::make_unique<CmdSetWallCurve>(
+                        doc, sid, wi, wall.curveControlA, wall.curveControlB,
+                        static_cast<uint32_t>(subdivs)));
+                }
+            }
+        }
     }
     else if (sel.type == SelectionType::Vertex)
     {
@@ -697,6 +970,53 @@ void PropertyInspector::draw(EditMapDocument&      doc,
             ImGui::Text("Position: (%.3f, %.3f)", p.x, p.y);
             ImGui::Spacing();
             ImGui::TextDisabled("Drag in 2D viewport to move.");
+
+            // ── Height overrides ──────────────────────────────────────────────────
+            ImGui::Spacing();
+            ImGui::SeparatorText("Height Overrides");
+            {
+                world::Wall& vwall = sectors[sid].walls[wi];
+
+                // Floor override.
+                bool hasFloorOvr = vwall.floorHeightOverride.has_value();
+                if (ImGui::Checkbox("Floor##vhof", &hasFloorOvr))
+                {
+                    const std::optional<float> nf = hasFloorOvr
+                        ? std::optional<float>(sectors[sid].floorHeight)
+                        : std::nullopt;
+                    doc.pushCommand(std::make_unique<CmdSetVertexHeight>(
+                        doc, sid, wi, nf, vwall.ceilHeightOverride));
+                }
+                if (vwall.floorHeightOverride.has_value())
+                {
+                    float fh = *vwall.floorHeightOverride;
+                    ImGui::SetNextItemWidth(-1.0f);
+                    if (dragFloatUndo("##vfloor", &fh, 0.05f, 0.0f, 0.0f, "Floor: %.2f") &&
+                        fh != *vwall.floorHeightOverride)
+                        doc.pushCommand(std::make_unique<CmdSetVertexHeight>(
+                            doc, sid, wi, fh, vwall.ceilHeightOverride));
+                }
+
+                // Ceiling override.
+                bool hasCeilOvr = vwall.ceilHeightOverride.has_value();
+                if (ImGui::Checkbox("Ceiling##vhoc", &hasCeilOvr))
+                {
+                    const std::optional<float> nc = hasCeilOvr
+                        ? std::optional<float>(sectors[sid].ceilHeight)
+                        : std::nullopt;
+                    doc.pushCommand(std::make_unique<CmdSetVertexHeight>(
+                        doc, sid, wi, vwall.floorHeightOverride, nc));
+                }
+                if (vwall.ceilHeightOverride.has_value())
+                {
+                    float ch = *vwall.ceilHeightOverride;
+                    ImGui::SetNextItemWidth(-1.0f);
+                    if (dragFloatUndo("##vceil", &ch, 0.05f, 0.0f, 0.0f, "Ceiling: %.2f") &&
+                        ch != *vwall.ceilHeightOverride)
+                        doc.pushCommand(std::make_unique<CmdSetVertexHeight>(
+                            doc, sid, wi, vwall.floorHeightOverride, ch));
+                }
+            }
         }
     }
     else if (sel.type == SelectionType::Light)

@@ -11,6 +11,8 @@
 #include "document/commands/cmd_place_prefab.h"
 #include "document/commands/cmd_set_player_start.h"
 #include "daedalus/editor/light_def.h"
+#include "document/commands/cmd_add_detail_brush.h"
+#include "daedalus/world/map_data.h"
 
 #include "imgui.h"
 
@@ -210,6 +212,55 @@ void ObjectBrowserPanel::draw(EditMapDocument& doc, glm::vec2 cursorMapPos)
                         doc, prefabs[i], cursorMapPos));
                 ImGui::PopID();
             }
+        }
+    }
+
+    ImGui::Spacing();
+
+    // ── Detail Geometry ───────────────────────────────────────────────────────
+    // Adds a detail brush to the selected sector.  The brush is placed at the
+    // map cursor position with default parameters; use the Properties panel to
+    // refine the transform and parameters after placement.
+    if (ImGui::CollapsingHeader("Detail Geometry"))
+    {
+        const auto& sel         = doc.selection();
+        const bool  hasSector   = (sel.type == SelectionType::Sector &&
+                                   !sel.sectors.empty());
+        const world::SectorId targetSid = hasSector ? sel.sectors.front()
+                                                    : world::INVALID_SECTOR_ID;
+
+        if (!hasSector) ImGui::BeginDisabled();
+        ImGui::TextDisabled("Select a sector then click to add.");
+        ImGui::Spacing();
+
+        // Helper: build and push a default brush of the given type.
+        const auto placeDetailBrush = [&](world::DetailBrushType type)
+        {
+            if (!hasSector) return;
+            world::DetailBrush db;
+            db.type      = type;
+            db.transform = glm::mat4(1.0f);
+            // Position brush at cursor XZ, Y=0.
+            db.transform[3] = glm::vec4{cursorMapPos.x, 0.0f, cursorMapPos.y, 1.0f};
+            doc.pushCommand(std::make_unique<CmdAddDetailBrush>(doc, targetSid, db));
+        };
+
+        if (ImGui::Button("Box"))       placeDetailBrush(world::DetailBrushType::Box);
+        ImGui::SameLine();
+        if (ImGui::Button("Wedge"))     placeDetailBrush(world::DetailBrushType::Wedge);
+        ImGui::SameLine();
+        if (ImGui::Button("Cylinder"))  placeDetailBrush(world::DetailBrushType::Cylinder);
+        if (ImGui::Button("Arch Span")) placeDetailBrush(world::DetailBrushType::ArchSpan);
+
+        if (!hasSector)
+        {
+            ImGui::EndDisabled();
+            ImGui::TextDisabled("(no sector selected)");
+        }
+        else
+        {
+            ImGui::TextDisabled("(%zu detail brushes in sector)",
+                                doc.mapData().sectors[targetSid].details.size());
         }
     }
 

@@ -46,6 +46,16 @@ target_sources(DaedalusEdit PRIVATE
     src/document/commands/cmd_set_map_meta.cpp
     src/document/commands/cmd_set_map_defaults.cpp
     src/document/commands/cmd_set_global_ambient.cpp
+    src/document/commands/cmd_set_vertex_height.cpp
+    src/document/commands/cmd_set_sector_floor_shape.cpp
+    src/document/commands/cmd_set_floor_portal.cpp
+    src/document/commands/cmd_set_wall_curve.cpp
+    src/document/commands/cmd_add_detail_brush.cpp
+    src/document/commands/cmd_remove_detail_brush.cpp
+    src/document/commands/cmd_set_detail_brush.cpp
+    src/document/commands/cmd_set_heightfield.cpp
+    src/panels/floor_layer_panel.cpp
+    src/panels/staircase_generator_panel.cpp
     src/panels/viewport_2d.cpp
     src/panels/viewport_3d.cpp
     src/panels/entity_gpu_cache.cpp
@@ -180,6 +190,16 @@ if(DAEDALUS_PLATFORM_MACOS)
         src/document/commands/cmd_set_map_meta.cpp
         src/document/commands/cmd_set_map_defaults.cpp
         src/document/commands/cmd_set_global_ambient.cpp
+        src/document/commands/cmd_set_vertex_height.cpp
+        src/document/commands/cmd_set_sector_floor_shape.cpp
+        src/document/commands/cmd_set_floor_portal.cpp
+        src/document/commands/cmd_set_wall_curve.cpp
+        src/document/commands/cmd_add_detail_brush.cpp
+        src/document/commands/cmd_remove_detail_brush.cpp
+        src/document/commands/cmd_set_detail_brush.cpp
+        src/document/commands/cmd_set_heightfield.cpp
+        src/panels/floor_layer_panel.cpp
+        src/panels/staircase_generator_panel.cpp
         src/panels/viewport_2d.cpp
         src/panels/viewport_3d.cpp
         src/panels/entity_gpu_cache.cpp
