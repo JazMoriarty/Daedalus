@@ -146,7 +146,7 @@ constexpr u32 k_JSON_VERSION = 5u;
         j["floor_portal_material"] = uuidToString(sec.floorPortalMaterialId);
     if (sec.ceilPortalSectorId != INVALID_SECTOR_ID)
         j["ceil_portal_material"] = uuidToString(sec.ceilPortalMaterialId);
-    // Phase 1F-C: detail brushes (omit when empty).
+    // Phase 1F-D: heightfield terrain floor (omit when not set).
     if (sec.heightfield)
     {
         const auto& hf = *sec.heightfield;
@@ -295,8 +295,7 @@ constexpr u32 k_JSON_VERSION = 5u;
             out.floorPortalMaterialId = uuidFromString(jsec["floor_portal_material"].get<std::string>());
         if (jsec.contains("ceil_portal_material"))
             out.ceilPortalMaterialId = uuidFromString(jsec["ceil_portal_material"].get<std::string>());
-        // Phase 1F-C: detail brushes.
-        // Phase 1F-D: heightfield.
+        // Phase 1F-D: heightfield terrain floor.
         if (jsec.contains("heightfield"))
         {
             const auto& jh = jsec["heightfield"];

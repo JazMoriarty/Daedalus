@@ -10,7 +10,7 @@
 //
 // Header (16 bytes):
 //   [4]  magic         u32 = 0x50414D44  ('D','M','A','P')
-//   [4]  version       u32 = 2  (current)
+//   [4]  version       u32 = 5  (current)
 //   [4]  sectorCount   u32
 //   [4]  _pad          u32 = 0  (reserved)
 //
@@ -281,7 +281,6 @@ std::expected<void, DmapError> saveDmap(const WorldMapData&         map,
         w.writeUUID(sec.ceilPortalMaterialId);
         // v4: detail brushes (fixed-size record per brush)
         w.write(static_cast<u32>(sec.details.size()));
-        // (detail brush loop follows, then v5 heightfield after)
         for (const auto& brush : sec.details)
         {
             w.writeMat4(brush.transform);
