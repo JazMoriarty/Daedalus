@@ -1523,10 +1523,15 @@ void PropertyInspector::draw(EditMapDocument&      doc,
             if (ImGui::IsItemActivated()) s_preDragLight = ld;
             if (ImGui::IsItemActive() || ImGui::IsItemEdited()) ld.color = col;
 
-            ImGui::SetNextItemWidth(-1.0f);
-            bool radChanged = dragFloatUndo("##lrad", &radius, 0.1f, 0.0f, 0.0f, "Radius: %.1f m");
-            if (ImGui::IsItemActivated()) s_preDragLight = ld;
-            if (ImGui::IsItemActive() || ImGui::IsItemEdited()) ld.radius = radius;
+            // Radius is the point-light sphere influence; not used by spot lights.
+            bool radChanged = false;
+            if (ld.type == LightType::Point)
+            {
+                ImGui::SetNextItemWidth(-1.0f);
+                radChanged = dragFloatUndo("##lrad", &radius, 0.1f, 0.0f, 0.0f, "Radius: %.1f m");
+                if (ImGui::IsItemActivated()) s_preDragLight = ld;
+                if (ImGui::IsItemActive() || ImGui::IsItemEdited()) ld.radius = radius;
+            }
 
             ImGui::SetNextItemWidth(-1.0f);
             bool intChanged = dragFloatUndo("##lint", &intens, 0.05f, 0.0f, 0.0f, "Intensity: %.2f");

@@ -781,13 +781,17 @@ void Viewport2D::draw(EditMapDocument& doc,
 
             const bool lightSel = sel.isLightSelected(li);
 
-            // Influence-radius ring.
-            const float ringR = ld.radius * m_zoom;
-            if (ringR > kIconR + 2.0f)
-                dl->AddCircle(spi, ringR,
-                              lightSel ? IM_COL32(255, 220, 80, 120)
-                                       : IM_COL32(255, 180, 50, 60),
-                              48, 1.5f);
+            // Influence-radius ring — point lights only.
+            // Spot lights use ld.range, shown via the cone overlay below.
+            if (ld.type == LightType::Point)
+            {
+                const float ringR = ld.radius * m_zoom;
+                if (ringR > kIconR + 2.0f)
+                    dl->AddCircle(spi, ringR,
+                                  lightSel ? IM_COL32(255, 220, 80, 120)
+                                           : IM_COL32(255, 180, 50, 60),
+                                  48, 1.5f);
+            }
 
             // Icon fill.
             const ImU32 fillCol = lightSel
@@ -828,9 +832,10 @@ void Viewport2D::draw(EditMapDocument& doc,
                     const float dirX = ld.direction.x * invLen;
                     const float dirZ = ld.direction.z * invLen;
 
-                    // Cap cone length to 60 px; scale by the horizontal component.
-                    const float coneLen =
-                        std::min(ld.range * m_zoom * xzLen * 0.5f, 60.0f);
+                    // Cone length = range scaled to screen pixels, attenuated by the
+                    // horizontal component so a nearly-vertical light shows a short cone.
+                    // Matches the point-light radius ring convention: radius * zoom.
+                    const float coneLen = ld.range * m_zoom * xzLen;
 
                     // Rotate ±outerConeAngle around the XZ direction to get the
                     // two cone-edge endpoints.
@@ -846,6 +851,23 @@ void Viewport2D::draw(EditMapDocument& doc,
                     dl->AddTriangleFilled(spi, coneL, coneR, coneFill);
                     dl->AddLine(spi, coneL, coneCol, 1.2f);
                     dl->AddLine(spi, coneR, coneCol, 1.2f);
+
+                    // Inner cone — brighter fill + contrasting lines drawn on top.
+                    const float cosHi = std::cos(ld.innerConeAngle);
+                    const float sinHi = std::sin(ld.innerConeAngle);
+                    const ImVec2 innerL{
+                        sp.x + (dirX * cosHi - dirZ * sinHi) * coneLen,
+                        sp.y + (dirX * sinHi + dirZ * cosHi) * coneLen};
+                    const ImVec2 innerR{
+                        sp.x + (dirX * cosHi + dirZ * sinHi) * coneLen,
+                        sp.y + (-dirX * sinHi + dirZ * cosHi) * coneLen};
+                    const ImU32 innerFill = lightSel
+                        ? IM_COL32(255, 255, 180,  80) : IM_COL32(255, 240, 130,  45);
+                    const ImU32 innerLine = lightSel
+                        ? IM_COL32(255, 255, 220, 220) : IM_COL32(255, 245, 150, 150);
+                    dl->AddTriangleFilled(spi, innerL, innerR, innerFill);
+                    dl->AddLine(spi, innerL, innerLine, 1.0f);
+                    dl->AddLine(spi, innerR, innerLine, 1.0f);
                 }
             }
         }
