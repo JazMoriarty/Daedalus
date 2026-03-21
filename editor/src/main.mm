@@ -255,7 +255,7 @@ static void drawMenuBar(EditMapDocument& doc,
             if (ImGui::MenuItem("New", "Cmd+N"))
                 openNewMapDlg = true;
 
-            if (ImGui::MenuItem("Open\xe2\x80\xa6", "Cmd+O"))
+            if (ImGui::MenuItem("Open...", "Cmd+O"))
             {
                 const std::string mapsDir = resourceDir() + "/assets/maps";
                 spawnFileDialog(&dlgState,
@@ -265,7 +265,7 @@ static void drawMenuBar(EditMapDocument& doc,
 
             ImGui::Separator();
 
-            if (ImGui::MenuItem("Set Asset Root\xe2\x80\xa6"))
+            if (ImGui::MenuItem("Set Asset Root..."))
             {
                 spawnFileDialog(&dlgState, "POSIX path of (choose folder)");
                 dlgState.purpose = FileDialogPurpose::OpenAssetRoot;
@@ -276,7 +276,7 @@ static void drawMenuBar(EditMapDocument& doc,
             if (ImGui::MenuItem("Save", "Cmd+S", false, hasSavePath))
                 (void)doc.saveToCurrentPath();  // failure already logged to OutputLog
 
-            if (ImGui::MenuItem("Save As\xe2\x80\xa6", "Cmd+Shift+S"))
+            if (ImGui::MenuItem("Save As...", "Cmd+Shift+S"))
             {
                 const std::string defaultName = doc.filePath().empty()
                     ? "untitled.dmap"
@@ -344,35 +344,7 @@ static void drawMenuBar(EditMapDocument& doc,
             ImGui::EndMenu();
         }
 
-        // ── Window ────────────────────────────────────────────────────────────
-        if (ImGui::BeginMenu("Window"))
-        {
-            ImGui::MenuItem("2D Viewport", nullptr, &show2DViewport);
-            ImGui::MenuItem("3D Viewport", nullptr, &show3DViewport);
-            ImGui::MenuItem("Property Inspector", nullptr, &showPropertyInspector);
-            ImGui::MenuItem("Object Browser", nullptr, &showObjectBrowser);
-            ImGui::MenuItem("Asset Browser", nullptr, &showAssetBrowser);
-            ImGui::MenuItem("Layers", nullptr, &showLayers);
-            ImGui::MenuItem("Output Log", nullptr, &showOutputLog);
-            ImGui::Separator();
-            ImGui::MenuItem("Render Settings", nullptr, &showRenderSettings);
-            ImGui::MenuItem("Normal Map Generator", nullptr, &showNormalMapGen);
-            ImGui::MenuItem("Floor Layers", nullptr, &showFloorLayers);
-            ImGui::MenuItem("Staircase Generator", nullptr, &showStaircaseGen);
-            ImGui::Separator();
-            ImGui::MenuItem("Help", "F1", &showHelp);
-            ImGui::EndMenu();
-        }
-
-        // ── Help ──────────────────────────────────────────────────────────────
-        if (ImGui::BeginMenu("Help"))
-        {
-            if (ImGui::MenuItem("Help", "F1"))
-                helpPanel.setOpen(true);
-            ImGui::EndMenu();
-        }
-
-        // ── Tools ──────────────────────────────────────────────────────────────
+        // ── Tools ────────────────────────────────────────────────────────────────
         if (ImGui::BeginMenu("Tools"))
         {
             if (ImGui::MenuItem("Map Doctor", "Cmd+Shift+M"))
@@ -420,6 +392,34 @@ static void drawMenuBar(EditMapDocument& doc,
                 }
             }
 
+            ImGui::EndMenu();
+        }
+
+        // ── Window ───────────────────────────────────────────────────────────────
+        if (ImGui::BeginMenu("Window"))
+        {
+            ImGui::MenuItem("2D Viewport", nullptr, &show2DViewport);
+            ImGui::MenuItem("3D Viewport", nullptr, &show3DViewport);
+            ImGui::MenuItem("Property Inspector", nullptr, &showPropertyInspector);
+            ImGui::MenuItem("Object Browser", nullptr, &showObjectBrowser);
+            ImGui::MenuItem("Asset Browser", nullptr, &showAssetBrowser);
+            ImGui::MenuItem("Layers", nullptr, &showLayers);
+            ImGui::MenuItem("Output Log", nullptr, &showOutputLog);
+            ImGui::Separator();
+            ImGui::MenuItem("Render Settings", nullptr, &showRenderSettings);
+            ImGui::MenuItem("Normal Map Generator", nullptr, &showNormalMapGen);
+            ImGui::MenuItem("Floor Layers", nullptr, &showFloorLayers);
+            ImGui::MenuItem("Staircase Generator", nullptr, &showStaircaseGen);
+            ImGui::Separator();
+            ImGui::MenuItem("Help", "F1", &showHelp);
+            ImGui::EndMenu();
+        }
+
+        // ── Help ───────────────────────────────────────────────────────────────
+        if (ImGui::BeginMenu("Help"))
+        {
+            if (ImGui::MenuItem("Help", "F1"))
+                helpPanel.setOpen(true);
             ImGui::EndMenu();
         }
 
