@@ -495,6 +495,7 @@ kernel void path_trace_main(
     // geoNormal is always the correct front-face normal) eliminates the bug.
     float3 V_center = -centerDir;
     float3 spotDirectRadiance = float3(0.0f);
+    float3 pointDirectRadiance = float3(0.0f);
     {
         const uint numSpots = min(spotLightCount, 16u);
         for (uint si = 0; si < numSpots; ++si)
@@ -540,6 +541,57 @@ kernel void path_trace_main(
                                                     centerSurf.albedo, centerSurf.roughness,
                                                     centerSurf.metalness)
                                     * sColor * sInt * cone * atten * T;
+            }
+        }
+    }
+
+    // ─── Point lights (pixel-centre surface, outside jitter loop) ───────────────
+    // Moved outside the jitter loop for the same reason as spot lights: inside
+    // the loop, evaluate_surface() may flip geoNormal to face the jittered ray.
+    // On curved walls with smooth per-vertex normals, a jittered ray at grazing
+    // incidence can flip geoNormal inward, pushing the shadow ray origin through
+    // the wall and causing immediate self-intersection.  SVGF then averages the
+    // correctly-lit samples with the self-occluded samples, dimming the light
+    // contribution to near-zero — producing the characteristic "flash then fade"
+    // artifact when a particle emitter with emit_light is near a curved surface.
+    {
+        const uint numLights = min(lightCount, 64u);
+        for (uint i = 0; i < numLights; ++i)
+        {
+            float3 lPos   = lights[i].positionRadius.xyz;
+            float  lRad   = lights[i].positionRadius.w;
+            float3 lColor = lights[i].colorIntensity.xyz;
+            float  lInt   = lights[i].colorIntensity.w;
+
+            float3 toLight = lPos - centerSurf.position;
+            float  dist    = length(toLight);
+            if (dist > lRad || dist < 0.0001f) continue;
+
+            float3 L     = toLight / dist;
+            float  NdotL = max(dot(centerSurf.normal, L), 0.0f);
+            if (NdotL <= 0.0f) continue;
+
+            float attenuation = lInt / (dist * dist + 0.0001f);
+            float falloff     = saturate(1.0f - (dist / lRad));
+            attenuation      *= falloff * falloff;
+
+            ray shadowRay;
+            shadowRay.origin       = centerSurf.position + centerSurf.geoNormal * 0.001f;
+            shadowRay.direction    = L;
+            shadowRay.min_distance = 0.001f;
+            shadowRay.max_distance = dist - 0.002f;
+
+            intersector<instancing> shadowIsect;
+            shadowIsect.accept_any_intersection(true);
+            if (shadowIsect.intersect(shadowRay, tlas).type == intersection_type::none)
+            {
+                float T = compute_particle_transmittance(
+                    shadowRay.origin, L, dist - 0.002f,
+                    shadowVolumeCount, shadowVolumes, densityTextures, texSampler);
+                pointDirectRadiance += cook_torrance(centerSurf.normal, V_center, L,
+                                                     centerSurf.albedo, centerSurf.roughness,
+                                                     centerSurf.metalness)
+                                     * lColor * attenuation * T;
             }
         }
     }
@@ -645,44 +697,9 @@ kernel void path_trace_main(
             }
         }
 
-        // ── Point lights ──────────────────────────────────────────────────────
-        uint numLights = min(lightCount, 64u);
-        for (uint i = 0; i < numLights; ++i)
-        {
-            float3 lPos   = lights[i].positionRadius.xyz;
-            float  lRad   = lights[i].positionRadius.w;
-            float3 lColor = lights[i].colorIntensity.xyz;
-            float  lInt   = lights[i].colorIntensity.w;
-
-            float3 toLight = lPos - surf.position;
-            float  dist    = length(toLight);
-            if (dist > lRad || dist < 0.0001f) continue;
-
-            float3 L     = toLight / dist;
-            float  NdotL = max(dot(N, L), 0.0f);
-            if (NdotL <= 0.0f) continue;
-
-            float attenuation = lInt / (dist * dist + 0.0001f);
-            float falloff     = saturate(1.0f - (dist / lRad));
-            attenuation      *= falloff * falloff;
-
-            ray shadowRay;
-            shadowRay.origin       = surf.position + surf.geoNormal * 0.001f;
-            shadowRay.direction    = L;
-            shadowRay.min_distance = 0.001f;
-            shadowRay.max_distance = dist - 0.002f;
-
-            intersector<instancing> shadowIsect;
-            shadowIsect.accept_any_intersection(true);
-            if (shadowIsect.intersect(shadowRay, tlas).type == intersection_type::none)
-            {
-                float T = compute_particle_transmittance(
-                    shadowRay.origin, L, dist - 0.002f,
-                    shadowVolumeCount, shadowVolumes, densityTextures, texSampler);
-                radiance += cook_torrance(N, V, L, albedo, roughness, metalness)
-                          * lColor * attenuation * T;
-            }
-        }
+        // Point lights are now computed outside the jitter loop against
+        // centerSurf (see above).  The jittered loop handles sun, bounces,
+        // and particle emission only.
 
         // ── Particle volume emission (primary hit) ──────────────────────
         // Illuminate this surface from any visible emissive particle density
@@ -785,7 +802,9 @@ kernel void path_trace_main(
     // spotDirectRadiance is added before the /spp division so it contributes
     // at full weight — it was computed once (not per sample) so dividing by
     // spp would incorrectly halve/quarter it at spp > 1.
-    float3 irradiance = (spotDirectRadiance + radianceAccum / float(spp)) / safeAlbedo;
+    // spotDirectRadiance and pointDirectRadiance are each computed once (pixel-
+    // centre surface, outside the spp loop) so they are NOT divided by spp.
+    float3 irradiance = (spotDirectRadiance + pointDirectRadiance + radianceAccum / float(spp)) / safeAlbedo;
 
     // ── Firefly suppression ───────────────────────────────────────────────────
     // Bounce rays that escape thin-shell geometry seams (wall-floor, wall-ceiling
