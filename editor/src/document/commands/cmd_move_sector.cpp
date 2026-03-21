@@ -26,9 +26,13 @@ void CmdMoveSector::execute()
     }
     else
     {
-        // Redo: re-apply the delta.
+        // Redo: re-apply the delta to wall vertices and curve control points.
         for (auto& wall : sectors[m_sectorId].walls)
+        {
             wall.p0 += m_delta;
+            if (wall.curveControlA.has_value()) *wall.curveControlA += m_delta;
+            if (wall.curveControlB.has_value()) *wall.curveControlB += m_delta;
+        }
     }
 
     m_doc.markDirty();
@@ -40,7 +44,11 @@ void CmdMoveSector::undo()
     DAEDALUS_ASSERT(m_sectorId < sectors.size(), "CmdMoveSector::undo: invalid sector id");
 
     for (auto& wall : sectors[m_sectorId].walls)
+    {
         wall.p0 -= m_delta;
+        if (wall.curveControlA.has_value()) *wall.curveControlA -= m_delta;
+        if (wall.curveControlB.has_value()) *wall.curveControlB -= m_delta;
+    }
 
     m_doc.markDirty();
 }

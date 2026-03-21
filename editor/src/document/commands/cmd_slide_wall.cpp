@@ -36,10 +36,13 @@ void CmdSlideWall::execute()
     }
     else
     {
-        // Redo.
-        const std::size_t n = walls.size();
+        // Redo: restore final vertex positions and re-apply delta to curve control points.
+        const std::size_t n     = walls.size();
         walls[m_wallIdx].p0             = m_newPos1;
         walls[(m_wallIdx + 1) % n].p0   = m_newPos2;
+        const glm::vec2 delta = m_newPos1 - m_origPos1;
+        if (walls[m_wallIdx].curveControlA.has_value()) *walls[m_wallIdx].curveControlA += delta;
+        if (walls[m_wallIdx].curveControlB.has_value()) *walls[m_wallIdx].curveControlB += delta;
     }
 
     m_doc.markDirty();
@@ -52,9 +55,12 @@ void CmdSlideWall::undo()
     auto& walls = sectors[m_sectorId].walls;
     DAEDALUS_ASSERT(m_wallIdx < walls.size(), "CmdSlideWall::undo: invalid wall index");
 
-    const std::size_t n = walls.size();
+    const std::size_t n     = walls.size();
     walls[m_wallIdx].p0             = m_origPos1;
     walls[(m_wallIdx + 1) % n].p0   = m_origPos2;
+    const glm::vec2 delta = m_newPos1 - m_origPos1;
+    if (walls[m_wallIdx].curveControlA.has_value()) *walls[m_wallIdx].curveControlA -= delta;
+    if (walls[m_wallIdx].curveControlB.has_value()) *walls[m_wallIdx].curveControlB -= delta;
 
     m_doc.markDirty();
 }

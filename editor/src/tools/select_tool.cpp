@@ -106,14 +106,16 @@ void SelectTool::onMouseDown(EditMapDocument& doc,
                 // Begin wall (slide) drag.
                 const auto&       wls = map.sectors[bestSector].walls;
                 const std::size_t n   = wls.size();
-                m_dragTarget    = DragTarget::Wall;
-                m_dragSectorId  = bestSector;
-                m_dragWallIndex = bestWall;
-                m_dragOrigPos   = wls[bestWall].p0;
-                m_dragOrig2     = wls[(bestWall + 1) % n].p0;
-                m_dragClickPos  = p;
-                m_dragMoved     = false;
-                m_dragFirstMove = true;
+                m_dragTarget           = DragTarget::Wall;
+                m_dragSectorId         = bestSector;
+                m_dragWallIndex        = bestWall;
+                m_dragOrigPos          = wls[bestWall].p0;
+                m_dragOrig2            = wls[(bestWall + 1) % n].p0;
+                m_dragOrigWallCurveA   = wls[bestWall].curveControlA;
+                m_dragOrigWallCurveB   = wls[bestWall].curveControlB;
+                m_dragClickPos         = p;
+                m_dragMoved            = false;
+                m_dragFirstMove        = true;
             }
             return;
         }
@@ -151,12 +153,20 @@ void SelectTool::onMouseDown(EditMapDocument& doc,
             sel.type = SelectionType::Sector;
             sel.sectors.push_back(hit);
 
-            // Save all wall vertex positions for sector drag.
+            // Save all wall vertex positions and curve control points for sector drag.
             const auto& walls = map.sectors[hit].walls;
             m_dragOrigAll.clear();
             m_dragOrigAll.reserve(walls.size());
+            m_dragOrigCurveA.clear();
+            m_dragOrigCurveA.reserve(walls.size());
+            m_dragOrigCurveB.clear();
+            m_dragOrigCurveB.reserve(walls.size());
             for (const auto& wall : walls)
+            {
                 m_dragOrigAll.push_back(wall.p0);
+                m_dragOrigCurveA.push_back(wall.curveControlA);
+                m_dragOrigCurveB.push_back(wall.curveControlB);
+            }
 
             m_dragTarget    = DragTarget::Sector;
             m_dragSectorId  = hit;
@@ -207,6 +217,11 @@ void SelectTool::onMouseMove(EditMapDocument& doc,
         const glm::vec2   delta = mouse - m_dragClickPos;
         walls[m_dragWallIndex].p0             = m_dragOrigPos + delta;
         walls[(m_dragWallIndex + 1) % n].p0   = m_dragOrig2   + delta;
+        // Move curve control points on the slid wall by the same delta.
+        if (m_dragOrigWallCurveA.has_value())
+            walls[m_dragWallIndex].curveControlA = *m_dragOrigWallCurveA + delta;
+        if (m_dragOrigWallCurveB.has_value())
+            walls[m_dragWallIndex].curveControlB = *m_dragOrigWallCurveB + delta;
         break;
     }
     case DragTarget::Sector:
@@ -215,7 +230,14 @@ void SelectTool::onMouseMove(EditMapDocument& doc,
         if (m_dragOrigAll.size() != walls.size()) return;
         const glm::vec2 delta = mouse - m_dragClickPos;
         for (std::size_t i = 0; i < walls.size(); ++i)
+        {
             walls[i].p0 = m_dragOrigAll[i] + delta;
+            // Move curve control points by the same delta.
+            if (i < m_dragOrigCurveA.size() && m_dragOrigCurveA[i].has_value())
+                walls[i].curveControlA = *m_dragOrigCurveA[i] + delta;
+            if (i < m_dragOrigCurveB.size() && m_dragOrigCurveB[i].has_value())
+                walls[i].curveControlB = *m_dragOrigCurveB[i] + delta;
+        }
         break;
     }
     default:

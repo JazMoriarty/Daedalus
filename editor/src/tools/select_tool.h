@@ -5,6 +5,7 @@
 
 #include <glm/glm.hpp>
 #include <cstddef>
+#include <optional>
 #include <vector>
 
 namespace daedalus::editor
@@ -57,6 +58,12 @@ private:
     glm::vec2               m_dragOrig2{};        ///< Wall drag: orig p0 of wall[(i+1)%n].
     glm::vec2               m_dragClickPos{};     ///< Wall/Sector: map pos at drag start.
     std::vector<glm::vec2>  m_dragOrigAll{};      ///< Sector drag: orig p0 for every wall.
+    /// Sector drag: saved curveControlA/B for every wall (nullopt if the wall has no curve).
+    std::vector<std::optional<glm::vec2>> m_dragOrigCurveA;
+    std::vector<std::optional<glm::vec2>> m_dragOrigCurveB;
+    /// Wall slide drag: saved curveControlA/B for the dragged wall.
+    std::optional<glm::vec2> m_dragOrigWallCurveA;
+    std::optional<glm::vec2> m_dragOrigWallCurveB;
     bool                    m_dragMoved     = false; ///< True once target actually moved.
     bool                    m_dragFirstMove = true;  ///< True until onMouseMove fires; aligns
                                                      ///<  click anchor to grid-snapped position.

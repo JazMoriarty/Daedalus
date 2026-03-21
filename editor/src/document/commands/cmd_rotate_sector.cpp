@@ -27,10 +27,16 @@ CmdRotateSector::CmdRotateSector(EditMapDocument& doc,
         sum += w.p0;
     m_centroid = walls.empty() ? glm::vec2{} : sum / static_cast<float>(walls.size());
 
-    // Snapshot original positions so undo() can restore them exactly.
+    // Snapshot original positions and curve control points for undo().
     m_origPositions.reserve(walls.size());
+    m_origCurveA.reserve(walls.size());
+    m_origCurveB.reserve(walls.size());
     for (const auto& w : walls)
+    {
         m_origPositions.push_back(w.p0);
+        m_origCurveA.push_back(w.curveControlA);
+        m_origCurveB.push_back(w.curveControlB);
+    }
 }
 
 void CmdRotateSector::execute()
@@ -42,13 +48,17 @@ void CmdRotateSector::execute()
     const float cosA = std::cos(rad);
     const float sinA = std::sin(rad);
 
+    auto rotatePoint = [&](glm::vec2 pt) -> glm::vec2 {
+        const glm::vec2 d = pt - m_centroid;
+        return m_centroid + glm::vec2{d.x * cosA - d.y * sinA,
+                                      d.x * sinA + d.y * cosA};
+    };
+
     for (auto& wall : sectors[m_sectorId].walls)
     {
-        const glm::vec2 d = wall.p0 - m_centroid;
-        wall.p0 = m_centroid + glm::vec2{
-            d.x * cosA - d.y * sinA,
-            d.x * sinA + d.y * cosA
-        };
+        wall.p0 = rotatePoint(wall.p0);
+        if (wall.curveControlA.has_value()) *wall.curveControlA = rotatePoint(*wall.curveControlA);
+        if (wall.curveControlB.has_value()) *wall.curveControlB = rotatePoint(*wall.curveControlB);
     }
 
     m_doc.markDirty();
@@ -64,7 +74,11 @@ void CmdRotateSector::undo()
                     "CmdRotateSector::undo: wall count mismatch");
 
     for (std::size_t i = 0; i < walls.size(); ++i)
+    {
         walls[i].p0 = m_origPositions[i];
+        walls[i].curveControlA = (i < m_origCurveA.size()) ? m_origCurveA[i] : std::nullopt;
+        walls[i].curveControlB = (i < m_origCurveB.size()) ? m_origCurveB[i] : std::nullopt;
+    }
 
     m_doc.markDirty();
 }

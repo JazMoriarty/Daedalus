@@ -10,6 +10,7 @@
 #include "daedalus/world/world_types.h"
 
 #include <glm/glm.hpp>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -42,8 +43,11 @@ private:
     /// Centroid computed at construction; pivot for the rotation.
     glm::vec2 m_centroid{};
 
-    /// Snapshot of wall positions before execute() so undo() restores exactly.
+    /// Snapshot of wall positions before execute() so undo() can restore them exactly.
     std::vector<glm::vec2> m_origPositions;
+    /// Snapshots of curve control points (nullopt when the wall has no curve).
+    std::vector<std::optional<glm::vec2>> m_origCurveA;
+    std::vector<std::optional<glm::vec2>> m_origCurveB;
 };
 
 } // namespace daedalus::editor
