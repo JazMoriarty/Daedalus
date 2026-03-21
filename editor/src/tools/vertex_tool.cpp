@@ -43,11 +43,9 @@ void VertexTool::onMouseDown(EditMapDocument& doc,
         return;  // No vertex near the click — selection unchanged.
 
     // Select the vertex.
-    auto& sel           = doc.selection();
+    auto& sel = doc.selection();
     sel.clear();
-    sel.type            = SelectionType::Vertex;
-    sel.vertexSectorId  = bestSector;
-    sel.vertexWallIndex = bestWall;
+    sel.items.push_back({SelectionType::Vertex, bestSector, bestWall});
 
     // Begin drag.
     m_dragging      = true;
@@ -93,10 +91,9 @@ void VertexTool::onMouseUp(EditMapDocument& doc,
         doc, m_dragSectorId, m_dragWallIndex, m_dragOrigPos, finalPos));
 
     // Keep vertex selected after the drag.
-    auto& sel           = doc.selection();
-    sel.type            = SelectionType::Vertex;
-    sel.vertexSectorId  = m_dragSectorId;
-    sel.vertexWallIndex = m_dragWallIndex;
+    auto& sel = doc.selection();
+    sel.clear();
+    sel.items.push_back({SelectionType::Vertex, m_dragSectorId, m_dragWallIndex});
 
     (void)mapX; (void)mapZ;
 }

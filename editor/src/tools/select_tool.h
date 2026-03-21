@@ -49,7 +49,7 @@ private:
     static constexpr float k_wallThresholdSq = 0.25f * 0.25f; ///< Wall pick dist².
 
     // ─── Drag state ───────────────────────────────────────────────────────────
-    enum class DragTarget { None, Vertex, Wall, Sector };
+    enum class DragTarget { None, Vertex, Wall, Sector, MultiVertex };
 
     DragTarget              m_dragTarget    = DragTarget::None;
     world::SectorId         m_dragSectorId  = world::INVALID_SECTOR_ID;
@@ -61,6 +61,9 @@ private:
     /// Sector drag: saved curveControlA/B for every wall (nullopt if the wall has no curve).
     std::vector<std::optional<glm::vec2>> m_dragOrigCurveA;
     std::vector<std::optional<glm::vec2>> m_dragOrigCurveB;
+    /// MultiVertex drag: original (sectorId, wallIndex, p0) for each selected vertex.
+    struct VertexOrig { world::SectorId sectorId; std::size_t wallIndex; glm::vec2 p0; };
+    std::vector<VertexOrig> m_multiVertexOrig;
     /// Wall slide drag: saved curveControlA/B for the dragged wall.
     std::optional<glm::vec2> m_dragOrigWallCurveA;
     std::optional<glm::vec2> m_dragOrigWallCurveB;

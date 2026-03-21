@@ -61,11 +61,9 @@ void CmdSplitWall::execute()
         newWall);
 
     // Select the new midpoint vertex so the user can drag-refine immediately.
-    auto& sel           = m_doc.selection();
+    auto& sel = m_doc.selection();
     sel.clear();
-    sel.type            = SelectionType::Vertex;
-    sel.vertexSectorId  = m_sectorId;
-    sel.vertexWallIndex = m_wallIndex + 1;
+    sel.items.push_back({SelectionType::Vertex, m_sectorId, m_wallIndex + 1});
 
     m_doc.markDirty();
     m_doc.log(std::format("Split wall {} of sector {} at ({:.2f}, {:.2f}).",
@@ -93,11 +91,9 @@ void CmdSplitWall::undo()
     sector.walls[m_wallIndex] = m_origWall;
 
     // Restore wall selection.
-    auto& sel        = m_doc.selection();
+    auto& sel = m_doc.selection();
     sel.clear();
-    sel.type         = SelectionType::Wall;
-    sel.wallSectorId = m_sectorId;
-    sel.wallIndex    = m_wallIndex;
+    sel.items.push_back({SelectionType::Wall, m_sectorId, m_wallIndex});
 
     m_doc.markDirty();
 }

@@ -319,12 +319,13 @@ static void drawMenuBar(EditMapDocument& doc,
 
             ImGui::Separator();
 
-            const bool hasSectorSel =
-                doc.selection().type == SelectionType::Sector &&
-                !doc.selection().sectors.empty();
+            const SelectionState& editSel    = doc.selection();
+            const bool            hasSectorSel =
+                editSel.uniformType() == SelectionType::Sector &&
+                !editSel.items.empty();
 
             if (ImGui::MenuItem("Copy", "Cmd+C", false, hasSectorSel))
-                doc.copySector(doc.selection().sectors.front());
+                doc.copySector(editSel.items[0].sectorId);
 
             if (ImGui::MenuItem("Paste", "Cmd+V", false, doc.hasClipboard()))
                 doc.pushCommand(std::make_unique<CmdPasteSector>(
@@ -334,7 +335,7 @@ static void drawMenuBar(EditMapDocument& doc,
             if (ImGui::MenuItem("Duplicate", "Cmd+D", false, hasSectorSel))
                 doc.pushCommand(std::make_unique<CmdDuplicateSector>(
                     doc,
-                    doc.selection().sectors.front(),
+                    editSel.items[0].sectorId,
                     glm::vec2{gridStep, gridStep}));
 
             ImGui::EndMenu();
@@ -759,8 +760,7 @@ int main(int /*argc*/, char* /*argv*/[])
                             drawSectorTool.cancel();
                         else
                         {
-                            SDL_Log("[main] sel.clear from Escape key");
-                            doc.selection().clear();
+                        doc.selection().clear();
                         }
                     }
                     // Tool shortcuts suppressed while mouselook is active.
@@ -798,10 +798,10 @@ int main(int /*argc*/, char* /*argv*/[])
                             // corridor junction before pressing W.
                             // Hold Shift to force a midpoint split instead.
                             const SelectionState& sel = doc.selection();
-                            if (sel.type == SelectionType::Wall)
+                            if (sel.hasSingleOf(SelectionType::Wall))
                             {
-                                const world::SectorId sid = sel.wallSectorId;
-                                const std::size_t     wi  = sel.wallIndex;
+                                const world::SectorId sid = sel.items[0].sectorId;
+                                const std::size_t     wi  = sel.items[0].index;
 
                                 glm::vec2 splitPt =
                                     {CmdSplitWall::k_useMidpoint,
@@ -863,7 +863,7 @@ int main(int /*argc*/, char* /*argv*/[])
                         {
                             // T: translate gizmo — consumed by 3D viewport when hovered+entity.
                             if (vp3d.isHovered() &&
-                                doc.selection().type == SelectionType::Entity)
+                                doc.selection().hasSingleOf(SelectionType::Entity))
                                 vp3d.setGizmoMode(GizmoMode::Translate);
                             else
                                 doc.log("T — Translate: select an entity while hovering the 3D viewport.");
@@ -872,7 +872,7 @@ int main(int /*argc*/, char* /*argv*/[])
                         {
                             // Y: scale gizmo — consumed by 3D viewport when hovered+entity.
                             if (vp3d.isHovered() &&
-                                doc.selection().type == SelectionType::Entity)
+                                doc.selection().hasSingleOf(SelectionType::Entity))
                                 vp3d.setGizmoMode(GizmoMode::Scale);
                             else
                                 doc.log("Y — Scale: select an entity while hovering the 3D viewport.");
@@ -881,16 +881,16 @@ int main(int /*argc*/, char* /*argv*/[])
                         {
                             const SelectionState& sel = doc.selection();
                             if (vp3d.isHovered() &&
-                                sel.type == SelectionType::Entity)
+                                sel.hasSingleOf(SelectionType::Entity))
                             {
                                 // R in 3D viewport: rotate gizmo.
                                 vp3d.setGizmoMode(GizmoMode::Rotate);
                             }
-                            else if (sel.type == SelectionType::Sector &&
-                                     !sel.sectors.empty())
+                            else if (sel.uniformType() == SelectionType::Sector &&
+                                     !sel.items.empty())
                             {
                                 // R elsewhere: rotate selected sector.
-                                vp2d.openRotatePopup(sel.sectors.front());
+                                vp2d.openRotatePopup(sel.items[0].sectorId);
                             }
                             else
                             {
@@ -1345,31 +1345,31 @@ int main(int /*argc*/, char* /*argv*/[])
                         else if (sc == SDL_SCANCODE_BACKSPACE ||
                                  sc == SDL_SCANCODE_DELETE)
                         {
-                            // Delete — remove selected sector(s) or light.
+                        // Delete — remove selected sector(s) or light.
                             const SelectionState& sel = doc.selection();
-                            if (sel.type == SelectionType::Sector &&
-                                !sel.sectors.empty())
+                            if (sel.uniformType() == SelectionType::Sector &&
+                                !sel.items.empty())
                             {
                                 // Delete sectors in reverse index order so earlier
                                 // indices stay valid as we remove later ones.
-                                std::vector<world::SectorId> sorted = sel.sectors;
+                                std::vector<world::SectorId> sorted = sel.selectedSectors();
                                 std::sort(sorted.begin(), sorted.end(),
                                           std::greater<world::SectorId>{});
                                 for (const world::SectorId sid : sorted)
                                     doc.pushCommand(
                                         std::make_unique<CmdDeleteSector>(doc, sid));
                             }
-                            else if (sel.type == SelectionType::Light)
+                            else if (sel.hasSingleOf(SelectionType::Light))
                             {
                                 doc.pushCommand(
-                                    std::make_unique<CmdDeleteLight>(doc, sel.lightIndex));
+                                    std::make_unique<CmdDeleteLight>(doc, sel.items[0].index));
                             }
-                            else if (sel.type == SelectionType::Entity)
+                            else if (sel.hasSingleOf(SelectionType::Entity))
                             {
                                 doc.pushCommand(
-                                    std::make_unique<CmdDeleteEntity>(doc, sel.entityIndex));
+                                    std::make_unique<CmdDeleteEntity>(doc, sel.items[0].index));
                             }
-                            else if (sel.type == SelectionType::PlayerStart)
+                            else if (sel.hasSingleOf(SelectionType::PlayerStart))
                             {
                                 doc.pushCommand(
                                     std::make_unique<CmdSetPlayerStart>(
@@ -1452,8 +1452,9 @@ int main(int /*argc*/, char* /*argv*/[])
                     if (sc == SDL_SCANCODE_C)
                     {
                         const SelectionState& sel = doc.selection();
-                        if (sel.type == SelectionType::Sector && !sel.sectors.empty())
-                            doc.copySector(sel.sectors.front());
+                        if (sel.uniformType() == SelectionType::Sector &&
+                            !sel.items.empty())
+                            doc.copySector(sel.items[0].sectorId);
                         else
                             doc.log("Cmd+C — Copy: select a sector first.");
                     }
@@ -1477,12 +1478,13 @@ int main(int /*argc*/, char* /*argv*/[])
                     if (sc == SDL_SCANCODE_D)
                     {
                         const SelectionState& sel = doc.selection();
-                        if (sel.type == SelectionType::Sector && !sel.sectors.empty())
+                        if (sel.uniformType() == SelectionType::Sector &&
+                            !sel.items.empty())
                         {
                             doc.pushCommand(
                                 std::make_unique<CmdDuplicateSector>(
                                     doc,
-                                    sel.sectors.front(),
+                                    sel.items[0].sectorId,
                                     glm::vec2{vp2d.gridStep(), vp2d.gridStep()}));
                         }
                     }

@@ -36,6 +36,8 @@
 #include "document/commands/cmd_remove_detail_brush.h"
 #include "document/commands/cmd_set_detail_brush.h"
 #include "document/commands/cmd_set_heightfield.h"
+#include "document/commands/cmd_move_vertex.h"
+#include "daedalus/editor/compound_command.h"
 
 #include <gtest/gtest.h>
 #include <filesystem>
@@ -83,8 +85,8 @@ TEST(CmdPlaceLight, PlaceSelectsLight)
     LightDef ld;
     doc.pushCommand(std::make_unique<CmdPlaceLight>(doc, ld));
 
-    EXPECT_EQ(doc.selection().type,       SelectionType::Light);
-    EXPECT_EQ(doc.selection().lightIndex, 0u);
+    EXPECT_TRUE(doc.selection().hasSingleOf(SelectionType::Light));
+    EXPECT_EQ(doc.selection().items[0].index, 0u);
 }
 
 TEST(CmdPlaceLight, UndoRemovesLight)
@@ -586,8 +588,8 @@ TEST(CmdPlaceEntity, PlaceSelectsEntity)
     EntityDef e;
     doc.pushCommand(std::make_unique<CmdPlaceEntity>(doc, e));
 
-    EXPECT_EQ(doc.selection().type,        SelectionType::Entity);
-    EXPECT_EQ(doc.selection().entityIndex, 0u);
+    EXPECT_TRUE(doc.selection().hasSingleOf(SelectionType::Entity));
+    EXPECT_EQ(doc.selection().items[0].index, 0u);
 }
 
 TEST(CmdPlaceEntity, PlaceSetsEntityDirty)
@@ -808,7 +810,7 @@ TEST(CmdSetPlayerStart, SetsSelectionType)
     doc.pushCommand(std::make_unique<CmdSetPlayerStart>(
         doc, std::nullopt, ps));
 
-    EXPECT_EQ(doc.selection().type, SelectionType::PlayerStart);
+    EXPECT_TRUE(doc.selection().hasSingleOf(SelectionType::PlayerStart));
 }
 
 TEST(CmdSetPlayerStart, UndoClearsPlayerStart)
@@ -1620,4 +1622,185 @@ TEST(CmdSetHeightfield, OutOfRangeIsNoop)
     hf.samples.assign(4u, 0.0f);
     EXPECT_NO_THROW(doc.pushCommand(
         std::make_unique<CmdSetHeightfield>(doc, 99u, hf)));
+}
+
+// ─── Multi-vertex drag (via CompoundCommand + CmdMoveVertex) ─────────────────
+// Tests that moving multiple vertices as one compound command undoes as one
+// step — verifying the grouped-drag undo contract required by the editor.
+
+TEST(MultiVertexDrag, MovesTwoVertices)
+{
+    EditMapDocument doc;
+    addSquare(doc);  // walls: (0,0),(4,0),(4,4),(0,4)
+
+    // Simulate dragging walls 0 and 1 together by delta (1, 2).
+    constexpr glm::vec2 delta{1.0f, 2.0f};
+    const glm::vec2 origW0 = doc.mapData().sectors[0].walls[0].p0;
+    const glm::vec2 origW1 = doc.mapData().sectors[0].walls[1].p0;
+
+    // Emit the compound command as the drag would.
+    std::vector<std::unique_ptr<ICommand>> steps;
+    steps.push_back(std::make_unique<CmdMoveVertex>(
+        doc, 0u, 0u, origW0, origW0 + delta));
+    steps.push_back(std::make_unique<CmdMoveVertex>(
+        doc, 0u, 1u, origW1, origW1 + delta));
+    doc.pushCommand(std::make_unique<CompoundCommand>(
+        "Move Vertices", std::move(steps)));
+
+    EXPECT_FLOAT_EQ(doc.mapData().sectors[0].walls[0].p0.x, origW0.x + delta.x);
+    EXPECT_FLOAT_EQ(doc.mapData().sectors[0].walls[0].p0.y, origW0.y + delta.y);
+    EXPECT_FLOAT_EQ(doc.mapData().sectors[0].walls[1].p0.x, origW1.x + delta.x);
+    EXPECT_FLOAT_EQ(doc.mapData().sectors[0].walls[1].p0.y, origW1.y + delta.y);
+}
+
+TEST(MultiVertexDrag, UndoRestoresBothVertices)
+{
+    EditMapDocument doc;
+    addSquare(doc);
+
+    const glm::vec2 origW0 = doc.mapData().sectors[0].walls[0].p0;
+    const glm::vec2 origW2 = doc.mapData().sectors[0].walls[2].p0;
+
+    std::vector<std::unique_ptr<ICommand>> steps;
+    steps.push_back(std::make_unique<CmdMoveVertex>(
+        doc, 0u, 0u, origW0, origW0 + glm::vec2{5.0f, 5.0f}));
+    steps.push_back(std::make_unique<CmdMoveVertex>(
+        doc, 0u, 2u, origW2, origW2 + glm::vec2{5.0f, 5.0f}));
+    doc.pushCommand(std::make_unique<CompoundCommand>(
+        "Move Vertices", std::move(steps)));
+
+    doc.undo();
+
+    EXPECT_FLOAT_EQ(doc.mapData().sectors[0].walls[0].p0.x, origW0.x);
+    EXPECT_FLOAT_EQ(doc.mapData().sectors[0].walls[0].p0.y, origW0.y);
+    EXPECT_FLOAT_EQ(doc.mapData().sectors[0].walls[2].p0.x, origW2.x);
+    EXPECT_FLOAT_EQ(doc.mapData().sectors[0].walls[2].p0.y, origW2.y);
+}
+
+TEST(MultiVertexDrag, UndoIsSingleStep)
+{
+    EditMapDocument doc;
+    addSquare(doc);
+
+    const glm::vec2 w0 = doc.mapData().sectors[0].walls[0].p0;
+    const glm::vec2 w1 = doc.mapData().sectors[0].walls[1].p0;
+
+    std::vector<std::unique_ptr<ICommand>> steps;
+    steps.push_back(std::make_unique<CmdMoveVertex>(
+        doc, 0u, 0u, w0, w0 + glm::vec2{3.0f, 0.0f}));
+    steps.push_back(std::make_unique<CmdMoveVertex>(
+        doc, 0u, 1u, w1, w1 + glm::vec2{3.0f, 0.0f}));
+    doc.pushCommand(std::make_unique<CompoundCommand>(
+        "Move Vertices", std::move(steps)));
+
+    EXPECT_TRUE(doc.undoStack().canUndo());
+    doc.undo();
+    // After one undo step, neither vertex should have moved.
+    EXPECT_FLOAT_EQ(doc.mapData().sectors[0].walls[0].p0.x, w0.x);
+    EXPECT_FLOAT_EQ(doc.mapData().sectors[0].walls[1].p0.x, w1.x);
+    // One undo exhausted the stack (single compound).
+    EXPECT_FALSE(doc.undoStack().canUndo());
+}
+
+TEST(MultiVertexDrag, RedoReappliesBothVertices)
+{
+    EditMapDocument doc;
+    addSquare(doc);
+
+    const glm::vec2 w0 = doc.mapData().sectors[0].walls[0].p0;
+    const glm::vec2 w3 = doc.mapData().sectors[0].walls[3].p0;
+
+    std::vector<std::unique_ptr<ICommand>> steps;
+    steps.push_back(std::make_unique<CmdMoveVertex>(
+        doc, 0u, 0u, w0, w0 + glm::vec2{0.0f, 2.0f}));
+    steps.push_back(std::make_unique<CmdMoveVertex>(
+        doc, 0u, 3u, w3, w3 + glm::vec2{0.0f, 2.0f}));
+    doc.pushCommand(std::make_unique<CompoundCommand>(
+        "Move Vertices", std::move(steps)));
+    doc.undo();
+
+    ASSERT_FLOAT_EQ(doc.mapData().sectors[0].walls[0].p0.y, w0.y);
+
+    doc.redo();
+
+    EXPECT_FLOAT_EQ(doc.mapData().sectors[0].walls[0].p0.y, w0.y + 2.0f);
+    EXPECT_FLOAT_EQ(doc.mapData().sectors[0].walls[3].p0.y, w3.y + 2.0f);
+}
+
+// ─── SelectionState helpers ──────────────────────────────────────────────────
+// Unit tests for the new SelectionItem / SelectionState API.
+
+TEST(SelectionState, ClearResetsItems)
+{
+    SelectionState sel;
+    sel.items.push_back({SelectionType::Sector, 0u, 0});
+    sel.items.push_back({SelectionType::Light, INVALID_SECTOR_ID, 2});
+    sel.clear();
+    EXPECT_TRUE(sel.items.empty());
+    EXPECT_FALSE(sel.hasSelection());
+}
+
+TEST(SelectionState, UniformTypeSingleItem)
+{
+    SelectionState sel;
+    sel.items.push_back({SelectionType::Wall, 1u, 3});
+    EXPECT_EQ(sel.uniformType(), SelectionType::Wall);
+}
+
+TEST(SelectionState, UniformTypeMixedReturnsNone)
+{
+    SelectionState sel;
+    sel.items.push_back({SelectionType::Sector, 0u, 0});
+    sel.items.push_back({SelectionType::Light, INVALID_SECTOR_ID, 0});
+    EXPECT_EQ(sel.uniformType(), SelectionType::None);
+}
+
+TEST(SelectionState, UniformTypeEmptyReturnsNone)
+{
+    SelectionState sel;
+    EXPECT_EQ(sel.uniformType(), SelectionType::None);
+}
+
+TEST(SelectionState, HasSingleOf)
+{
+    SelectionState sel;
+    sel.items.push_back({SelectionType::Entity, INVALID_SECTOR_ID, 7});
+    EXPECT_TRUE(sel.hasSingleOf(SelectionType::Entity));
+    EXPECT_FALSE(sel.hasSingleOf(SelectionType::Light));
+    sel.items.push_back({SelectionType::Entity, INVALID_SECTOR_ID, 8});
+    EXPECT_FALSE(sel.hasSingleOf(SelectionType::Entity));  // two items
+}
+
+TEST(SelectionState, IsSectorSelected)
+{
+    SelectionState sel;
+    sel.items.push_back({SelectionType::Sector, 2u, 0});
+    sel.items.push_back({SelectionType::Sector, 5u, 0});
+    EXPECT_TRUE(sel.isSectorSelected(2u));
+    EXPECT_TRUE(sel.isSectorSelected(5u));
+    EXPECT_FALSE(sel.isSectorSelected(3u));
+}
+
+TEST(SelectionState, SelectedSectors)
+{
+    SelectionState sel;
+    sel.items.push_back({SelectionType::Sector, 1u, 0});
+    sel.items.push_back({SelectionType::Light,  INVALID_SECTOR_ID, 0});
+    sel.items.push_back({SelectionType::Sector, 3u, 0});
+    const auto secs = sel.selectedSectors();
+    ASSERT_EQ(secs.size(), 2u);
+    EXPECT_EQ(secs[0], 1u);
+    EXPECT_EQ(secs[1], 3u);
+}
+
+TEST(SelectionState, SelectAllFillsSectors)
+{
+    SelectionState sel;
+    sel.selectAll(4u);
+    ASSERT_EQ(sel.items.size(), 4u);
+    for (std::size_t i = 0; i < 4u; ++i)
+    {
+        EXPECT_EQ(sel.items[i].type, SelectionType::Sector);
+        EXPECT_EQ(sel.items[i].sectorId, static_cast<SectorId>(i));
+    }
 }

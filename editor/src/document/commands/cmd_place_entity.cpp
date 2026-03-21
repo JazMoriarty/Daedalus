@@ -17,8 +17,8 @@ void CmdPlaceEntity::execute()
 
     SelectionState& sel = m_doc.selection();
     sel.clear();
-    sel.type        = SelectionType::Entity;
-    sel.entityIndex = m_insertIdx;
+    sel.items.push_back({SelectionType::Entity,
+                         world::INVALID_SECTOR_ID, m_insertIdx});
 }
 
 void CmdPlaceEntity::undo()
@@ -29,7 +29,8 @@ void CmdPlaceEntity::undo()
     m_doc.markEntityDirty();
 
     SelectionState& sel = m_doc.selection();
-    if (sel.type == SelectionType::Entity && sel.entityIndex == m_insertIdx)
+    if (sel.hasSingleOf(SelectionType::Entity) &&
+        sel.items[0].index == m_insertIdx)
         sel.clear();
 }
 

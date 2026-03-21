@@ -74,8 +74,8 @@ void CmdDeleteSector::undo()
 
     // 3. Re-select the restored sector.
     m_doc.selection().clear();
-    m_doc.selection().type = SelectionType::Sector;
-    m_doc.selection().sectors.push_back(m_sectorId);
+    m_doc.selection().items.push_back(
+        {SelectionType::Sector, m_sectorId, 0});
     m_doc.markDirty();
 }
 

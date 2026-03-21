@@ -56,8 +56,8 @@ TEST(MapDoctor, TwoWallSectorReported)
     ASSERT_FALSE(issues.empty());
     EXPECT_TRUE(hasIssueContaining(issues, "fewer than 3"));
     ASSERT_TRUE(issues[0].jumpTo.has_value());
-    EXPECT_EQ(issues[0].jumpTo->type, SelectionType::Sector);
-    EXPECT_EQ(issues[0].jumpTo->sectors.front(), 0u);
+    EXPECT_EQ(issues[0].jumpTo->uniformType(), SelectionType::Sector);
+    EXPECT_EQ(issues[0].jumpTo->items[0].sectorId, 0u);
 }
 
 TEST(MapDoctor, ZeroWallSectorReported)
@@ -85,7 +85,7 @@ TEST(MapDoctor, ZeroLengthWallReported)
     for (const auto& iss : issues)
         if (iss.description.find("zero-length") != std::string::npos &&
             iss.jumpTo.has_value() &&
-            iss.jumpTo->type == SelectionType::Wall)
+            iss.jumpTo->uniformType() == SelectionType::Wall)
             wallIssueFound = true;
     EXPECT_TRUE(wallIssueFound);
 }

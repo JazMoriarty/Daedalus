@@ -22,7 +22,7 @@ void CmdDeleteEntity::execute()
     m_doc.markEntityDirty();
 
     SelectionState& sel = m_doc.selection();
-    if (sel.type == SelectionType::Entity && sel.entityIndex == m_idx)
+    if (sel.hasSingleOf(SelectionType::Entity) && sel.items[0].index == m_idx)
         sel.clear();
 }
 
@@ -37,8 +37,8 @@ void CmdDeleteEntity::undo()
 
     SelectionState& sel = m_doc.selection();
     sel.clear();
-    sel.type        = SelectionType::Entity;
-    sel.entityIndex = insertAt;
+    sel.items.push_back({SelectionType::Entity,
+                         world::INVALID_SECTOR_ID, insertAt});
 }
 
 } // namespace daedalus::editor

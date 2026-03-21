@@ -42,8 +42,8 @@ void CmdPasteSector::execute()
     }
 
     m_doc.selection().clear();
-    m_doc.selection().type = SelectionType::Sector;
-    m_doc.selection().sectors.push_back(m_insertedId);
+    m_doc.selection().items.push_back(
+        {SelectionType::Sector, m_insertedId, 0});
     m_doc.markDirty();
 }
 

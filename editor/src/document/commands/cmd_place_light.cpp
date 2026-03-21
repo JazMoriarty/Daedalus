@@ -18,8 +18,8 @@ void CmdPlaceLight::execute()
     // Select the newly placed light.
     SelectionState& sel = m_doc.selection();
     sel.clear();
-    sel.type       = SelectionType::Light;
-    sel.lightIndex = m_insertIdx;
+    sel.items.push_back({SelectionType::Light,
+                         world::INVALID_SECTOR_ID, m_insertIdx});
 }
 
 void CmdPlaceLight::undo()
@@ -29,7 +29,8 @@ void CmdPlaceLight::undo()
                              static_cast<std::ptrdiff_t>(m_insertIdx));
 
     SelectionState& sel = m_doc.selection();
-    if (sel.type == SelectionType::Light && sel.lightIndex == m_insertIdx)
+    if (sel.hasSingleOf(SelectionType::Light) &&
+        sel.items[0].index == m_insertIdx)
         sel.clear();
 }
 

@@ -24,7 +24,7 @@ void CmdDeleteLight::execute()
 
     // Clear selection if the deleted light was selected.
     SelectionState& sel = m_doc.selection();
-    if (sel.type == SelectionType::Light && sel.lightIndex == m_idx)
+    if (sel.hasSingleOf(SelectionType::Light) && sel.items[0].index == m_idx)
         sel.clear();
 }
 
@@ -37,8 +37,8 @@ void CmdDeleteLight::undo()
     // Re-select the restored light.
     SelectionState& sel = m_doc.selection();
     sel.clear();
-    sel.type       = SelectionType::Light;
-    sel.lightIndex = insertAt;
+    sel.items.push_back({SelectionType::Light,
+                         world::INVALID_SECTOR_ID, insertAt});
 }
 
 } // namespace daedalus::editor

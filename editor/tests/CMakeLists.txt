@@ -22,6 +22,7 @@ add_executable(DaedalusEditTests
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/document/commands/cmd_set_wall_uv.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/document/commands/cmd_set_sector_ambient.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/document/commands/cmd_move_sector.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src/document/commands/cmd_move_vertex.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/document/commands/cmd_split_wall.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/document/commands/cmd_duplicate_sector.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/document/commands/cmd_place_entity.cpp

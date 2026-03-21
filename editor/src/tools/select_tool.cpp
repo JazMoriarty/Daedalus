@@ -4,13 +4,13 @@
 #include "document/commands/cmd_slide_wall.h"
 #include "document/commands/cmd_move_sector.h"
 #include "daedalus/editor/edit_map_document.h"
+#include "daedalus/editor/compound_command.h"
 #include "daedalus/world/map_data.h"
 
 #include "imgui.h"
 
 #include <algorithm>
 #include <cmath>
-#include <cstdio>
 #include <limits>
 #include <memory>
 #include <vector>
@@ -55,17 +55,67 @@ void SelectTool::onMouseDown(EditMapDocument& doc,
 
         if (bestSector != world::INVALID_SECTOR_ID)
         {
-            sel.clear();
-            sel.type            = SelectionType::Vertex;
-            sel.vertexSectorId  = bestSector;
-            sel.vertexWallIndex = bestWall;
+            if (shiftHeld)
+            {
+                // Shift+click: add/remove this vertex from the multi-selection (no drag).
+                if (sel.uniformType() != SelectionType::Vertex)
+                    sel.clear();
+                const auto it = std::find_if(
+                    sel.items.begin(), sel.items.end(),
+                    [bestSector, bestWall](const SelectionItem& item) {
+                        return item.sectorId == bestSector && item.index == bestWall;
+                    });
+                if (it != sel.items.end())
+                    sel.items.erase(it);
+                else
+                    sel.items.push_back({SelectionType::Vertex, bestSector, bestWall});
+                return;
+            }
 
-            // Begin vertex drag (Shift only disables snapping — drag always starts).
-            m_dragTarget    = DragTarget::Vertex;
-            m_dragSectorId  = bestSector;
-            m_dragWallIndex = bestWall;
-            m_dragOrigPos   = map.sectors[bestSector].walls[bestWall].p0;
-            m_dragMoved     = false;
+            // Check if this vertex is already part of a multi-vertex selection.
+            const bool alreadyInSel =
+                sel.uniformType() == SelectionType::Vertex &&
+                sel.items.size() > 1 &&
+                std::find_if(sel.items.begin(), sel.items.end(),
+                    [bestSector, bestWall](const SelectionItem& item) {
+                        return item.sectorId == bestSector && item.index == bestWall;
+                    }) != sel.items.end();
+
+            if (alreadyInSel)
+            {
+                // Keep the current multi-vertex selection and begin a grouped drag.
+                m_multiVertexOrig.clear();
+                m_multiVertexOrig.reserve(sel.items.size());
+                for (const auto& item : sel.items)
+                {
+                    if (item.sectorId < static_cast<world::SectorId>(
+                            map.sectors.size()) &&
+                        item.index < map.sectors[item.sectorId].walls.size())
+                    {
+                        m_multiVertexOrig.push_back({
+                            item.sectorId, item.index,
+                            map.sectors[item.sectorId].walls[item.index].p0
+                        });
+                    }
+                }
+                m_dragTarget    = DragTarget::MultiVertex;
+                m_dragSectorId  = bestSector;  // reference vertex for delta calc
+                m_dragWallIndex = bestWall;
+                m_dragClickPos  = p;
+                m_dragFirstMove = true;
+                m_dragMoved     = false;
+            }
+            else
+            {
+                // Normal click: replace selection with this single vertex and begin drag.
+                sel.clear();
+                sel.items.push_back({SelectionType::Vertex, bestSector, bestWall});
+                m_dragTarget    = DragTarget::Vertex;
+                m_dragSectorId  = bestSector;
+                m_dragWallIndex = bestWall;
+                m_dragOrigPos   = map.sectors[bestSector].walls[bestWall].p0;
+                m_dragMoved     = false;
+            }
             return;
         }
     }
@@ -97,9 +147,7 @@ void SelectTool::onMouseDown(EditMapDocument& doc,
         if (bestSector != world::INVALID_SECTOR_ID)
         {
             sel.clear();
-            sel.type         = SelectionType::Wall;
-            sel.wallSectorId = bestSector;
-            sel.wallIndex    = bestWall;
+            sel.items.push_back({SelectionType::Wall, bestSector, bestWall});
 
             if (!shiftHeld)
             {
@@ -130,28 +178,27 @@ void SelectTool::onMouseDown(EditMapDocument& doc,
             // Shift+click: toggle sector in/out of multi-selection (no drag).
             if (hit != world::INVALID_SECTOR_ID)
             {
-                if (sel.type != SelectionType::Sector)
-                {
+                if (sel.uniformType() != SelectionType::Sector)
                     sel.clear();
-                    sel.type = SelectionType::Sector;
-                }
-                const auto it = std::find(sel.sectors.begin(), sel.sectors.end(), hit);
-                if (it != sel.sectors.end())
-                    sel.sectors.erase(it);
+                const auto it = std::find_if(
+                    sel.items.begin(), sel.items.end(),
+                    [hit](const SelectionItem& item) {
+                        return item.sectorId == hit;
+                    });
+                if (it != sel.items.end())
+                    sel.items.erase(it);
                 else
-                    sel.sectors.push_back(hit);
+                    sel.items.push_back({SelectionType::Sector, hit, 0});
             }
             // Shift+click on empty space: preserve selection.
             return;
         }
 
         // Normal click: replace selection and start sector drag.
-        fprintf(stderr, "[sel] DESELECT (empty-space click) mapX=%.2f mapZ=%.2f\n", mapX, mapZ);
         sel.clear();
         if (hit != world::INVALID_SECTOR_ID)
         {
-            sel.type = SelectionType::Sector;
-            sel.sectors.push_back(hit);
+            sel.items.push_back({SelectionType::Sector, hit, 0});
 
             // Save all wall vertex positions and curve control points for sector drag.
             const auto& walls = map.sectors[hit].walls;
@@ -183,7 +230,8 @@ void SelectTool::onMouseMove(EditMapDocument& doc,
                               float mapX, float mapZ)
 {
     if (m_dragTarget == DragTarget::None) return;
-    if (m_dragSectorId >= doc.mapData().sectors.size()) return;
+    if (m_dragTarget != DragTarget::MultiVertex &&
+        m_dragSectorId >= doc.mapData().sectors.size()) return;
 
     const glm::vec2 mouse{mapX, mapZ};
     auto& sectors = doc.mapData().sectors;
@@ -194,7 +242,9 @@ void SelectTool::onMouseMove(EditMapDocument& doc,
     // shifting any wall endpoints that lie at off-grid positions (e.g. after
     // a vertex snap).
     if (m_dragFirstMove &&
-        (m_dragTarget == DragTarget::Wall || m_dragTarget == DragTarget::Sector))
+        (m_dragTarget == DragTarget::Wall ||
+         m_dragTarget == DragTarget::Sector ||
+         m_dragTarget == DragTarget::MultiVertex))
     {
         m_dragClickPos  = mouse;
         m_dragFirstMove = false;
@@ -240,6 +290,20 @@ void SelectTool::onMouseMove(EditMapDocument& doc,
         }
         break;
     }
+    case DragTarget::MultiVertex:
+    {
+        // Move all selected vertices by the same delta.
+        const glm::vec2 delta = mouse - m_dragClickPos;
+        for (const auto& orig : m_multiVertexOrig)
+        {
+            if (orig.sectorId < static_cast<world::SectorId>(sectors.size()) &&
+                orig.wallIndex < sectors[orig.sectorId].walls.size())
+            {
+                sectors[orig.sectorId].walls[orig.wallIndex].p0 = orig.p0 + delta;
+            }
+        }
+        break;
+    }
     default:
         break;
     }
@@ -260,9 +324,10 @@ void SelectTool::onMouseUp(EditMapDocument& doc,
     m_dragTarget = DragTarget::None;
 
     if (!m_dragMoved) return;
-    if (m_dragSectorId >= doc.mapData().sectors.size()) return;
 
     auto& sectors = doc.mapData().sectors;
+    if (target != DragTarget::MultiVertex &&
+        m_dragSectorId >= static_cast<world::SectorId>(sectors.size())) return;
 
     switch (target)
     {
@@ -275,10 +340,9 @@ void SelectTool::onMouseUp(EditMapDocument& doc,
             doc, m_dragSectorId, m_dragWallIndex, m_dragOrigPos, finalPos));
 
         // Keep vertex selected.
-        auto& sel           = doc.selection();
-        sel.type            = SelectionType::Vertex;
-        sel.vertexSectorId  = m_dragSectorId;
-        sel.vertexWallIndex = m_dragWallIndex;
+        auto& sel = doc.selection();
+        sel.clear();
+        sel.items.push_back({SelectionType::Vertex, m_dragSectorId, m_dragWallIndex});
         break;
     }
     case DragTarget::Wall:
@@ -304,6 +368,25 @@ void SelectTool::onMouseUp(EditMapDocument& doc,
             doc, m_dragSectorId, delta));
         break;
     }
+    case DragTarget::MultiVertex:
+    {
+        // Emit one CmdMoveVertex per selected vertex, all as one CompoundCommand.
+        std::vector<std::unique_ptr<ICommand>> steps;
+        for (const auto& orig : m_multiVertexOrig)
+        {
+            if (orig.sectorId >= static_cast<world::SectorId>(sectors.size())) continue;
+            if (orig.wallIndex >= sectors[orig.sectorId].walls.size()) continue;
+            const glm::vec2 finalPos = sectors[orig.sectorId].walls[orig.wallIndex].p0;
+            if (finalPos == orig.p0) continue;  // vertex did not actually move
+            steps.push_back(std::make_unique<CmdMoveVertex>(
+                doc, orig.sectorId, orig.wallIndex, orig.p0, finalPos));
+        }
+        if (!steps.empty())
+            doc.pushCommand(std::make_unique<CompoundCommand>(
+                "Move Vertices", std::move(steps)));
+        // Selection stays as-is (all vertices remain selected).
+        break;
+    }
     default:
         break;
     }
@@ -319,32 +402,48 @@ void SelectTool::onRectSelect(EditMapDocument& doc,
 {
     const world::WorldMapData& map = doc.mapData();
     auto& sel = doc.selection();
+    sel.clear();
 
-    std::vector<world::SectorId> inRect;
+    // ── Sectors: included if any vertex lies inside the rectangle. ─────────────
     for (std::size_t si = 0; si < map.sectors.size(); ++si)
     {
         const auto& sector = map.sectors[si];
-        // Include sector if any vertex lies inside the rectangle.
         for (const auto& wall : sector.walls)
         {
             if (wall.p0.x >= minCorner.x && wall.p0.x <= maxCorner.x &&
                 wall.p0.y >= minCorner.y && wall.p0.y <= maxCorner.y)
             {
-                inRect.push_back(static_cast<world::SectorId>(si));
+                sel.items.push_back({SelectionType::Sector,
+                                     static_cast<world::SectorId>(si), 0});
                 break;
             }
         }
     }
 
-    if (inRect.empty())
+    // ── Entities: included if XZ position lies inside the rectangle. ────────────
+    const auto& entities = doc.entities();
+    for (std::size_t ei = 0; ei < entities.size(); ++ei)
     {
-        sel.clear();
+        const glm::vec2 xz{entities[ei].position.x, entities[ei].position.z};
+        if (xz.x >= minCorner.x && xz.x <= maxCorner.x &&
+            xz.y >= minCorner.y && xz.y <= maxCorner.y)
+        {
+            sel.items.push_back({SelectionType::Entity,
+                                 world::INVALID_SECTOR_ID, ei});
+        }
     }
-    else
+
+    // ── Lights: included if XZ position lies inside the rectangle. ──────────────
+    const auto& lights = doc.lights();
+    for (std::size_t li = 0; li < lights.size(); ++li)
     {
-        sel.clear();
-        sel.type    = SelectionType::Sector;
-        sel.sectors = std::move(inRect);
+        const glm::vec2 xz{lights[li].position.x, lights[li].position.z};
+        if (xz.x >= minCorner.x && xz.x <= maxCorner.x &&
+            xz.y >= minCorner.y && xz.y <= maxCorner.y)
+        {
+            sel.items.push_back({SelectionType::Light,
+                                 world::INVALID_SECTOR_ID, li});
+        }
     }
 }
 

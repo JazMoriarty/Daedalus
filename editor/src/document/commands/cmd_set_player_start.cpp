@@ -25,12 +25,13 @@ void CmdSetPlayerStart::apply(const std::optional<PlayerStart>& ps)
     {
         m_doc.setPlayerStart(*ps);
         sel.clear();
-        sel.type = SelectionType::PlayerStart;
+        sel.items.push_back({SelectionType::PlayerStart,
+                             world::INVALID_SECTOR_ID, 0});
     }
     else
     {
         m_doc.clearPlayerStart();
-        if (sel.type == SelectionType::PlayerStart)
+        if (sel.hasSingleOf(SelectionType::PlayerStart))
             sel.clear();
     }
 }

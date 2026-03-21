@@ -87,11 +87,11 @@ void LayersPanel::draw(EditMapDocument& doc)
             const auto& sectors = doc.mapData().sectors;
             SelectionState& sel = doc.selection();
             sel.clear();
-            sel.type = SelectionType::Sector;
             for (std::size_t si = 0; si < sectors.size(); ++si)
             {
                 if (doc.sectorLayerIndex(si) == i)
-                    sel.sectors.push_back(static_cast<world::SectorId>(si));
+                    sel.items.push_back({SelectionType::Sector,
+                                         static_cast<world::SectorId>(si), 0});
             }
         }
         if (ImGui::IsItemHovered())

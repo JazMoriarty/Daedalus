@@ -16,7 +16,7 @@ CmdSavePrefab::CmdSavePrefab(EditMapDocument& doc, std::string name)
     m_prefab.name = std::move(name);
 
     const SelectionState& sel = doc.selection();
-    if (sel.type != SelectionType::Sector || sel.sectors.empty())
+    if (sel.uniformType() != SelectionType::Sector || sel.items.empty())
         return;  // Nothing to capture; execute/undo will be no-ops.
 
     const auto& mapSectors = doc.mapData().sectors;
@@ -27,8 +27,9 @@ CmdSavePrefab::CmdSavePrefab(EditMapDocument& doc, std::string name)
     float minZ = std::numeric_limits<float>::max();
     float maxZ = std::numeric_limits<float>::lowest();
 
-    for (world::SectorId sid : sel.sectors)
+    for (const auto& item : sel.items)
     {
+        const world::SectorId sid = item.sectorId;
         if (sid >= mapSectors.size()) continue;
         for (const auto& wall : mapSectors[sid].walls)
         {
@@ -43,11 +44,12 @@ CmdSavePrefab::CmdSavePrefab(EditMapDocument& doc, std::string name)
     const float pivotZ = (minZ + maxZ) * 0.5f;
 
     // Capture sectors: shift wall positions to be pivot-relative, strip portals.
-    m_prefab.sectors.reserve(sel.sectors.size());
-    for (world::SectorId sid : sel.sectors)
+    m_prefab.sectors.reserve(sel.items.size());
+    for (const auto& item2 : sel.items)
     {
-        if (sid >= mapSectors.size()) continue;
-        world::Sector copy = mapSectors[sid];
+        const world::SectorId sid2 = item2.sectorId;
+        if (sid2 >= mapSectors.size()) continue;
+        world::Sector copy = mapSectors[sid2];
         for (auto& wall : copy.walls)
         {
             wall.p0.x          -= pivotX;

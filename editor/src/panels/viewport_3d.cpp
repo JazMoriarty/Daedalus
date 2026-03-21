@@ -369,11 +369,11 @@ void Viewport3D::drawTerrainAndHeightOverlays(EditMapDocument&  doc,
     if (!m_mouseCaptured)
     {
         const SelectionState& sel = doc.selection();
-        if (sel.type == SelectionType::Vertex &&
-            sel.vertexSectorId != world::INVALID_SECTOR_ID)
+        if (sel.hasSingleOf(SelectionType::Vertex) &&
+            sel.items[0].sectorId != world::INVALID_SECTOR_ID)
         {
             const auto& sectors  = doc.mapData().sectors;
-            const world::SectorId sid = sel.vertexSectorId;
+            const world::SectorId sid = sel.items[0].sectorId;
             if (sid >= static_cast<world::SectorId>(sectors.size())) return;
 
             const world::Sector& sector = sectors[sid];
@@ -463,8 +463,8 @@ void Viewport3D::drawGizmoAndHandleDrag(EditMapDocument&  doc,
     if (m_gizmoMode == GizmoMode::None) return;
 
     const SelectionState& sel = doc.selection();
-    if (sel.type != SelectionType::Entity) return;
-    const std::size_t idx = sel.entityIndex;
+    if (!sel.hasSingleOf(SelectionType::Entity)) return;
+    const std::size_t idx = sel.items[0].index;
     if (idx >= doc.entities().size()) return;
 
     EntityDef& entity = doc.entities()[idx];
@@ -881,9 +881,9 @@ void Viewport3D::draw(EditMapDocument&      doc,
         {
             const SelectionState& sel = doc.selection();
             world::SectorId terrSid   = world::INVALID_SECTOR_ID;
-            if (sel.type == SelectionType::Sector && !sel.sectors.empty())
+            if (sel.uniformType() == SelectionType::Sector && !sel.items.empty())
             {
-                const world::SectorId candidate = sel.sectors.front();
+                const world::SectorId candidate = sel.items[0].sectorId;
                 const auto& sectors = doc.mapData().sectors;
                 if (candidate < static_cast<world::SectorId>(sectors.size()) &&
                     sectors[candidate].floorShape == world::FloorShape::Heightfield &&
@@ -1029,10 +1029,10 @@ void Viewport3D::draw(EditMapDocument&      doc,
                 }
             };
 
-            if (sel.type == SelectionType::Sector && !sel.sectors.empty())
+            if (sel.uniformType() == SelectionType::Sector && !sel.items.empty())
             {
-                for (auto sid : sel.sectors)
-                    expandSector(sid);
+                for (const auto& item : sel.items)
+                    expandSector(item.sectorId);
             }
             else
             {
@@ -1688,12 +1688,14 @@ void Viewport3D::draw(EditMapDocument&      doc,
                 if (hitEntity != SIZE_MAX)
                 {
                     // Entity hit: toggle entity selection
-                    if (sel.type == SelectionType::Entity && sel.entityIndex == hitEntity)
+                    if (sel.hasSingleOf(SelectionType::Entity) &&
+                        sel.items[0].index == hitEntity)
                         sel.clear();
                     else
                     {
-                        sel.type = SelectionType::Entity;
-                        sel.entityIndex = hitEntity;
+                        sel.clear();
+                        sel.items.push_back({SelectionType::Entity,
+                                             world::INVALID_SECTOR_ID, hitEntity});
                     }
                 }
                 else if (hitSector != world::INVALID_SECTOR_ID)
@@ -1703,28 +1705,31 @@ void Viewport3D::draw(EditMapDocument&      doc,
                         hitSurface == HoveredSurface::LowerWall)
                     {
                         // Toggle: clicking the same wall deselects it.
-                        if (sel.type == SelectionType::Wall &&
-                            sel.wallSectorId == hitSector && sel.wallIndex == hitWall)
+                        if (sel.hasSingleOf(SelectionType::Wall) &&
+                            sel.items[0].sectorId == hitSector &&
+                            sel.items[0].index == hitWall)
                             sel.clear();
                         else
                         {
-                            sel.type              = SelectionType::Wall;
-                            sel.wallSectorId      = hitSector;
-                            sel.wallIndex         = hitWall;
+                            sel.clear();
+                            sel.items.push_back({SelectionType::Wall,
+                                                 hitSector, hitWall});
                             m_selectedWallSurface = hitSurface;
                         }
                     }
                     else
                     {
                         // Floor or ceiling: select/deselect the owning sector.
-                        if (sel.type == SelectionType::Sector &&
-                            !sel.sectors.empty() && sel.sectors[0] == hitSector &&
+                        if (sel.uniformType() == SelectionType::Sector &&
+                            !sel.items.empty() &&
+                            sel.items[0].sectorId == hitSector &&
                             m_selectedSurface == hitSurface)
                             sel.clear();
                         else
                         {
-                            sel.type          = SelectionType::Sector;
-                            sel.sectors       = {hitSector};
+                            sel.clear();
+                            sel.items.push_back({SelectionType::Sector,
+                                                 hitSector, 0});
                             m_selectedSurface = hitSurface;
                         }
                     }
@@ -1966,11 +1971,11 @@ void Viewport3D::draw(EditMapDocument&      doc,
 
         // Selection outlines.
         const SelectionState& sel2 = doc.selection();
-        if (sel2.type == SelectionType::Wall &&
-            sel2.wallSectorId != world::INVALID_SECTOR_ID)
+        if (sel2.hasSingleOf(SelectionType::Wall) &&
+            sel2.items[0].sectorId != world::INVALID_SECTOR_ID)
         {
-            const world::SectorId wSid = sel2.wallSectorId;
-            const std::size_t     wWi  = sel2.wallIndex;
+            const world::SectorId wSid = sel2.items[0].sectorId;
+            const std::size_t     wWi  = sel2.items[0].index;
             float yBot = 0.0f, yTop = 0.0f;
             bool  useStrip = false;
             if (wSid < static_cast<world::SectorId>(sectors.size()) && wWi < sectors[wSid].walls.size())
@@ -1985,9 +1990,9 @@ void Viewport3D::draw(EditMapDocument&      doc,
             drawWallOutline(wSid, wWi, yBot, yTop,
                             0, IM_COL32(255, 200, 0, 220));
         }
-        else if (sel2.type == SelectionType::Sector && !sel2.sectors.empty())
+        else if (sel2.uniformType() == SelectionType::Sector && !sel2.items.empty())
         {
-            const world::SectorId sid = sel2.sectors[0];
+            const world::SectorId sid = sel2.items[0].sectorId;
             if (sid < static_cast<world::SectorId>(sectors.size()))
             {
                 const float selY = (m_selectedSurface == HoveredSurface::Ceil)
@@ -2104,13 +2109,15 @@ void Viewport3D::draw(EditMapDocument&      doc,
         }
         
         // Selected entity outline (yellow, drawn on top if same entity)
-        if (sel2.type == SelectionType::Entity && sel2.entityIndex < doc.entities().size())
+        if (sel2.hasSingleOf(SelectionType::Entity) &&
+            sel2.items[0].index < doc.entities().size())
         {
-            const EntityDef& ent = doc.entities()[sel2.entityIndex];
+            const std::size_t    selEi = sel2.items[0].index;
+            const EntityDef& ent = doc.entities()[selEi];
             glm::vec3 aabbMin, aabbMax;
             
             // For StaticMesh/VoxelObject, use actual mesh AABB; otherwise fall back to scale-based box.
-            if (m_entityCache.getMeshAABB(sel2.entityIndex, aabbMin, aabbMax))
+            if (m_entityCache.getMeshAABB(selEi, aabbMin, aabbMax))
             {
                 // Build entity transform matrix.
                 glm::mat4 model = glm::mat4(1.0f);
@@ -2158,12 +2165,12 @@ void Viewport3D::draw(EditMapDocument&      doc,
     {
         const SelectionState& selM = doc.selection();
         if (ImGui::IsKeyPressed(ImGuiKey_M, /*repeat=*/false) &&
-            selM.type == SelectionType::Wall)
+            selM.hasSingleOf(SelectionType::Wall))
         {
             // Use the hovered surface to pick the right material slot so hovering
             // an upper/lower strip and pressing M assigns to that slot.
-            const world::SectorId capSid  = selM.wallSectorId;
-            const std::size_t     capWi   = selM.wallIndex;
+            const world::SectorId capSid  = selM.items[0].sectorId;
+            const std::size_t     capWi   = selM.items[0].index;
             WallSurface           capSurf = WallSurface::Front;
             const char*           capLbl  = "Wall Front";
             if (m_hoveredSectorId == capSid && m_hoveredWallIdx == capWi)
@@ -2211,10 +2218,10 @@ void Viewport3D::draw(EditMapDocument&      doc,
         !ImGui::GetIO().WantCaptureKeyboard)
     {
         const SelectionState& selUV = doc.selection();
-        if (selUV.type == SelectionType::Wall)
+        if (selUV.hasSingleOf(SelectionType::Wall))
         {
-            const world::SectorId uvSid = selUV.wallSectorId;
-            const std::size_t     uvWi  = selUV.wallIndex;
+            const world::SectorId uvSid = selUV.items[0].sectorId;
+            const std::size_t     uvWi  = selUV.items[0].index;
             auto& uvSectors = doc.mapData().sectors;
 
             if (uvSid < static_cast<world::SectorId>(uvSectors.size()) &&

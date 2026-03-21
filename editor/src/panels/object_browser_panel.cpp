@@ -181,8 +181,9 @@ void ObjectBrowserPanel::draw(EditMapDocument& doc, glm::vec2 cursorMapPos)
         ImGui::InputText("##pfname", s_prefabNameBuf, sizeof(s_prefabNameBuf));
         ImGui::SameLine();
 
-        const bool canSave = doc.selection().type == SelectionType::Sector &&
-                             !doc.selection().sectors.empty();
+        const bool canSave =
+            doc.selection().uniformType() == SelectionType::Sector &&
+            !doc.selection().items.empty();
         if (!canSave) ImGui::BeginDisabled();
         if (ImGui::Button("Save Selection"))
             doc.pushCommand(std::make_unique<CmdSavePrefab>(doc, std::string(s_prefabNameBuf)));
@@ -224,9 +225,9 @@ void ObjectBrowserPanel::draw(EditMapDocument& doc, glm::vec2 cursorMapPos)
     if (ImGui::CollapsingHeader("Detail Geometry"))
     {
         const auto& sel         = doc.selection();
-        const bool  hasSector   = (sel.type == SelectionType::Sector &&
-                                   !sel.sectors.empty());
-        const world::SectorId targetSid = hasSector ? sel.sectors.front()
+        const bool  hasSector   = (sel.uniformType() == SelectionType::Sector &&
+                                   !sel.items.empty());
+        const world::SectorId targetSid = hasSector ? sel.items[0].sectorId
                                                     : world::INVALID_SECTOR_ID;
 
         if (!hasSector) ImGui::BeginDisabled();

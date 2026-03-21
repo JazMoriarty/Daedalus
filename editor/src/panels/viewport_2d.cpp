@@ -212,8 +212,8 @@ void Viewport2D::drawSectors(ImDrawList*            dl,
             const ImVec2&      p1   = pts[(wi + 1) % n];
 
             const bool isPortal = (wall.portalSectorId != world::INVALID_SECTOR_ID);
-            const bool wallSel  = (sel.type == SelectionType::Wall &&
-                                   sel.wallSectorId == sid && sel.wallIndex == wi);
+            const bool wallSel  = (sel.hasSingleOf(SelectionType::Wall) &&
+                                   sel.items[0].sectorId == sid && sel.items[0].index == wi);
 
             ImU32 edgeColor;
             float edgeThick;
@@ -334,9 +334,9 @@ void Viewport2D::drawSectors(ImDrawList*            dl,
         // Vertex dots.
         for (std::size_t wi = 0; wi < n; ++wi)
         {
-            const bool vertSel = (sel.type == SelectionType::Vertex &&
-                                  sel.vertexSectorId == sid &&
-                                  sel.vertexWallIndex == wi);
+            const bool vertSel = (sel.hasSingleOf(SelectionType::Vertex) &&
+                                  sel.items[0].sectorId == sid &&
+                                  sel.items[0].index == wi);
             const float radius = vertSel ? 6.0f : 3.0f;
             const ImU32 col    = applyOp(vertSel
                 ? IM_COL32(255, 255, 180, 255)
@@ -458,8 +458,8 @@ void Viewport2D::drawEntities(ImDrawList*            dl,
         const auto       sp  = mapToScreen({ed.position.x, ed.position.z}, canvasMin);
         const ImVec2     spi {sp.x, sp.y};
 
-        const bool selected = (sel.type == SelectionType::Entity &&
-                               sel.entityIndex == ei);
+        const bool selected = (sel.hasSingleOf(SelectionType::Entity) &&
+                               sel.items[0].index == ei);
 
         // Fill colour by visual type.
         ImU32 fillCol;
@@ -780,8 +780,8 @@ void Viewport2D::draw(EditMapDocument& doc,
             const auto sp = mapToScreen({ld.position.x, ld.position.z}, canvasMin);
             const ImVec2 spi{sp.x, sp.y};
 
-            const bool lightSel = (sel.type == SelectionType::Light &&
-                                   sel.lightIndex == li);
+            const bool lightSel = (sel.hasSingleOf(SelectionType::Light) &&
+                                   sel.items[0].index == li);
 
             // Influence-radius ring.
             const float ringR = ld.radius * m_zoom;
@@ -1186,7 +1186,8 @@ void Viewport2D::draw(EditMapDocument& doc,
                         {
                     SelectionState& sel = doc.selection();
                     sel.clear();
-                            sel.type       = SelectionType::PlayerStart;
+                    sel.items.push_back({SelectionType::PlayerStart,
+                                         world::INVALID_SECTOR_ID, 0});
                             hitPlayerStart = true;
                             // Start translate drag.
                             m_psDragActive = true;
@@ -1209,8 +1210,8 @@ void Viewport2D::draw(EditMapDocument& doc,
                         {
                             SelectionState& sel = doc.selection();
                             sel.clear();
-                            sel.type        = SelectionType::Entity;
-                            sel.entityIndex = ei;
+                            sel.items.push_back({SelectionType::Entity,
+                                                 world::INVALID_SECTOR_ID, ei});
                             hitEntity           = true;
                             m_entityDragActive  = true;
                             m_entityDragIdx     = ei;
@@ -1233,8 +1234,8 @@ void Viewport2D::draw(EditMapDocument& doc,
                             {
                                 SelectionState& sel = doc.selection();
                                 sel.clear();
-                                sel.type       = SelectionType::Light;
-                                sel.lightIndex = li;
+                                sel.items.push_back({SelectionType::Light,
+                                                     world::INVALID_SECTOR_ID, li});
                                 hitLight          = true;
                                 m_lightDragActive = true;
                                 m_lightDragIdx    = li;
@@ -1269,7 +1270,7 @@ void Viewport2D::draw(EditMapDocument& doc,
                 bool handled = false;
 
                 // RMB on player start icon → begin yaw rotate drag.
-                if (doc.selection().type == SelectionType::PlayerStart)
+                if (doc.selection().hasSingleOf(SelectionType::PlayerStart))
                 {
                     if (const auto& ps = doc.playerStart(); ps.has_value())
                     {
@@ -1301,8 +1302,8 @@ void Viewport2D::draw(EditMapDocument& doc,
                         {
                             SelectionState& sel = doc.selection();
                             sel.clear();
-                            sel.type        = SelectionType::Entity;
-                            sel.entityIndex = ei;
+                            sel.items.push_back({SelectionType::Entity,
+                                                 world::INVALID_SECTOR_ID, ei});
                             m_entityRotActive = true;
                             m_entityRotIdx    = ei;
                             m_entityRotOrigin = ed.yaw;

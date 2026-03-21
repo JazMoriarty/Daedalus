@@ -184,9 +184,9 @@ void PropertyInspector::draw(EditMapDocument&      doc,
 
     const SelectionState& sel = doc.selection();
 
-    if (sel.type == SelectionType::Sector && !sel.sectors.empty())
+    if (sel.uniformType() == SelectionType::Sector && !sel.items.empty())
     {
-        const world::SectorId sid = sel.sectors.front();
+        const world::SectorId sid = sel.items[0].sectorId;
         auto& sectors = doc.mapData().sectors;
 
         if (sid >= sectors.size())
@@ -523,10 +523,10 @@ void PropertyInspector::draw(EditMapDocument&      doc,
         }
         ImGui::PopID();  // end sector PushID
     }
-    else if (sel.type == SelectionType::Wall)
+    else if (sel.hasSingleOf(SelectionType::Wall))
     {
-        const world::SectorId sid = sel.wallSectorId;
-        const std::size_t     wi  = sel.wallIndex;
+        const world::SectorId sid = sel.items[0].sectorId;
+        const std::size_t     wi  = sel.items[0].index;
         auto& sectors = doc.mapData().sectors;
 
         if (sid >= sectors.size() || wi >= sectors[sid].walls.size())
@@ -980,11 +980,23 @@ void PropertyInspector::draw(EditMapDocument&      doc,
             }
         }
     }
-    else if (sel.type == SelectionType::Vertex)
+    else if (sel.uniformType() == SelectionType::Vertex && !sel.items.empty())
     {
-        const world::SectorId sid = sel.vertexSectorId;
-        const std::size_t     wi  = sel.vertexWallIndex;
         auto& sectors = doc.mapData().sectors;
+
+        // Multi-vertex header: show count when more than one vertex is selected.
+        if (sel.items.size() > 1)
+        {
+            ImGui::SeparatorText("Vertices");
+            ImGui::Text("%zu vertices selected", sel.items.size());
+            ImGui::Spacing();
+            ImGui::TextDisabled("Shift+click to add/remove. Drag any selected vertex to move all.");
+            ImGui::End();
+            return;
+        }
+
+        const world::SectorId sid = sel.items[0].sectorId;
+        const std::size_t     wi  = sel.items[0].index;
 
         if (sid < sectors.size() && wi < sectors[sid].walls.size())
         {
@@ -1043,9 +1055,9 @@ void PropertyInspector::draw(EditMapDocument&      doc,
             }
         }
     }
-    else if (sel.type == SelectionType::Light)
+    else if (sel.hasSingleOf(SelectionType::Light))
     {
-        const std::size_t li = sel.lightIndex;
+        const std::size_t li = sel.items[0].index;
         auto& lights = doc.lights();
 
         if (li >= lights.size())
@@ -1194,9 +1206,9 @@ void PropertyInspector::draw(EditMapDocument&      doc,
         }
         ImGui::PopID();  // end light PushID
     }
-    else if (sel.type == SelectionType::Entity)
+    else if (sel.hasSingleOf(SelectionType::Entity))
     {
-        const std::size_t ei = sel.entityIndex;
+        const std::size_t ei = sel.items[0].index;
         auto& entities = doc.entities();
 
         if (ei >= entities.size())
@@ -2039,7 +2051,7 @@ void PropertyInspector::draw(EditMapDocument&      doc,
             doc.pushCommand(std::make_unique<CmdDeleteEntity>(doc, ei));
         ImGui::PopID();  // end entity PushID
     }
-    else if (sel.type == SelectionType::PlayerStart)
+    else if (sel.hasSingleOf(SelectionType::PlayerStart))
     {
         const auto& ps = doc.playerStart();
 
@@ -2098,7 +2110,7 @@ void PropertyInspector::draw(EditMapDocument&      doc,
                 doc, ps, std::nullopt));
         }
     }
-    else if (sel.type == SelectionType::None)
+    else if (!sel.hasSelection())
     {
         auto& map = doc.mapData();
 

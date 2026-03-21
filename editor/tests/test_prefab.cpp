@@ -45,9 +45,8 @@ static void selectSectors(EditMapDocument& doc, std::initializer_list<SectorId> 
 {
     auto& sel = doc.selection();
     sel.clear();
-    sel.type = SelectionType::Sector;
     for (SectorId id : ids)
-        sel.sectors.push_back(id);
+        sel.items.push_back({SelectionType::Sector, id, 0});
 }
 
 /// RAII temporary file deleted on scope exit.

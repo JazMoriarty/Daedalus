@@ -5,77 +5,101 @@
 
 #include "daedalus/world/world_types.h"  // SectorId, INVALID_SECTOR_ID
 
+#include <algorithm>
 #include <cstddef>
 #include <vector>
 
 namespace daedalus::editor
 {
 
+/// The kind of object described by a SelectionItem.
+/// To add a new object type, append a new enumerator here — no other
+/// SelectionItem or SelectionState fields need to change.
 enum class SelectionType : unsigned
 {
-    None   = 0,
-    Sector = 1,
-    Wall   = 2,
-    Vertex = 3,
+    None        = 0,
+    Sector      = 1,
+    Wall        = 2,
+    Vertex      = 3,
     Light       = 4,
     Entity      = 5,  ///< An editor-placed EntityDef.
     PlayerStart = 6,  ///< The map's player spawn point.
 };
 
+/// Identifies exactly one selected object in the document.
+///
+/// Field semantics by type:
+///  - Sector     : sectorId = sector ID,            index = (unused)
+///  - Wall       : sectorId = owning sector ID,     index = wall index
+///  - Vertex     : sectorId = owning sector ID,     index = wall index whose p0 is the vertex
+///  - Light      : sectorId = (INVALID_SECTOR_ID),  index = lights() index
+///  - Entity     : sectorId = (INVALID_SECTOR_ID),  index = entities() index
+///  - PlayerStart: sectorId = (INVALID_SECTOR_ID),  index = (unused)
+struct SelectionItem
+{
+    SelectionType   type     = SelectionType::None;
+    world::SectorId sectorId = world::INVALID_SECTOR_ID;
+    std::size_t     index    = 0;
+
+    [[nodiscard]] bool operator==(const SelectionItem&) const noexcept = default;
+};
+
+/// The complete selection state of the editor.
+/// Contains zero or more SelectionItems of any mix of types.
 struct SelectionState
 {
-    SelectionType type = SelectionType::None;
+    std::vector<SelectionItem> items;
 
-    /// Selected sector indices (valid when type == Sector).
-    std::vector<world::SectorId> sectors;
+    /// Remove all selected objects.
+    void clear() noexcept { items.clear(); }
 
-    /// For type == Wall: the owning sector and wall index within it.
-    world::SectorId wallSectorId = world::INVALID_SECTOR_ID;
-    std::size_t     wallIndex    = 0;
+    /// True if at least one object is selected.
+    [[nodiscard]] bool hasSelection() const noexcept { return !items.empty(); }
 
-    /// For type == Vertex: the owning sector and the wall whose p0 is the vertex.
-    world::SectorId vertexSectorId  = world::INVALID_SECTOR_ID;
-    std::size_t     vertexWallIndex = 0;
-
-    /// For type == Light: index into EditMapDocument::lights().
-    std::size_t lightIndex = 0;
-
-    /// For type == Entity: index into EditMapDocument::entities().
-    std::size_t entityIndex = 0;
-
-    void clear() noexcept
+    /// Returns the common SelectionType if all items share one type, or
+    /// SelectionType::None if the selection is empty or contains mixed types.
+    [[nodiscard]] SelectionType uniformType() const noexcept
     {
-        type            = SelectionType::None;
-        sectors.clear();
-        wallSectorId    = world::INVALID_SECTOR_ID;
-        wallIndex       = 0;
-        vertexSectorId  = world::INVALID_SECTOR_ID;
-        vertexWallIndex = 0;
-        lightIndex      = 0;
-        entityIndex     = 0;
+        if (items.empty()) return SelectionType::None;
+        const SelectionType t = items[0].type;
+        for (const auto& item : items)
+            if (item.type != t) return SelectionType::None;
+        return t;
     }
 
-    [[nodiscard]] bool hasSelection() const noexcept
+    /// True iff the selection contains exactly one item of the given type.
+    [[nodiscard]] bool hasSingleOf(SelectionType t) const noexcept
     {
-        return type != SelectionType::None;
+        return items.size() == 1 && items[0].type == t;
     }
 
+    /// True if the given sector is among the selected items.
     [[nodiscard]] bool isSectorSelected(world::SectorId id) const noexcept
     {
-        if (type != SelectionType::Sector) return false;
-        for (auto sid : sectors)
-            if (sid == id) return true;
+        for (const auto& item : items)
+            if (item.type == SelectionType::Sector && item.sectorId == id)
+                return true;
         return false;
     }
 
-    /// Select every sector in a map that has `sectorCount` sectors.
+    /// Returns the IDs of all selected sectors (items of type Sector).
+    [[nodiscard]] std::vector<world::SectorId> selectedSectors() const
+    {
+        std::vector<world::SectorId> result;
+        for (const auto& item : items)
+            if (item.type == SelectionType::Sector)
+                result.push_back(item.sectorId);
+        return result;
+    }
+
+    /// Replace the selection with every sector in a map of `sectorCount` sectors.
     void selectAll(std::size_t sectorCount)
     {
         clear();
-        type = SelectionType::Sector;
-        sectors.reserve(sectorCount);
+        items.reserve(sectorCount);
         for (std::size_t i = 0; i < sectorCount; ++i)
-            sectors.push_back(static_cast<world::SectorId>(i));
+            items.push_back({SelectionType::Sector,
+                             static_cast<world::SectorId>(i), 0});
     }
 };
 

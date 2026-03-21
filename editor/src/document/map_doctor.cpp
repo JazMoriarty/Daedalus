@@ -13,17 +13,14 @@ namespace daedalus::editor
 static SelectionState makeSectorSel(world::SectorId si)
 {
     SelectionState s;
-    s.type = SelectionType::Sector;
-    s.sectors.push_back(si);
+    s.items.push_back({SelectionType::Sector, si, 0});
     return s;
 }
 
 static SelectionState makeWallSel(world::SectorId si, std::size_t wi)
 {
     SelectionState s;
-    s.type         = SelectionType::Wall;
-    s.wallSectorId = si;
-    s.wallIndex    = wi;
+    s.items.push_back({SelectionType::Wall, si, wi});
     return s;
 }
 
