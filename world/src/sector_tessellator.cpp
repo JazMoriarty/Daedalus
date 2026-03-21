@@ -624,19 +624,20 @@ static void appendDetailCylinder(
     }
 
     // Top and bottom caps using appendHorizontalSurface.
+    // Build capPoly (XZ world positions) and both height arrays in a single
+    // pass so each vertex position is transformed once, not twice.
     std::vector<glm::vec2> capPoly(N);
-    for (u32 i = 0; i < N; ++i)
-    {
-        const float t = tau * static_cast<float>(i) / static_cast<float>(N);
-        const glm::vec3 lp = xformPos(xform, {r*std::cos(t), -hh, r*std::sin(t)});
-        capPoly[i] = {lp.x, lp.z};
-    }
     std::vector<float> botH(N), topH(N);
     for (u32 i = 0; i < N; ++i)
     {
-        const float t = tau * static_cast<float>(i) / static_cast<float>(N);
-        botH[i] = xformPos(xform, {r*std::cos(t), -hh, r*std::sin(t)}).y;
-        topH[i] = xformPos(xform, {r*std::cos(t),  hh, r*std::sin(t)}).y;
+        const float t  = tau * static_cast<float>(i) / static_cast<float>(N);
+        const float cx = r * std::cos(t);
+        const float cz = r * std::sin(t);
+        const glm::vec3 bot = xformPos(xform, {cx, -hh, cz});
+        const glm::vec3 top = xformPos(xform, {cx,  hh, cz});
+        capPoly[i] = {bot.x, bot.z};  // XZ from bottom cap (same footprint as top for upright cylinders)
+        botH[i]    = bot.y;
+        topH[i]    = top.y;
     }
     appendHorizontalSurface(verts, indices, capPoly, std::span<const float>(botH),
                             -1.0f, 1.0f, 1.0f, 0.0f, 0.0f);  // bottom cap (normal down)
@@ -712,20 +713,18 @@ static void appendDetailArchSpan(
         }
     };
 
-    emitArchFace(0.0f, -1.0f);   // inner face at Z=0 (normal inward = −outward)
-    emitArchFace(0.0f,  1.0f);   // outer face at Z=thk (normal outward)
+    emitArchFace(0.0f, -1.0f);  // inner face: quads span Z=[0, thk], normals inward toward arch centre
+    emitArchFace(0.0f,  1.0f);  // outer face: same Z=[0, thk] quads, normals outward from arch curve
 
-    // Left end face (base at X=−rx, Y=0, depth from Z=0 to Z=thk)
+    // Left end cap: vertical quad from base-left corner (X=−rx,Y=0) to arch curve
+    // start point (which is also at X=−rx, Y=0 for a symmetric ellipse), spanning Z=[0,thk].
     {
-        const glm::vec3 lp0{-rx, 0.0f, 0.0f}, lp1{-rx, 0.0f, thk},
-                        lp2{-rx, 0.0f, thk},  lp3{-rx, 0.0f, 0.0f};
-        // Small end cap: just a degenerate closing quad at θ=0
         const glm::vec2 a0 = archPt(0.0f);
-        const glm::vec3 base0{a0.x, a0.y, 0.0f}, base1{a0.x, a0.y, thk};
-        // Base endpoint is (rx,0,0) — use vertical closing quad.
         const glm::vec3 endPts[4] = {
-            xformPos(xform, {-rx, 0.0f, 0.0f}), xformPos(xform, {-rx, 0.0f, thk}),
-            xformPos(xform, {base0.x, base0.y, thk}), xformPos(xform, base0)
+            xformPos(xform, {-rx, 0.0f, 0.0f}),
+            xformPos(xform, {-rx, 0.0f, thk}),
+            xformPos(xform, {a0.x, a0.y, thk}),
+            xformPos(xform, {a0.x, a0.y, 0.0f})
         };
         const glm::vec3 wn = xformNormal(normalMat, {-1,0,0});
         const glm::vec3 wt = xformNormal(normalMat, {0,0,1});

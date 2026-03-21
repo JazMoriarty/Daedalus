@@ -87,7 +87,11 @@ struct DetailBrushGeomParams
 {
     // ── Box / Wedge ───────────────────────────────────────────────────────
     glm::vec3   halfExtents = {0.5f, 0.5f, 0.5f};  ///< Half-extent on each axis.
-    u32         slopeAxis   = 1u;                   ///< Wedge slope axis (0=X, 1=Z).
+    u32         slopeAxis   = 1u;  ///< Wedge slope axis: 1 = slope along Z (default).
+                                   ///< Phase 1F-C: only slopeAxis=1 is implemented.
+                                   ///< slopeAxis=0 (X slope) is planned for Phase 1F-D;
+                                   ///< until then it silently produces slopeAxis=1 geometry.
+                                   ///< Workaround: rotate the brush 90° around Y.
 
     // ── Cylinder ─────────────────────────────────────────────────────────
     f32         radius         = 0.5f;  ///< Cylinder radius.

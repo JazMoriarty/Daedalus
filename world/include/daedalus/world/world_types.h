@@ -126,8 +126,12 @@ struct StairProfile
 enum class ArchProfile : u32
 {
     Semicircular = 0,  ///< Elliptical (or true semicircular) arch.
-    Gothic       = 1,  ///< Pointed Gothic arch (two intersecting arcs).
+    Gothic       = 1,  ///< Pointed Gothic arch (two intersecting arcs meeting at an apex).
+                       ///< Phase 1F-C: generates Semicircular geometry.
+                       ///< Distinct Gothic geometry implemented in Phase 1F-D.
     Segmental    = 2,  ///< Shallow segmental arch (arc of less than a semicircle).
+                       ///< Phase 1F-C: generates Semicircular geometry.
+                       ///< Distinct Segmental geometry implemented in Phase 1F-D.
 };
 
 // ─── DetailBrushType ───────────────────────────────────────────────────────────
