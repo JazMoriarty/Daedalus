@@ -33,6 +33,11 @@ public:
                      float mapX, float mapZ,
                      int   button) override;
 
+    /// Selects all wall vertices whose p0 lies inside the rectangle.
+    void onRectSelect(EditMapDocument& doc,
+                      glm::vec2 minCorner,
+                      glm::vec2 maxCorner) override;
+
     /// True while a vertex is being live-dragged (for vertex snap).
     [[nodiscard]] bool            isDragging()    const noexcept { return m_dragging; }
 

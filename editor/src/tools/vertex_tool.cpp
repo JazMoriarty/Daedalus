@@ -98,4 +98,30 @@ void VertexTool::onMouseUp(EditMapDocument& doc,
     (void)mapX; (void)mapZ;
 }
 
+// ─── onRectSelect ────────────────────────────────────────────────────────────────────
+
+void VertexTool::onRectSelect(EditMapDocument& doc,
+                               glm::vec2        minCorner,
+                               glm::vec2        maxCorner)
+{
+    const world::WorldMapData& map = doc.mapData();
+    auto& sel = doc.selection();
+    sel.clear();
+
+    for (std::size_t si = 0; si < map.sectors.size(); ++si)
+    {
+        const auto& sector = map.sectors[si];
+        for (std::size_t wi = 0; wi < sector.walls.size(); ++wi)
+        {
+            const glm::vec2& p = sector.walls[wi].p0;
+            if (p.x >= minCorner.x && p.x <= maxCorner.x &&
+                p.y >= minCorner.y && p.y <= maxCorner.y)
+            {
+                sel.items.push_back({SelectionType::Vertex,
+                                     static_cast<world::SectorId>(si), wi});
+            }
+        }
+    }
+}
+
 } // namespace daedalus::editor

@@ -1251,8 +1251,18 @@ void Viewport2D::draw(EditMapDocument& doc,
                             // on click and therefore needs the pre-snapped position.
                             const glm::vec2 downPos = drawTool ? mouseMap : mouseMapRaw;
                             activeTool->onMouseDown(doc, downPos.x, downPos.y, 0);
-                            // Start drag-rect if select tool is active and no geometry drag started.
-                            if (selectTool && !selectTool->isDragging())
+                            // Start drag-rect when the active tool supports it
+                            // (SelectTool or VertexTool) and no geometry drag was
+                            // initiated on this click.
+                            const bool selectToolReady =
+                                selectTool &&
+                                activeTool == static_cast<IEditorTool*>(selectTool) &&
+                                !selectTool->isDragging();
+                            const bool vertexToolReady =
+                                vertexTool &&
+                                activeTool == static_cast<IEditorTool*>(vertexTool) &&
+                                !vertexTool->isDragging();
+                            if (selectToolReady || vertexToolReady)
                             {
                                 m_rectSelActive  = true;
                                 m_rectSelAnchor  = mouseMap;
