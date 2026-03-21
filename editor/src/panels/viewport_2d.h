@@ -163,9 +163,11 @@ private:
 
     // ─── Bezier curve handle drag state ───────────────────────────────────────────────
     bool                        m_curveDragActive    = false;
+    bool                        m_curveDragIsB       = false;  ///< True = dragging controlB, false = controlA.
     world::SectorId             m_curveDragSectorId  = world::INVALID_SECTOR_ID;
     std::size_t                 m_curveDragWallIndex = 0;
-    std::optional<glm::vec2>    m_curveDragOldControlA;  ///< Pre-drag value for undo.
+    std::optional<glm::vec2>    m_curveDragOldControlA;  ///< Pre-drag A value for undo.
+    std::optional<glm::vec2>    m_curveDragOldControlB;  ///< Pre-drag B value for undo.
     bool                        m_curveDragMoved     = false;
 
     // Continuous validation overlay cache.

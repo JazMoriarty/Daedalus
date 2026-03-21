@@ -911,10 +911,24 @@ void PropertyInspector::draw(EditMapDocument&      doc,
                 {
                     if (cpBEnabled)
                     {
-                        const glm::vec2 mid =
-                            (wall.p0 + sectors[sid].walls[(wi + 1) % n].p0) * 0.5f;
+                        // Place B perpendicular to the wall from A's position so it is
+                        // immediately visible and distinct from A — not overlapping it.
+                        const glm::vec2 p0    = wall.p0;
+                        const glm::vec2 p1    = sectors[sid].walls[(wi + 1) % n].p0;
+                        const glm::vec2 wallV = p1 - p0;
+                        const float     wLen  = glm::length(wallV);
+                        const glm::vec2 wallDir = wLen > 1e-6f ? wallV / wLen : glm::vec2{1.0f, 0.0f};
+                        // Perpendicular direction (rotate 90° CCW).
+                        const glm::vec2 perp  = {-wallDir.y, wallDir.x};
+                        // Offset B to the opposite side from A relative to the midpoint.
+                        const glm::vec2 mid   = (p0 + p1) * 0.5f;
+                        const glm::vec2 aPos  = wall.curveControlA.value_or(mid);
+                        const float     aSign = glm::dot(aPos - mid, perp);
+                        // Place B on the opposite perpendicular side from A.
+                        const float     bDist = std::max(wLen * 0.25f, 0.5f);
+                        const glm::vec2 bPos  = mid + perp * (aSign >= 0.0f ? -bDist : bDist);
                         doc.pushCommand(std::make_unique<CmdSetWallCurve>(
-                            doc, sid, wi, wall.curveControlA, mid, wall.curveSubdivisions));
+                            doc, sid, wi, wall.curveControlA, bPos, wall.curveSubdivisions));
                     }
                     else
                     {

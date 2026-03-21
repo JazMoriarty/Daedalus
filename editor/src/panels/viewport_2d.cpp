@@ -268,31 +268,37 @@ void Viewport2D::drawSectors(ImDrawList*            dl,
                     prev = cur;
                 }
 
-                // Draw control point handle (small diamond) and stem line.
+                // ── Control point diamonds (hover-aware) ─────────────────────────
+                // Helper: draw a diamond at a screen position; brightens on cursor hover.
+                const ImVec2 mouseNow = ImGui::GetIO().MousePos;
+                auto drawDiamond = [&](glm::vec2 mapPos, ImU32 col, float r)
+                {
+                    const auto  sc   = mapToScreen(mapPos, canvasMin);
+                    const float dx   = mouseNow.x - sc.x;
+                    const float dy   = mouseNow.y - sc.y;
+                    const bool  near = (dx*dx + dy*dy) <= (r + 6.0f) * (r + 6.0f);
+                    const ImU32 c    = applyOp(near ? IM_COL32(255, 255, 255, 240) : col);
+                    dl->AddTriangleFilled({sc.x,     sc.y - r}, {sc.x + r, sc.y},
+                                          {sc.x,     sc.y + r}, c);
+                    dl->AddTriangleFilled({sc.x,     sc.y - r}, {sc.x,     sc.y + r},
+                                          {sc.x - r, sc.y},     c);
+                };
+
+                // Stem lines from wall midpoint to each control point.
                 const auto scMid = mapToScreen((mapP0 + mapP1) * 0.5f, canvasMin);
                 const auto scCa  = mapToScreen(mapCa, canvasMin);
-                constexpr ImU32 kHandleCol = IM_COL32(100, 220, 255, 220);
                 dl->AddLine({scMid.x, scMid.y}, {scCa.x, scCa.y},
-                            applyOp(IM_COL32(100, 220, 255, 100)), 1.0f);
-                // Diamond: four triangles around the control point.
-                constexpr float kR = 4.0f;
-                dl->AddTriangleFilled({scCa.x,      scCa.y - kR},
-                                      {scCa.x + kR,  scCa.y},
-                                      {scCa.x,       scCa.y + kR}, applyOp(kHandleCol));
-                dl->AddTriangleFilled({scCa.x,      scCa.y - kR},
-                                      {scCa.x,       scCa.y + kR},
-                                      {scCa.x - kR,  scCa.y},      applyOp(kHandleCol));
+                            applyOp(IM_COL32(100, 220, 255, 80)), 1.0f);
+                // A = cyan diamond
+                drawDiamond(mapCa, IM_COL32(100, 220, 255, 220), 5.0f);
 
-                // Second handle if cubic.
                 if (isCubic)
                 {
                     const auto scCb = mapToScreen(*wall.curveControlB, canvasMin);
                     dl->AddLine({scMid.x, scMid.y}, {scCb.x, scCb.y},
-                                applyOp(IM_COL32(100, 220, 255, 100)), 1.0f);
-                    dl->AddTriangleFilled({scCb.x, scCb.y - kR}, {scCb.x + kR, scCb.y},
-                                          {scCb.x, scCb.y + kR}, applyOp(kHandleCol));
-                    dl->AddTriangleFilled({scCb.x, scCb.y - kR}, {scCb.x, scCb.y + kR},
-                                          {scCb.x - kR, scCb.y}, applyOp(kHandleCol));
+                                applyOp(IM_COL32(255, 180, 80, 80)), 1.0f);
+                    // B = amber diamond so it is visually distinct from A
+                    drawDiamond(*wall.curveControlB, IM_COL32(255, 180, 80, 220), 5.0f);
                 }
             }
             else
@@ -988,12 +994,15 @@ void Viewport2D::draw(EditMapDocument& doc,
         // ── Curve handle drag (live update on move) ─────────────────────────────
         if (m_curveDragActive && ImGui::IsMouseDown(ImGuiMouseButton_Left))
         {
-            const auto& sectors = doc.mapData().sectors;
+            auto& sectors = doc.mapData().sectors;
             if (m_curveDragSectorId < sectors.size() &&
                 m_curveDragWallIndex < sectors[m_curveDragSectorId].walls.size())
             {
-                doc.mapData().sectors[m_curveDragSectorId].walls[m_curveDragWallIndex]
-                    .curveControlA = mouseMap;
+                auto& dragWall = sectors[m_curveDragSectorId].walls[m_curveDragWallIndex];
+                if (m_curveDragIsB)
+                    dragWall.curveControlB = mouseMap;
+                else
+                    dragWall.curveControlA = mouseMap;
                 m_curveDragMoved = true;
                 doc.markDirty();
             }
@@ -1009,16 +1018,29 @@ void Viewport2D::draw(EditMapDocument& doc,
                 const ImGuiIO& clickIO = ImGui::GetIO();
                 constexpr float kHitR = 10.0f;  ///< Icon hit radius in screen pixels.
 
-                // Midpoint handle click: start a Bezier curve drag when the cursor
-                // is on a wall midpoint handle circle.  No modifier key required —
-                // this avoids the macOS Ctrl+click → right-click OS interception.
+                // Curve handle click: check existing control-point diamonds first,
+                // then fall back to the midpoint circle.  Priority order:
+                //   1. B diamond (amber)  — only when cubic curve is active
+                //   2. A diamond (cyan)   — only when any curve is active
+                //   3. Midpoint circle    — always (creates a new curve if absent)
+                // Alt is reserved for wall split so skip all handle detection when Alt is held.
                 bool handledByMidpoint = false;
-                if (!clickIO.KeyAlt)  // Alt is reserved for wall split
+                if (!clickIO.KeyAlt)
                 {
-                    constexpr float kMidHitSq = 14.0f * 14.0f;  // screen pixels², matches visual
-                    float           bestSq     = kMidHitSq;
-                    world::SectorId bestSid    = world::INVALID_SECTOR_ID;
-                    std::size_t     bestWi     = 0;
+                    constexpr float kHandleHitSq = 11.0f * 11.0f;  // diamond pick radius
+                    constexpr float kMidHitSq    = 14.0f * 14.0f;  // midpoint circle radius
+
+                    float           bestBSq  = kHandleHitSq;
+                    world::SectorId bestBSid = world::INVALID_SECTOR_ID;
+                    std::size_t     bestBWi  = 0;
+
+                    float           bestASq  = kHandleHitSq;
+                    world::SectorId bestASid = world::INVALID_SECTOR_ID;
+                    std::size_t     bestAWi  = 0;
+
+                    float           bestMSq  = kMidHitSq;
+                    world::SectorId bestMSid = world::INVALID_SECTOR_ID;
+                    std::size_t     bestMWi  = 0;
 
                     const auto& sectors = doc.mapData().sectors;
                     for (std::size_t si = 0; si < sectors.size(); ++si)
@@ -1027,28 +1049,75 @@ void Viewport2D::draw(EditMapDocument& doc,
                         const std::size_t ns  = sec.walls.size();
                         for (std::size_t wi = 0; wi < ns; ++wi)
                         {
-                            const glm::vec2 mid =
-                                (sec.walls[wi].p0 + sec.walls[(wi + 1) % ns].p0) * 0.5f;
-                            const glm::vec2 sMid = mapToScreen(mid, canvasMin);
-                            const float dx = mousePosV.x - sMid.x;
-                            const float dy = mousePosV.y - sMid.y;
-                            const float sq = dx * dx + dy * dy;
-                            if (sq < bestSq)
+                            const world::Wall& wl = sec.walls[wi];
+
+                            // B diamond
+                            if (wl.curveControlB.has_value())
                             {
-                                bestSq  = sq;
-                                bestSid = static_cast<world::SectorId>(si);
-                                bestWi  = wi;
+                                const glm::vec2 sB = mapToScreen(*wl.curveControlB, canvasMin);
+                                const float dx = mousePosV.x - sB.x;
+                                const float dy = mousePosV.y - sB.y;
+                                const float sq = dx*dx + dy*dy;
+                                if (sq < bestBSq)
+                                { bestBSq = sq; bestBSid = static_cast<world::SectorId>(si); bestBWi = wi; }
+                            }
+
+                            // A diamond
+                            if (wl.curveControlA.has_value())
+                            {
+                                const glm::vec2 sA = mapToScreen(*wl.curveControlA, canvasMin);
+                                const float dx = mousePosV.x - sA.x;
+                                const float dy = mousePosV.y - sA.y;
+                                const float sq = dx*dx + dy*dy;
+                                if (sq < bestASq)
+                                { bestASq = sq; bestASid = static_cast<world::SectorId>(si); bestAWi = wi; }
+                            }
+
+                            // Midpoint circle
+                            {
+                                const glm::vec2 mid =
+                                    (wl.p0 + sec.walls[(wi + 1) % ns].p0) * 0.5f;
+                                const glm::vec2 sM = mapToScreen(mid, canvasMin);
+                                const float dx = mousePosV.x - sM.x;
+                                const float dy = mousePosV.y - sM.y;
+                                const float sq = dx*dx + dy*dy;
+                                if (sq < bestMSq)
+                                { bestMSq = sq; bestMSid = static_cast<world::SectorId>(si); bestMWi = wi; }
                             }
                         }
                     }
 
-                    if (bestSid != world::INVALID_SECTOR_ID)
+                    // Start drag in priority order: B > A > midpoint.
+                    if (bestBSid != world::INVALID_SECTOR_ID)
                     {
                         m_curveDragActive    = true;
-                        m_curveDragSectorId  = bestSid;
-                        m_curveDragWallIndex = bestWi;
-                        m_curveDragOldControlA =
-                            sectors[bestSid].walls[bestWi].curveControlA;
+                        m_curveDragIsB       = true;
+                        m_curveDragSectorId  = bestBSid;
+                        m_curveDragWallIndex = bestBWi;
+                        m_curveDragOldControlA = sectors[bestBSid].walls[bestBWi].curveControlA;
+                        m_curveDragOldControlB = sectors[bestBSid].walls[bestBWi].curveControlB;
+                        m_curveDragMoved = false;
+                        handledByMidpoint = true;
+                    }
+                    else if (bestASid != world::INVALID_SECTOR_ID)
+                    {
+                        m_curveDragActive    = true;
+                        m_curveDragIsB       = false;
+                        m_curveDragSectorId  = bestASid;
+                        m_curveDragWallIndex = bestAWi;
+                        m_curveDragOldControlA = sectors[bestASid].walls[bestAWi].curveControlA;
+                        m_curveDragOldControlB = sectors[bestASid].walls[bestAWi].curveControlB;
+                        m_curveDragMoved = false;
+                        handledByMidpoint = true;
+                    }
+                    else if (bestMSid != world::INVALID_SECTOR_ID)
+                    {
+                        m_curveDragActive    = true;
+                        m_curveDragIsB       = false;
+                        m_curveDragSectorId  = bestMSid;
+                        m_curveDragWallIndex = bestMWi;
+                        m_curveDragOldControlA = sectors[bestMSid].walls[bestMWi].curveControlA;
+                        m_curveDragOldControlB = sectors[bestMSid].walls[bestMWi].curveControlB;
                         m_curveDragMoved = false;
                         handledByMidpoint = true;
                     }
@@ -1259,18 +1328,20 @@ void Viewport2D::draw(EditMapDocument& doc,
             m_curveDragActive = false;
             if (m_curveDragMoved)
             {
-                const auto& sectors = doc.mapData().sectors;
+                auto& sectors = doc.mapData().sectors;
                 if (m_curveDragSectorId < sectors.size() &&
                     m_curveDragWallIndex < sectors[m_curveDragSectorId].walls.size())
                 {
-                    const auto& wall = sectors[m_curveDragSectorId].walls[m_curveDragWallIndex];
-                    // Restore the old value so CmdSetWallCurve captures the correct original.
-                    const std::optional<glm::vec2> finalCp = wall.curveControlA;
-                    doc.mapData().sectors[m_curveDragSectorId]
-                        .walls[m_curveDragWallIndex].curveControlA = m_curveDragOldControlA;
+                    auto& wall = sectors[m_curveDragSectorId].walls[m_curveDragWallIndex];
+                    // Snapshot the final dragged values, then restore to pre-drag state
+                    // so that CmdSetWallCurve's constructor captures the correct old values.
+                    const std::optional<glm::vec2> finalA = wall.curveControlA;
+                    const std::optional<glm::vec2> finalB = wall.curveControlB;
+                    wall.curveControlA = m_curveDragOldControlA;
+                    wall.curveControlB = m_curveDragOldControlB;
                     doc.pushCommand(std::make_unique<CmdSetWallCurve>(
                         doc, m_curveDragSectorId, m_curveDragWallIndex,
-                        finalCp, wall.curveControlB, wall.curveSubdivisions));
+                        finalA, finalB, wall.curveSubdivisions));
                 }
                 m_curveDragMoved = false;
             }
