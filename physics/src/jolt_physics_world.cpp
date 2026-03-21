@@ -107,7 +107,11 @@ JoltPhysicsWorld::loadLevel(const world::WorldMapData& map)
         const float wallH  = ceilY - floorY;
         const float midY   = (floorY + ceilY) * 0.5f;
 
-        // ── Wall collision boxes ───────────────────────────────────────────────
+        // ── Wall collision boxes ─────────────────────────────────────────────────────
+        // Curved walls are subdivided into per-segment boxes so the collision
+        // geometry follows the Bezier arc rather than the straight chord.
+        // Without this, curved walls that open up space leave a phantom chord
+        // box blocking the player.
         for (int i = 0; i < n; ++i)
         {
             const world::Wall& wall = sector.walls[i];
@@ -119,41 +123,64 @@ JoltPhysicsWorld::loadLevel(const world::WorldMapData& map)
                 world::hasFlag(wall.flags, world::WallFlags::Blocking);
             if (!solidWall && !blocking) { continue; }
 
-            // Wall edge in XZ: Wall::p0 is glm::vec2(worldX, worldZ).
-            const glm::vec2 p0    = wall.p0;
-            const glm::vec2 p1    = sector.walls[(i + 1) % n].p0;
-            const glm::vec2 delta = p1 - p0;
-            const float     len   = glm::length(delta);
-            if (len < 1.0e-4f) { continue; }
+            const glm::vec2 p0 = wall.p0;
+            const glm::vec2 p1 = sector.walls[(i + 1) % n].p0;
 
-            // Box half-extents: X = half wall length, Y = half wall height, Z = depth.
-            JPH::Ref<JPH::Shape> shape = new JPH::BoxShape(
-                JPH::Vec3(len * 0.5f, wallH * 0.5f, kWallHalfThick)
-            );
+            // Determine segment count: 1 for straight walls, N for curved.
+            const bool     isCurved = wall.curveControlA.has_value();
+            const uint32_t nSeg     = isCurved
+                ? std::clamp(wall.curveSubdivisions, 4u, 64u)
+                : 1u;
 
-            // Midpoint of the edge in world space.
-            const float midX = (p0.x + p1.x) * 0.5f;
-            const float midZ = (p0.y + p1.y) * 0.5f;  // p0.y is world Z
+            // Evaluate Bezier at parameter t ∈ [0,1].
+            auto evalBez = [&](float t) -> glm::vec2
+            {
+                const float u = 1.0f - t;
+                if (wall.curveControlB.has_value())
+                    return u*u*u*p0
+                         + 3.0f*u*u*t*(*wall.curveControlA)
+                         + 3.0f*u*t*t*(*wall.curveControlB)
+                         + t*t*t*p1;
+                return u*u*p0 + 2.0f*u*t*(*wall.curveControlA) + t*t*p1;
+            };
 
-            // Rotate box X-axis to align with the wall direction.
-            // delta.y here is the world ΔZ component.
-            const float     angle = std::atan2(-delta.y, delta.x);
-            const JPH::Quat rot   = JPH::Quat::sRotation(JPH::Vec3::sAxisY(), angle);
+            for (uint32_t k = 0; k < nSeg; ++k)
+            {
+                const float t0 = static_cast<float>(k)   / static_cast<float>(nSeg);
+                const float t1 = static_cast<float>(k+1) / static_cast<float>(nSeg);
+                const glm::vec2 sp0 = isCurved ? evalBez(t0) : p0;
+                const glm::vec2 sp1 = isCurved ? evalBez(t1) : p1;
 
-            JPH::BodyCreationSettings bcs(
-                shape,
-                JPH::RVec3(midX, midY, midZ),
-                rot,
-                JPH::EMotionType::Static,
-                Layers::NON_MOVING
-            );
+                const glm::vec2 segDelta = sp1 - sp0;
+                const float     segLen   = glm::length(segDelta);
+                if (segLen < 1.0e-4f) { continue; }
 
-            const JPH::BodyID bid =
-                bi.CreateAndAddBody(bcs, JPH::EActivation::DontActivate);
-            if (!bid.IsInvalid()) { m_levelBodyIds.push_back(bid); }
+                JPH::Ref<JPH::Shape> shape = new JPH::BoxShape(
+                    JPH::Vec3(segLen * 0.5f, wallH * 0.5f, kWallHalfThick)
+                );
+
+                const float midX  = (sp0.x + sp1.x) * 0.5f;
+                const float midZ  = (sp0.y + sp1.y) * 0.5f;
+                const float angle = std::atan2(-segDelta.y, segDelta.x);
+                const JPH::Quat rot = JPH::Quat::sRotation(JPH::Vec3::sAxisY(), angle);
+
+                JPH::BodyCreationSettings bcs(
+                    shape,
+                    JPH::RVec3(midX, midY, midZ),
+                    rot,
+                    JPH::EMotionType::Static,
+                    Layers::NON_MOVING
+                );
+
+                const JPH::BodyID bid =
+                    bi.CreateAndAddBody(bcs, JPH::EActivation::DontActivate);
+                if (!bid.IsInvalid()) { m_levelBodyIds.push_back(bid); }
+            }
         }
 
         // ── Floor slab (axis-aligned box from sector AABB footprint) ──────────
+        // The AABB is expanded to include Bezier control points so the slab
+        // covers any extra floor area opened by outward-curving walls.
         {
             float minX =  std::numeric_limits<float>::max();
             float maxX = -std::numeric_limits<float>::max();
@@ -166,6 +193,23 @@ JoltPhysicsWorld::loadLevel(const world::WorldMapData& map)
                 maxX = std::max(maxX, w.p0.x);
                 minZ = std::min(minZ, w.p0.y);
                 maxZ = std::max(maxZ, w.p0.y);
+                // The Bezier control polygon is a conservative bounding hull for
+                // the curve, so including control points expands the AABB to cover
+                // any space swept by an outward-curving wall.
+                if (w.curveControlA.has_value())
+                {
+                    minX = std::min(minX, w.curveControlA->x);
+                    maxX = std::max(maxX, w.curveControlA->x);
+                    minZ = std::min(minZ, w.curveControlA->y);
+                    maxZ = std::max(maxZ, w.curveControlA->y);
+                }
+                if (w.curveControlB.has_value())
+                {
+                    minX = std::min(minX, w.curveControlB->x);
+                    maxX = std::max(maxX, w.curveControlB->x);
+                    minZ = std::min(minZ, w.curveControlB->y);
+                    maxZ = std::max(maxZ, w.curveControlB->y);
+                }
             }
 
             const float hx = (maxX - minX) * 0.5f;
