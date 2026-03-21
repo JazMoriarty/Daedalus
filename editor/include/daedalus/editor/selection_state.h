@@ -73,6 +73,16 @@ struct SelectionState
         return items.size() == 1 && items[0].type == t;
     }
 
+    /// True if the given vertex (identified by owning sector + wall index) is selected.
+    [[nodiscard]] bool isVertexSelected(world::SectorId sid, std::size_t wi) const noexcept
+    {
+        for (const auto& item : items)
+            if (item.type == SelectionType::Vertex &&
+                item.sectorId == sid && item.index == wi)
+                return true;
+        return false;
+    }
+
     /// True if the given sector is among the selected items.
     [[nodiscard]] bool isSectorSelected(world::SectorId id) const noexcept
     {

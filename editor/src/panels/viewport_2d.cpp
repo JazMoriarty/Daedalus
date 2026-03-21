@@ -334,9 +334,7 @@ void Viewport2D::drawSectors(ImDrawList*            dl,
         // Vertex dots.
         for (std::size_t wi = 0; wi < n; ++wi)
         {
-            const bool vertSel = (sel.hasSingleOf(SelectionType::Vertex) &&
-                                  sel.items[0].sectorId == sid &&
-                                  sel.items[0].index == wi);
+            const bool vertSel = sel.isVertexSelected(sid, wi);
             const float radius = vertSel ? 6.0f : 3.0f;
             const ImU32 col    = applyOp(vertSel
                 ? IM_COL32(255, 255, 180, 255)
