@@ -837,30 +837,32 @@ void Viewport2D::draw(EditMapDocument& doc,
                     // Matches the point-light radius ring convention: radius * zoom.
                     const float coneLen = ld.range * m_zoom * xzLen;
 
-                    // Rotate ±outerConeAngle around the XZ direction to get the
-                    // two cone-edge endpoints.
-                    const float cosH = std::cos(ld.outerConeAngle);
-                    const float sinH = std::sin(ld.outerConeAngle);
+                    // Both cones share the same forward tip at coneLen along the
+                    // normalised XZ direction.  Base endpoints are offset
+                    // ±coneLen*tan(halfAngle) along the screen-space perpendicular
+                    // (-dirZ, dirX), so the inner cone always sits inside the outer.
+                    const float tanOuter = std::tan(ld.outerConeAngle);
+                    const float tanInner = std::tan(ld.innerConeAngle);
+                    const float tipX = sp.x + dirX * coneLen;
+                    const float tipY = sp.y + dirZ * coneLen;
                     const ImVec2 coneL{
-                        sp.x + (dirX * cosH - dirZ * sinH) * coneLen,
-                        sp.y + (dirX * sinH + dirZ * cosH) * coneLen};
+                        tipX - dirZ * coneLen * tanOuter,
+                        tipY + dirX * coneLen * tanOuter};
                     const ImVec2 coneR{
-                        sp.x + (dirX * cosH + dirZ * sinH) * coneLen,
-                        sp.y + (-dirX * sinH + dirZ * cosH) * coneLen};
+                        tipX + dirZ * coneLen * tanOuter,
+                        tipY - dirX * coneLen * tanOuter};
 
                     dl->AddTriangleFilled(spi, coneL, coneR, coneFill);
                     dl->AddLine(spi, coneL, coneCol, 1.2f);
                     dl->AddLine(spi, coneR, coneCol, 1.2f);
 
                     // Inner cone — brighter fill + contrasting lines drawn on top.
-                    const float cosHi = std::cos(ld.innerConeAngle);
-                    const float sinHi = std::sin(ld.innerConeAngle);
                     const ImVec2 innerL{
-                        sp.x + (dirX * cosHi - dirZ * sinHi) * coneLen,
-                        sp.y + (dirX * sinHi + dirZ * cosHi) * coneLen};
+                        tipX - dirZ * coneLen * tanInner,
+                        tipY + dirX * coneLen * tanInner};
                     const ImVec2 innerR{
-                        sp.x + (dirX * cosHi + dirZ * sinHi) * coneLen,
-                        sp.y + (-dirX * sinHi + dirZ * cosHi) * coneLen};
+                        tipX + dirZ * coneLen * tanInner,
+                        tipY - dirX * coneLen * tanInner};
                     const ImU32 innerFill = lightSel
                         ? IM_COL32(255, 255, 180,  80) : IM_COL32(255, 240, 130,  45);
                     const ImU32 innerLine = lightSel
