@@ -166,3 +166,77 @@ TEST_F(DmapIOTest, JsonLoadMissingFile)
     ASSERT_FALSE(result.has_value());
     ASSERT_EQ(result.error(), DmapError::FileNotFound);
 }
+
+// ─── Phase 1F-D: HeightfieldFloor round-trip tests ────────────────────────────────
+
+// Build a minimal map with one sector that has a heightfield floor.
+static WorldMapData makeHeightfieldIOMap()
+{
+    WorldMapData map;
+    map.name = "HFTest";
+    map.author = "UnitTest";
+
+    Sector sec;
+    sec.floorHeight = 0.0f; sec.ceilHeight = 4.0f;
+    sec.floorShape  = FloorShape::Heightfield;
+
+    HeightfieldFloor hf;
+    hf.gridWidth = 3;
+    hf.gridDepth = 3;
+    hf.worldMin  = {-5.0f, -5.0f};
+    hf.worldMax  = { 5.0f,  5.0f};
+    // 3×3 = 9 samples: a slight bowl shape
+    hf.samples = { 0.5f, 0.0f, 0.5f,
+                   0.0f, 0.0f, 0.0f,
+                   0.5f, 0.0f, 0.5f };
+    sec.heightfield = std::move(hf);
+
+    Wall w0; w0.p0 = {-5,-5}; sec.walls.push_back(w0);
+    Wall w1; w1.p0 = { 5,-5}; sec.walls.push_back(w1);
+    Wall w2; w2.p0 = { 5, 5}; sec.walls.push_back(w2);
+    Wall w3; w3.p0 = {-5, 5}; sec.walls.push_back(w3);
+    map.sectors.push_back(std::move(sec));
+    return map;
+}
+
+static void assertHeightfieldEqual(const WorldMapData& a, const WorldMapData& b)
+{
+    ASSERT_EQ(a.sectors.size(), b.sectors.size());
+    const Sector& sa = a.sectors[0];
+    const Sector& sb = b.sectors[0];
+    ASSERT_EQ(static_cast<u32>(sa.floorShape), static_cast<u32>(sb.floorShape))
+        << "floorShape mismatch";
+    ASSERT_TRUE(sa.heightfield.has_value()) << "source has no heightfield";
+    ASSERT_TRUE(sb.heightfield.has_value()) << "loaded has no heightfield";
+    const auto& ha = *sa.heightfield;
+    const auto& hb = *sb.heightfield;
+    EXPECT_EQ(ha.gridWidth, hb.gridWidth) << "gridWidth mismatch";
+    EXPECT_EQ(ha.gridDepth, hb.gridDepth) << "gridDepth mismatch";
+    EXPECT_FLOAT_EQ(ha.worldMin.x, hb.worldMin.x) << "worldMin.x mismatch";
+    EXPECT_FLOAT_EQ(ha.worldMin.y, hb.worldMin.y) << "worldMin.y mismatch";
+    EXPECT_FLOAT_EQ(ha.worldMax.x, hb.worldMax.x) << "worldMax.x mismatch";
+    EXPECT_FLOAT_EQ(ha.worldMax.y, hb.worldMax.y) << "worldMax.y mismatch";
+    ASSERT_EQ(ha.samples.size(), hb.samples.size()) << "samples size mismatch";
+    for (std::size_t k = 0; k < ha.samples.size(); ++k)
+        EXPECT_FLOAT_EQ(ha.samples[k], hb.samples[k]) << "sample " << k << " mismatch";
+}
+
+TEST_F(DmapIOTest, HeightfieldBinaryRoundtrip)
+{
+    const WorldMapData original = makeHeightfieldIOMap();
+    const auto savePath = m_tmpDir / "hf.dmap";
+    ASSERT_TRUE(saveDmap(original, savePath).has_value());
+    auto loaded = loadDmap(savePath);
+    ASSERT_TRUE(loaded.has_value()) << "loadDmap failed";
+    assertHeightfieldEqual(original, *loaded);
+}
+
+TEST_F(DmapIOTest, HeightfieldJsonRoundtrip)
+{
+    const WorldMapData original = makeHeightfieldIOMap();
+    const auto savePath = m_tmpDir / "hf.dmap.json";
+    ASSERT_TRUE(saveDmapJson(original, savePath).has_value());
+    auto loaded = loadDmapJson(savePath);
+    ASSERT_TRUE(loaded.has_value()) << "loadDmapJson failed";
+    assertHeightfieldEqual(original, *loaded);
+}

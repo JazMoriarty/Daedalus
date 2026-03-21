@@ -89,6 +89,15 @@
 //     [16] meshAssetId     UUID
 //     [16] materialId      UUID
 //     [4]  brushFlags      u32 (bit 0 = collidable, bit 1 = castsShadow)
+//
+//   v5 sector additions (appended after v4 detail brushes, omitted when reading v1/v2/v3/v4):
+//   [4]  hasHeightfield  u32  (0 or 1)
+//   if hasHeightfield == 1:
+//     [4]  gridWidth  u32
+//     [4]  gridDepth  u32
+//     [8]  worldMin   f32[2]
+//     [8]  worldMax   f32[2]
+//     [gridWidth*gridDepth*4]  samples  f32[]   (uncompressed; .dlevel compresses via zlib)
 
 #include "daedalus/world/dmap_io.h"
 
@@ -102,7 +111,7 @@ namespace
 {
 
 constexpr u32 k_MAGIC   = 0x50414D44u;  // 'D','M','A','P' as little-endian u32
-constexpr u32 k_VERSION = 4u;
+constexpr u32 k_VERSION = 5u;
 
 // ─── Write helpers ────────────────────────────────────────────────────────────
 
@@ -272,6 +281,7 @@ std::expected<void, DmapError> saveDmap(const WorldMapData&         map,
         w.writeUUID(sec.ceilPortalMaterialId);
         // v4: detail brushes (fixed-size record per brush)
         w.write(static_cast<u32>(sec.details.size()));
+        // (detail brush loop follows, then v5 heightfield after)
         for (const auto& brush : sec.details)
         {
             w.writeMat4(brush.transform);
@@ -292,6 +302,19 @@ std::expected<void, DmapError> saveDmap(const WorldMapData&         map,
                 (brush.collidable  ? 0x01u : 0u) |
                 (brush.castsShadow ? 0x02u : 0u);
             w.write(brushFlags);
+        }
+        // v5: heightfield terrain floor
+        const bool hasHF = sec.heightfield.has_value();
+        w.write(static_cast<u32>(hasHF ? 1u : 0u));
+        if (hasHF)
+        {
+            const auto& hf = *sec.heightfield;
+            w.write(hf.gridWidth);
+            w.write(hf.gridDepth);
+            w.writeVec2(hf.worldMin);
+            w.writeVec2(hf.worldMax);
+            // Samples: raw f32 array (uncompressed in .dmap; .dlevel compresses via zlib).
+            for (const f32 s : hf.samples) w.write(s);
         }
     }
 
@@ -478,6 +501,25 @@ std::expected<WorldMapData, DmapError> loadDmap(const std::filesystem::path& pat
                 if (!r.read(brushFlags)) return std::unexpected(DmapError::ParseError);
                 brush.collidable  = (brushFlags & 0x01u) != 0u;
                 brush.castsShadow = (brushFlags & 0x02u) != 0u;
+            }
+        }
+        // v5: heightfield
+        if (version >= 5)
+        {
+            u32 hasHF = 0;
+            if (!r.read(hasHF)) return std::unexpected(DmapError::ParseError);
+            if (hasHF)
+            {
+                HeightfieldFloor hf;
+                if (!r.read(hf.gridWidth) || !r.read(hf.gridDepth))
+                    return std::unexpected(DmapError::ParseError);
+                if (!r.readVec2(hf.worldMin) || !r.readVec2(hf.worldMax))
+                    return std::unexpected(DmapError::ParseError);
+                const u32 count = hf.gridWidth * hf.gridDepth;
+                hf.samples.resize(count);
+                for (u32 k = 0; k < count; ++k)
+                    if (!r.read(hf.samples[k])) return std::unexpected(DmapError::ParseError);
+                sec.heightfield = std::move(hf);
             }
         }
     }

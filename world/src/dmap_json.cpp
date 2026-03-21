@@ -54,7 +54,7 @@ namespace daedalus::world
 namespace
 {
 
-constexpr u32 k_JSON_VERSION = 4u;
+constexpr u32 k_JSON_VERSION = 5u;
 
 // ─── UUID helpers ─────────────────────────────────────────────────────────────
 
@@ -147,6 +147,19 @@ constexpr u32 k_JSON_VERSION = 4u;
     if (sec.ceilPortalSectorId != INVALID_SECTOR_ID)
         j["ceil_portal_material"] = uuidToString(sec.ceilPortalMaterialId);
     // Phase 1F-C: detail brushes (omit when empty).
+    if (sec.heightfield)
+    {
+        const auto& hf = *sec.heightfield;
+        nlohmann::json jh;
+        jh["grid_width"]  = hf.gridWidth;
+        jh["grid_depth"]  = hf.gridDepth;
+        jh["world_min"]   = {hf.worldMin.x, hf.worldMin.y};
+        jh["world_max"]   = {hf.worldMax.x, hf.worldMax.y};
+        nlohmann::json js = nlohmann::json::array();
+        for (const f32 s : hf.samples) js.push_back(s);
+        jh["samples"] = std::move(js);
+        j["heightfield"] = std::move(jh);
+    }
     if (!sec.details.empty())
     {
         nlohmann::json jd = nlohmann::json::array();
@@ -283,6 +296,25 @@ constexpr u32 k_JSON_VERSION = 4u;
         if (jsec.contains("ceil_portal_material"))
             out.ceilPortalMaterialId = uuidFromString(jsec["ceil_portal_material"].get<std::string>());
         // Phase 1F-C: detail brushes.
+        // Phase 1F-D: heightfield.
+        if (jsec.contains("heightfield"))
+        {
+            const auto& jh = jsec["heightfield"];
+            HeightfieldFloor hf;
+            hf.gridWidth = jh.value("grid_width", 2u);
+            hf.gridDepth = jh.value("grid_depth", 2u);
+            if (jh.contains("world_min"))
+                hf.worldMin = {jh["world_min"][0].get<float>(), jh["world_min"][1].get<float>()};
+            if (jh.contains("world_max"))
+                hf.worldMax = {jh["world_max"][0].get<float>(), jh["world_max"][1].get<float>()};
+            if (jh.contains("samples"))
+            {
+                const auto& js = jh["samples"];
+                hf.samples.reserve(js.size());
+                for (const auto& sv : js) hf.samples.push_back(sv.get<float>());
+            }
+            out.heightfield = std::move(hf);
+        }
         if (jsec.contains("details"))
         {
             for (const auto& jb : jsec["details"])

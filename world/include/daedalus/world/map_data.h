@@ -78,6 +78,36 @@ struct Wall
     u32                      curveSubdivisions = 12u; ///< Segment count, clamped to [4, 64].
 };
 
+// ─── HeightfieldFloor ──────────────────────────────────────────────────────────
+// Terrain sample grid for FloorShape::Heightfield sectors.
+//
+// Defines a regular W×D grid of world-Y height values covering the sector's XZ
+// bounding rect [worldMin, worldMax].  The tessellator generates a
+// (gridWidth−1)×(gridDepth−1) quad mesh with per-vertex normals computed by
+// central differencing.  Physics collision uses a native Jolt heightfield shape
+// (registered by the game-layer physics world builder when the sector is loaded).
+//
+// Grid sampling convention:
+//   sample(i, j) = samples[j * gridWidth + i]   (i = X column, j = Z row)
+//   world_x = worldMin.x + i * (worldMax.x − worldMin.x) / (gridWidth − 1)
+//   world_z = worldMin.y + j * (worldMax.y − worldMin.y) / (gridDepth − 1)
+//   world_y = samples[j * gridWidth + i]          (absolute world Y)
+//
+// Constraints:
+//   gridWidth ≥ 2, gridDepth ≥ 2, gridWidth × gridDepth ≤ 256×256.
+//   worldMax.x > worldMin.x, worldMax.y > worldMin.y.
+
+struct HeightfieldFloor
+{
+    u32               gridWidth  = 2u;          ///< Number of sample columns (X axis). Min 2.
+    u32               gridDepth  = 2u;          ///< Number of sample rows (Z axis).    Min 2.
+    glm::vec2         worldMin   = {0.0f, 0.0f}; ///< World XZ position of sample (0, 0).
+    glm::vec2         worldMax   = {1.0f, 1.0f}; ///< World XZ position of sample (W-1, D-1).
+    std::vector<f32>  samples;                  ///< Flat array of absolute world-Y heights,
+                                                ///< size = gridWidth × gridDepth.
+                                                ///< Access: samples[j * gridWidth + i]
+};
+
 // ─── DetailBrushGeomParams ────────────────────────────────────────────────────
 // Flat parameter struct for all DetailBrush types.  Only fields relevant to
 // the active DetailBrushType are meaningful; unused fields retain defaults.
@@ -168,6 +198,12 @@ struct Sector
     SectorId ceilPortalSectorId  = INVALID_SECTOR_ID;  ///< Target sector above ceiling.
     UUID     floorPortalMaterialId;  ///< Material for the floor portal surface.
     UUID     ceilPortalMaterialId;   ///< Material for the ceiling portal surface.
+
+    // ─── Phase 1F-D: heightfield terrain floor ──────────────────────────────
+    // When present, and floorShape == Heightfield, the tessellator generates a
+    // terrain mesh from this sample grid instead of a flat floor.
+    // SectorFlags::HasHeightfield is set automatically when heightfield has a value.
+    std::optional<HeightfieldFloor> heightfield;
 
     // ─── Phase 1F-C: detail geometry (Layer 2) ──────────────────────────────
     // Static mesh shapes compiled into this sector's tagged GPU mesh batch at

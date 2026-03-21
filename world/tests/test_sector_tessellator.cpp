@@ -491,6 +491,102 @@ TEST(SectorTessellatorTest, DetailCylinderFaceCount)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Phase 1F-D tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Helper: make a 4-wall sector with a heightfield floor.
+static WorldMapData makeHeightfieldMap(
+    u32 W, u32 D,
+    float worldX0, float worldZ0, float worldX1, float worldZ1,
+    std::vector<f32> samps)
+{
+    WorldMapData map;
+    Sector sec;
+    sec.floorHeight = 0.0f; sec.ceilHeight = 4.0f;
+    sec.floorShape  = FloorShape::Heightfield;
+
+    HeightfieldFloor hf;
+    hf.gridWidth  = W;
+    hf.gridDepth  = D;
+    hf.worldMin   = {worldX0, worldZ0};
+    hf.worldMax   = {worldX1, worldZ1};
+    hf.samples    = std::move(samps);
+    sec.heightfield = std::move(hf);
+
+    Wall w0; w0.p0 = {worldX0, worldZ0}; sec.walls.push_back(w0);
+    Wall w1; w1.p0 = {worldX1, worldZ0}; sec.walls.push_back(w1);
+    Wall w2; w2.p0 = {worldX1, worldZ1}; sec.walls.push_back(w2);
+    Wall w3; w3.p0 = {worldX0, worldZ1}; sec.walls.push_back(w3);
+    map.sectors.push_back(std::move(sec));
+    return map;
+}
+
+// A 4×4 heightfield grid should produce exactly 4×4=16 floor vertices and
+// 3×3=9 quads = 18 triangles (36 index entries).
+TEST(SectorTessellatorTest, HeightfieldGridVertexAndIndexCount)
+{
+    std::vector<f32> samps(4 * 4, 0.0f);  // flat 4×4 grid at height 0
+    const WorldMapData map = makeHeightfieldMap(4, 4, 0,0,3,3, std::move(samps));
+    const auto meshes = tessellateMap(map);
+    ASSERT_EQ(meshes.size(), 1u);
+
+    const render::MeshData& mesh = meshes[0];
+    // Floor (heightfield): 16 verts (4×4 grid), 9 quads × 2 triangles × 3 = 54 indices
+    // Ceiling (4-vert polygon): 4 verts, 2 triangles × 3 = 6 indices
+    // 4 walls: 4×4=16 verts, 4×2×3=24 indices
+    // Total: 36 verts, 84 indices.
+    EXPECT_EQ(mesh.vertices.size(), 36u)
+        << "4×4 heightfield + ceiling + 4 walls should produce 36 vertices";
+    EXPECT_EQ(mesh.indices.size(), 84u)
+        << "4×4 heightfield + ceiling + 4 walls should produce 84 indices";
+}
+
+// A flat heightfield (all samples equal) should produce normals pointing
+// straight up (0, 1, 0) at every grid vertex.
+TEST(SectorTessellatorTest, HeightfieldFlatNormalsPointUp)
+{
+    std::vector<f32> samps(3 * 3, 1.5f);  // flat 3×3 grid
+    const WorldMapData map = makeHeightfieldMap(3, 3, 0,0,2,2, std::move(samps));
+    const auto meshes = tessellateMap(map);
+    ASSERT_FALSE(meshes.empty());
+
+    // First 3×3=9 vertices are the heightfield floor.
+    for (u32 i = 0; i < 9; ++i)
+    {
+        EXPECT_NEAR(meshes[0].vertices[i].normal[0], 0.0f, 1e-4f) << "flat hf nx " << i;
+        EXPECT_NEAR(meshes[0].vertices[i].normal[1], 1.0f, 1e-4f) << "flat hf ny " << i;
+        EXPECT_NEAR(meshes[0].vertices[i].normal[2], 0.0f, 1e-4f) << "flat hf nz " << i;
+    }
+}
+
+// A non-flat heightfield must produce normals that are all unit-length but
+// not all pointing straight up.
+TEST(SectorTessellatorTest, HeightfieldSlopedNormalsAreValidAndTilted)
+{
+    // Ramp: height increases linearly along X from 0 to 1.
+    std::vector<f32> samps;
+    for (u32 j = 0; j < 4; ++j)
+        for (u32 i = 0; i < 4; ++i)
+            samps.push_back(static_cast<float>(i) * 0.5f);  // height = i*0.5
+
+    const WorldMapData map = makeHeightfieldMap(4, 4, 0,0,3,3, std::move(samps));
+    const auto meshes = tessellateMap(map);
+    ASSERT_FALSE(meshes.empty());
+
+    bool anyTilted = false;
+    for (u32 i = 0; i < 16; ++i)
+    {
+        const auto& v = meshes[0].vertices[i];
+        const float len = std::sqrt(v.normal[0]*v.normal[0] +
+                                    v.normal[1]*v.normal[1] +
+                                    v.normal[2]*v.normal[2]);
+        EXPECT_NEAR(len, 1.0f, 1e-4f) << "sloped hf normal length " << i;
+        if (std::abs(v.normal[0]) > 0.01f) anyTilted = true;
+    }
+    EXPECT_TRUE(anyTilted) << "At least some normals should be tilted on a ramp";
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Original tests (unchanged below)
 // ─────────────────────────────────────────────────────────────────────────────
 

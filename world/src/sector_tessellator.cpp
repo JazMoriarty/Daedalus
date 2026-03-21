@@ -365,6 +365,95 @@ static void appendStairSurface(
     }
 }
 
+// ─── appendHeightfieldFloor (Phase 1F-D step 7) ──────────────────────────────────
+//
+// Generates a (gridWidth−1) × (gridDepth−1) quad mesh from the heightfield.
+//
+// Vertex layout: W×D shared vertices, one per sample, indexed by a grid
+// index buffer.  Per-vertex normals are computed by central differencing so
+// the surface shades smoothly across quad boundaries.
+//
+// Normal derivation: at interior grid point (i, j) the normal is proportional
+// to cross(T_z, T_x) where:
+//   T_x = world-space tangent in X = (2*dx, h(i+1,j)−h(i−1,j), 0)
+//   T_z = world-space tangent in Z = (0, h(i,j+1)−h(i,j−1), 2*dz)
+// Simplifying: normal ∝ (−(h_right−h_left)/(2*dx), 1, −(h_top−h_bot)/(2*dz))
+// (normalised).  Edge vertices use one-sided differences.
+//
+// UV: u = i / (W−1), v = j / (D−1) — covers [0,1] across the grid.
+static void appendHeightfieldFloor(
+    std::vector<render::StaticMeshVertex>& verts,
+    std::vector<u32>&                      indices,
+    const HeightfieldFloor&                hf) noexcept
+{
+    const u32 W = hf.gridWidth;
+    const u32 D = hf.gridDepth;
+    if (W < 2u || D < 2u || hf.samples.size() < static_cast<std::size_t>(W * D))
+        return;
+
+    const float rangeX = hf.worldMax.x - hf.worldMin.x;
+    const float rangeZ = hf.worldMax.y - hf.worldMin.y;
+    if (rangeX <= 0.0f || rangeZ <= 0.0f) return;
+
+    const float dx = rangeX / static_cast<float>(W - 1u);
+    const float dz = rangeZ / static_cast<float>(D - 1u);
+
+    const u32 base = static_cast<u32>(verts.size());
+
+    // Emit W×D vertices with central-difference normals.
+    for (u32 j = 0; j < D; ++j)
+    {
+        for (u32 i = 0; i < W; ++i)
+        {
+            const float px = hf.worldMin.x + static_cast<float>(i) * dx;
+            const float pz = hf.worldMin.y + static_cast<float>(j) * dz;
+            const float py = hf.samples[j * W + i];
+
+            // Central differences for normal computation.
+            const float hL = hf.samples[j * W + (i > 0      ? i - 1 : i)];
+            const float hR = hf.samples[j * W + (i < W - 1u ? i + 1 : i)];
+            const float hB = hf.samples[(j > 0      ? j - 1 : j) * W + i];
+            const float hT = hf.samples[(j < D - 1u ? j + 1 : j) * W + i];
+
+            // Width of the finite difference step in world units.
+            const float stX = (i > 0u && i < W - 1u) ? 2.0f * dx : dx;
+            const float stZ = (j > 0u && j < D - 1u) ? 2.0f * dz : dz;
+
+            // Normal: normalize(-(hR-hL)/stX, 1, -(hT-hB)/stZ)
+            const glm::vec3 n = glm::normalize(
+                glm::vec3(-(hR - hL) / stX, 1.0f, -(hT - hB) / stZ));
+
+            // Tangent along world +X direction.
+            const glm::vec3 t = glm::normalize(
+                glm::vec3(dx, hR - hL, 0.0f));
+
+            const float u = static_cast<float>(i) / static_cast<float>(W - 1u);
+            const float v = static_cast<float>(j) / static_cast<float>(D - 1u);
+
+            verts.push_back(makeVertex(px, py, pz,
+                                       n.x, n.y, n.z,
+                                       u,   v,
+                                       t.x, t.y, t.z, 1.0f));
+        }
+    }
+
+    // Emit (W−1)×(D−1) quads as CCW triangles (floor, normal up).
+    for (u32 j = 0; j < D - 1u; ++j)
+    {
+        for (u32 i = 0; i < W - 1u; ++i)
+        {
+            const u32 bl = base +  j      * W +  i;       // bottom-left
+            const u32 br = base +  j      * W + (i + 1u); // bottom-right
+            const u32 tr = base + (j + 1u)* W + (i + 1u); // top-right
+            const u32 tl = base + (j + 1u)* W +  i;       // top-left
+
+            // Two CCW triangles when viewed from above (+Y = floor normal).
+            indices.push_back(bl); indices.push_back(br); indices.push_back(tr);
+            indices.push_back(bl); indices.push_back(tr); indices.push_back(tl);
+        }
+    }
+}
+
 // ─── buildHeightArrays ─────────────────────────────────────────────────────────────
 // Builds per-vertex height arrays from Wall overrides, falling back to the
 // sector's scalar heights when no override is present.
@@ -802,7 +891,11 @@ std::vector<render::MeshData> tessellateMap(const WorldMapData& map)
         buildHeightArrays(sector, floorH, ceilH);
 
         // ── Floor ────────────────────────────────────────────────────────────
-        if (sector.floorShape == FloorShape::VisualStairs && sector.stairProfile)
+        if (sector.floorShape == FloorShape::Heightfield && sector.heightfield)
+        {
+            appendHeightfieldFloor(mesh.vertices, mesh.indices, *sector.heightfield);
+        }
+        else if (sector.floorShape == FloorShape::VisualStairs && sector.stairProfile)
         {
             appendStairSurface(mesh.vertices, mesh.indices, poly,
                                sector.floorHeight, *sector.stairProfile,
@@ -969,7 +1062,13 @@ std::vector<std::vector<TaggedMeshBatch>> tessellateMapTagged(const WorldMapData
                 ? sector.floorPortalMaterialId
                 : sector.floorMaterialId;
 
-            if (sector.floorShape == FloorShape::VisualStairs && sector.stairProfile)
+            if (sector.floorShape == FloorShape::Heightfield && sector.heightfield)
+            {
+                TaggedMeshBatch& batch = getBatch(floorMat);
+                appendHeightfieldFloor(batch.mesh.vertices, batch.mesh.indices,
+                                       *sector.heightfield);
+            }
+            else if (sector.floorShape == FloorShape::VisualStairs && sector.stairProfile)
             {
                 TaggedMeshBatch& batch = getBatch(floorMat);
                 appendStairSurface(batch.mesh.vertices, batch.mesh.indices, poly,
