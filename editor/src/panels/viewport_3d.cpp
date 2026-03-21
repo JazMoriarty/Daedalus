@@ -1227,8 +1227,11 @@ void Viewport3D::draw(EditMapDocument&      doc,
     // ── Submit sector draws, filtered through portal traversal when possible ────
     if (m_worldMap && !m_draws.empty())
     {
+        // findSectorAt disambiguates stacked (SoS) sectors by the camera's Y
+        // position as well as XZ, so portal traversal starts from the correct
+        // floor when multiple sectors share the same XZ footprint.
         const world::SectorId camSector =
-            m_worldMap->findSector(glm::vec2(m_eye.x, m_eye.z));
+            m_worldMap->findSectorAt(glm::vec3(m_eye.x, m_eye.y, m_eye.z));
 
         if (camSector != world::INVALID_SECTOR_ID && m_portalTraversal)
         {
