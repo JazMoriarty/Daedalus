@@ -11,6 +11,8 @@
 #include "tools/vertex_tool.h"
 #include "document/commands/cmd_move_entity.h"
 #include "document/commands/cmd_move_light.h"
+#include "document/commands/cmd_move_sector.h"
+#include "daedalus/editor/compound_command.h"
 #include "document/commands/cmd_set_player_start.h"
 #include "document/commands/cmd_split_wall.h"
 #include "document/commands/cmd_rotate_entity.h"
@@ -681,9 +683,9 @@ void Viewport2D::draw(EditMapDocument& doc,
     
     // Active state: we're processing a drag that started in this canvas.
     // Track this manually since we no longer have InvisibleButton's IsItemActive().
-    const bool active = hovered || m_panActive || m_entityDragActive || 
-                        m_lightDragActive || m_entityRotActive || m_psDragActive || 
-                        m_psRotActive || m_rectSelActive;
+    const bool active = hovered || m_panActive || m_entityDragActive ||
+                        m_lightDragActive || m_entityRotActive || m_psDragActive ||
+                        m_psRotActive || m_rectSelActive || m_groupDragActive;
 
     // ── Draw background + grid ────────────────────────────────────────────────
     ImDrawList* dl = ImGui::GetWindowDrawList();
@@ -1170,6 +1172,123 @@ void Viewport2D::draw(EditMapDocument& doc,
 
                 if (!handledByAlt)
                 {
+                    // ── Group drag ────────────────────────────────────────────────────────
+                    // If the cursor is over an already-selected object in a multi-item
+                    // selection (Select tool only), capture all selected objects and start
+                    // a grouped drag rather than re-selecting a single object.
+                    bool handledByGroupDrag = false;
+                    if (selectTool &&
+                        activeTool == static_cast<IEditorTool*>(selectTool) &&
+                        doc.selection().items.size() > 1)
+                    {
+                        const SelectionState& gsel = doc.selection();
+                        constexpr float kGR = 10.0f;  // screen-pixel icon hit radius
+
+                        // Test selected entities
+                        for (const auto& gItem : gsel.items)
+                        {
+                            if (gItem.type != SelectionType::Entity) continue;
+                            if (gItem.index >= doc.entities().size()) continue;
+                            const auto& gEd = doc.entities()[gItem.index];
+                            const auto  gSp = mapToScreen({gEd.position.x, gEd.position.z}, canvasMin);
+                            const float gdx = mousePosV.x - gSp.x;
+                            const float gdy = mousePosV.y - gSp.y;
+                            if (gdx * gdx + gdy * gdy <= kGR * kGR)
+                            { handledByGroupDrag = true; break; }
+                        }
+
+                        // Test selected lights
+                        if (!handledByGroupDrag)
+                        {
+                            for (const auto& gItem : gsel.items)
+                            {
+                                if (gItem.type != SelectionType::Light) continue;
+                                if (gItem.index >= doc.lights().size()) continue;
+                                const auto& gLd = doc.lights()[gItem.index];
+                                const auto  gSp = mapToScreen({gLd.position.x, gLd.position.z}, canvasMin);
+                                const float gdx = mousePosV.x - gSp.x;
+                                const float gdy = mousePosV.y - gSp.y;
+                                if (gdx * gdx + gdy * gdy <= kGR * kGR)
+                                { handledByGroupDrag = true; break; }
+                            }
+                        }
+
+                        // Test selected sectors (ray-cast point-in-polygon in XZ map space)
+                        if (!handledByGroupDrag)
+                        {
+                            const auto& gMap = doc.mapData();
+                            for (const auto& gItem : gsel.items)
+                            {
+                                if (gItem.type != SelectionType::Sector) continue;
+                                if (gItem.sectorId >= static_cast<world::SectorId>(gMap.sectors.size())) continue;
+                                const auto& gSec = gMap.sectors[gItem.sectorId];
+                                if (gSec.walls.size() < 3) continue;
+                                int gCross = 0;
+                                const glm::vec2 gP = mouseMapRaw;
+                                const std::size_t gN = gSec.walls.size();
+                                for (std::size_t gi = 0; gi < gN; ++gi)
+                                {
+                                    const glm::vec2 ga = gSec.walls[gi].p0;
+                                    const glm::vec2 gb = gSec.walls[(gi + 1) % gN].p0;
+                                    if ((ga.y <= gP.y) != (gb.y <= gP.y))
+                                        if (gP.x < ga.x + (gP.y - ga.y) / (gb.y - ga.y) * (gb.x - ga.x))
+                                            ++gCross;
+                                }
+                                if (gCross & 1) { handledByGroupDrag = true; break; }
+                            }
+                        }
+
+                        if (handledByGroupDrag)
+                        {
+                            // Snapshot original positions for every selected item.
+                            m_groupSectors.clear();
+                            m_groupEntities.clear();
+                            m_groupLights.clear();
+                            const auto& capMap = doc.mapData();
+                            for (const auto& capItem : gsel.items)
+                            {
+                                switch (capItem.type)
+                                {
+                                case SelectionType::Sector:
+                                    if (capItem.sectorId < static_cast<world::SectorId>(capMap.sectors.size()))
+                                    {
+                                        GroupSectorOrig gso;
+                                        gso.sectorId = capItem.sectorId;
+                                        const auto& gWalls = capMap.sectors[capItem.sectorId].walls;
+                                        gso.wallPositions.reserve(gWalls.size());
+                                        gso.curveA.reserve(gWalls.size());
+                                        gso.curveB.reserve(gWalls.size());
+                                        for (const auto& gw : gWalls)
+                                        {
+                                            gso.wallPositions.push_back(gw.p0);
+                                            gso.curveA.push_back(gw.curveControlA);
+                                            gso.curveB.push_back(gw.curveControlB);
+                                        }
+                                        m_groupSectors.push_back(std::move(gso));
+                                    }
+                                    break;
+                                case SelectionType::Entity:
+                                    if (capItem.index < doc.entities().size())
+                                        m_groupEntities.push_back(
+                                            {capItem.index, doc.entities()[capItem.index].position});
+                                    break;
+                                case SelectionType::Light:
+                                    if (capItem.index < doc.lights().size())
+                                        m_groupLights.push_back(
+                                            {capItem.index, doc.lights()[capItem.index].position});
+                                    break;
+                                default: break;
+                                }
+                            }
+                            m_groupDragActive    = true;
+                            m_groupDragMoved     = false;
+                            m_groupDragFirstMove = true;
+                            m_groupDragAnchor    = mouseMap;
+                        }
+                    }
+
+                    if (!handledByGroupDrag)
+                    {
                     // Check player start icon (unique object — check first).
                     bool hitPlayerStart = false;
                     if (const auto& ps = doc.playerStart(); ps.has_value())
@@ -1267,6 +1386,7 @@ void Viewport2D::draw(EditMapDocument& doc,
                         }
                     }
                 }
+                    }  // if (!handledByGroupDrag)
             }  // if (!handledByAlt)
                 }  // else (not handledByCtrl)
             }  // if (IsMouseClicked LMB)
@@ -1329,8 +1449,52 @@ void Viewport2D::draw(EditMapDocument& doc,
     // drag flags dangling and caused spurious deselection on the next Properties click.
     if (ImGui::IsMouseReleased(ImGuiMouseButton_Left))
     {
+        // Commit group drag as one CompoundCommand.
+        if (m_groupDragActive)
+        {
+            m_groupDragActive = false;
+            if (m_groupDragMoved)
+            {
+                std::vector<std::unique_ptr<ICommand>> steps;
+
+                // Entities
+                for (const auto& eorig : m_groupEntities)
+                {
+                    if (eorig.idx >= doc.entities().size()) continue;
+                    const glm::vec3 finalPos = doc.entities()[eorig.idx].position;
+                    if (finalPos != eorig.position)
+                        steps.push_back(std::make_unique<CmdMoveEntity>(
+                            doc, eorig.idx, eorig.position, finalPos));
+                }
+                // Lights
+                for (const auto& lorig : m_groupLights)
+                {
+                    if (lorig.idx >= doc.lights().size()) continue;
+                    const glm::vec3 finalPos = doc.lights()[lorig.idx].position;
+                    if (finalPos != lorig.position)
+                        steps.push_back(std::make_unique<CmdMoveLight>(
+                            doc, lorig.idx, lorig.position, finalPos));
+                }
+                // Sectors (CmdMoveSector first execute is a no-op; undo/redo apply delta)
+                auto& sectors = doc.mapData().sectors;
+                for (const auto& sorig : m_groupSectors)
+                {
+                    if (sorig.sectorId >= static_cast<world::SectorId>(sectors.size())) continue;
+                    if (sorig.wallPositions.empty()) continue;
+                    const glm::vec2 delta =
+                        sectors[sorig.sectorId].walls[0].p0 - sorig.wallPositions[0];
+                    if (glm::dot(delta, delta) > 1e-10f)
+                        steps.push_back(std::make_unique<CmdMoveSector>(
+                            doc, sorig.sectorId, delta));
+                }
+
+                if (!steps.empty())
+                    doc.pushCommand(std::make_unique<CompoundCommand>(
+                        "Move Selection", std::move(steps)));
+            }
+        }
         // Commit curve handle drag as an undoable command.
-        if (m_curveDragActive)
+        else if (m_curveDragActive)
         {
             m_curveDragActive = false;
             if (m_curveDragMoved)
@@ -1412,6 +1576,53 @@ void Viewport2D::draw(EditMapDocument& doc,
         {
             activeTool->onMouseUp(doc, mouseMap.x, mouseMap.y, 0);
         }
+    }
+
+    // Group drag live update: apply uniform XZ delta to all captured objects.
+    if (active && ImGui::IsMouseDown(ImGuiMouseButton_Left) && m_groupDragActive)
+    {
+        // Align anchor to the first snapped position so the delta is always
+        // computed in snapped space (same pattern as SelectTool sector drag).
+        if (m_groupDragFirstMove)
+        {
+            m_groupDragAnchor    = mouseMap;
+            m_groupDragFirstMove = false;
+        }
+        const glm::vec2 delta = mouseMap - m_groupDragAnchor;
+        auto& sectors = doc.mapData().sectors;
+
+        for (const auto& sorig : m_groupSectors)
+        {
+            if (sorig.sectorId >= static_cast<world::SectorId>(sectors.size())) continue;
+            auto& sec = sectors[sorig.sectorId];
+            for (std::size_t wi = 0; wi < sec.walls.size() && wi < sorig.wallPositions.size(); ++wi)
+            {
+                sec.walls[wi].p0 = sorig.wallPositions[wi] + delta;
+                if (wi < sorig.curveA.size() && sorig.curveA[wi].has_value())
+                    sec.walls[wi].curveControlA = *sorig.curveA[wi] + delta;
+                if (wi < sorig.curveB.size() && sorig.curveB[wi].has_value())
+                    sec.walls[wi].curveControlB = *sorig.curveB[wi] + delta;
+            }
+        }
+        for (const auto& eorig : m_groupEntities)
+        {
+            if (eorig.idx < doc.entities().size())
+            {
+                doc.entities()[eorig.idx].position.x = eorig.position.x + delta.x;
+                doc.entities()[eorig.idx].position.z = eorig.position.z + delta.y;
+            }
+        }
+        for (const auto& lorig : m_groupLights)
+        {
+            if (lorig.idx < doc.lights().size())
+            {
+                doc.lights()[lorig.idx].position.x = lorig.position.x + delta.x;
+                doc.lights()[lorig.idx].position.z = lorig.position.z + delta.y;
+            }
+        }
+        doc.markDirty();
+        doc.markEntityDirty();
+        m_groupDragMoved = true;
     }
 
     // Entity live drag — update position while left button held.

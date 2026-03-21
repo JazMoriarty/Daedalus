@@ -116,6 +116,27 @@ private:
     glm::vec2 m_panStartMouse{};
     glm::vec2 m_panStartOffset{};
 
+    // ─── Group drag: moves all selected sectors, entities, and lights together ──────
+    // Activated when the user clicks on any object that is already in a
+    // multi-item selection while the Select tool is active.
+    struct GroupSectorOrig
+    {
+        world::SectorId              sectorId;
+        std::vector<glm::vec2>       wallPositions;     ///< p0 for each wall.
+        std::vector<std::optional<glm::vec2>> curveA;  ///< curveControlA per wall.
+        std::vector<std::optional<glm::vec2>> curveB;  ///< curveControlB per wall.
+    };
+    struct GroupEntityOrig { std::size_t idx; glm::vec3 position; };
+    struct GroupLightOrig  { std::size_t idx; glm::vec3 position; };
+
+    bool m_groupDragActive    = false;
+    bool m_groupDragMoved     = false;
+    bool m_groupDragFirstMove = true;
+    glm::vec2 m_groupDragAnchor{};
+    std::vector<GroupSectorOrig> m_groupSectors;
+    std::vector<GroupEntityOrig> m_groupEntities;
+    std::vector<GroupLightOrig>  m_groupLights;
+
     // Entity drag state
     bool        m_entityDragActive = false;   ///< True while dragging an entity.
     std::size_t m_entityDragIdx    = 0;       ///< Index of the entity being dragged.
