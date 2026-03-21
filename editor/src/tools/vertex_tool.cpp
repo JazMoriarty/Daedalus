@@ -42,7 +42,13 @@ void VertexTool::onMouseDown(EditMapDocument& doc,
     }
 
     if (bestSector == world::INVALID_SECTOR_ID)
-        return;  // No vertex near the click — selection unchanged.
+    {
+        // Click on empty space: clear the selection (same as SelectTool).
+        // If the user then drags a rectangle, onRectSelect will populate
+        // a new selection; if it is a trivial click the selection stays empty.
+        doc.selection().clear();
+        return;
+    }
 
     auto& sel = doc.selection();
 
