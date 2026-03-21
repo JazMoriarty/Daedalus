@@ -456,8 +456,7 @@ void Viewport2D::drawEntities(ImDrawList*            dl,
         const auto       sp  = mapToScreen({ed.position.x, ed.position.z}, canvasMin);
         const ImVec2     spi {sp.x, sp.y};
 
-        const bool selected = (sel.hasSingleOf(SelectionType::Entity) &&
-                               sel.items[0].index == ei);
+        const bool selected = sel.isEntitySelected(ei);
 
         // Fill colour by visual type.
         ImU32 fillCol;
@@ -778,8 +777,7 @@ void Viewport2D::draw(EditMapDocument& doc,
             const auto sp = mapToScreen({ld.position.x, ld.position.z}, canvasMin);
             const ImVec2 spi{sp.x, sp.y};
 
-            const bool lightSel = (sel.hasSingleOf(SelectionType::Light) &&
-                                   sel.items[0].index == li);
+            const bool lightSel = sel.isLightSelected(li);
 
             // Influence-radius ring.
             const float ringR = ld.radius * m_zoom;

@@ -73,6 +73,24 @@ struct SelectionState
         return items.size() == 1 && items[0].type == t;
     }
 
+    /// True if the given entity (by its entities() index) is selected.
+    [[nodiscard]] bool isEntitySelected(std::size_t idx) const noexcept
+    {
+        for (const auto& item : items)
+            if (item.type == SelectionType::Entity && item.index == idx)
+                return true;
+        return false;
+    }
+
+    /// True if the given light (by its lights() index) is selected.
+    [[nodiscard]] bool isLightSelected(std::size_t idx) const noexcept
+    {
+        for (const auto& item : items)
+            if (item.type == SelectionType::Light && item.index == idx)
+                return true;
+        return false;
+    }
+
     /// True if the given vertex (identified by owning sector + wall index) is selected.
     [[nodiscard]] bool isVertexSelected(world::SectorId sid, std::size_t wi) const noexcept
     {
