@@ -1554,7 +1554,20 @@ void Viewport3D::draw(EditMapDocument&      doc,
                 }
             }
 
-            // ── Wall triangles: solid walls + portal upper/lower strips ──────────
+            // Bezier evaluation helper for ray picking (also used by outline drawing below).
+            // Inline to avoid forward-reference issues since outline helpers are defined later.
+            auto evalWallPt = [](const world::Wall& w, glm::vec2 wP1, float t) -> glm::vec2
+            {
+                const float u = 1.0f - t;
+                if (!w.curveControlA.has_value()) return w.p0 + t * (wP1 - w.p0);
+                if (w.curveControlB.has_value())
+                    return u*u*u*w.p0 + 3.0f*u*u*t*(*w.curveControlA)
+                         + 3.0f*u*t*t*(*w.curveControlB) + t*t*t*wP1;
+                return u*u*w.p0 + 2.0f*u*t*(*w.curveControlA) + t*t*wP1;
+            };
+
+            // ── Wall triangles: solid walls + portal upper/lower strips ────────
+            // Curved walls are subdivided so pick accuracy matches the rendered geometry.
             for (std::size_t si = 0; si < sectors.size(); ++si)
             {
                 const world::Sector& sec = sectors[si];
@@ -1565,14 +1578,15 @@ void Viewport3D::draw(EditMapDocument&      doc,
                     const glm::vec2 p0 = wall.p0;
                     const glm::vec2 p1 = sec.walls[(wi + 1) % ns].p0;
 
-                    // Test two triangles of a wall quad spanning [yBottom, yTop].
-                    auto testStrip = [&](float yBottom, float yTop, HoveredSurface surf)
+                    // Test two triangles of a wall quad for a given straight segment.
+                    auto testSegStrip = [&](glm::vec2 sp0, glm::vec2 sp1,
+                                            float yBottom, float yTop, HoveredSurface surf)
                     {
                         if (yBottom >= yTop) return;
-                        const glm::vec3 bl = {p0.x, yBottom, p0.y};
-                        const glm::vec3 br = {p1.x, yBottom, p1.y};
-                        const glm::vec3 tr = {p1.x, yTop,    p1.y};
-                        const glm::vec3 tl = {p0.x, yTop,    p0.y};
+                        const glm::vec3 bl = {sp0.x, yBottom, sp0.y};
+                        const glm::vec3 br = {sp1.x, yBottom, sp1.y};
+                        const glm::vec3 tr = {sp1.x, yTop,    sp1.y};
+                        const glm::vec3 tl = {sp0.x, yTop,    sp0.y};
                         float t;
                         if (rayTriangleIntersect(m_eye, rayDir, bl, tr, br, t) && t < closestT)
                         { closestT = t; hitSector = static_cast<world::SectorId>(si); hitWall = wi; hitSurface = surf; }
@@ -1580,19 +1594,38 @@ void Viewport3D::draw(EditMapDocument&      doc,
                         { closestT = t; hitSector = static_cast<world::SectorId>(si); hitWall = wi; hitSurface = surf; }
                     };
 
+                    // Build the segment list: 1 segment for straight, N for curved.
+                    const bool isCurved = wall.curveControlA.has_value();
+                    const u32  nSeg     = isCurved
+                        ? std::clamp(wall.curveSubdivisions, 4u, 64u) : 1u;
+
                     if (wall.portalSectorId == world::INVALID_SECTOR_ID)
                     {
-                        testStrip(sec.floorHeight, sec.ceilHeight, HoveredSurface::Wall);
+                        for (u32 k = 0; k < nSeg; ++k)
+                        {
+                            const float t0 = static_cast<float>(k)   / static_cast<float>(nSeg);
+                            const float t1 = static_cast<float>(k+1) / static_cast<float>(nSeg);
+                            const glm::vec2 sp0 = isCurved ? evalWallPt(wall, p1, t0) : p0;
+                            const glm::vec2 sp1 = isCurved ? evalWallPt(wall, p1, t1) : p1;
+                            testSegStrip(sp0, sp1, sec.floorHeight, sec.ceilHeight, HoveredSurface::Wall);
+                        }
                     }
                     else
                     {
                         const auto adjId = static_cast<std::size_t>(wall.portalSectorId);
                         if (adjId >= sectors.size()) continue;
                         const world::Sector& adj = sectors[adjId];
-                        if (adj.ceilHeight < sec.ceilHeight)    // upper strip
-                            testStrip(adj.ceilHeight, sec.ceilHeight, HoveredSurface::UpperWall);
-                        if (adj.floorHeight > sec.floorHeight)  // lower strip
-                            testStrip(sec.floorHeight, adj.floorHeight, HoveredSurface::LowerWall);
+                        for (u32 k = 0; k < nSeg; ++k)
+                        {
+                            const float t0 = static_cast<float>(k)   / static_cast<float>(nSeg);
+                            const float t1 = static_cast<float>(k+1) / static_cast<float>(nSeg);
+                            const glm::vec2 sp0 = isCurved ? evalWallPt(wall, p1, t0) : p0;
+                            const glm::vec2 sp1 = isCurved ? evalWallPt(wall, p1, t1) : p1;
+                            if (adj.ceilHeight < sec.ceilHeight)   // upper strip
+                                testSegStrip(sp0, sp1, adj.ceilHeight, sec.ceilHeight, HoveredSurface::UpperWall);
+                            if (adj.floorHeight > sec.floorHeight)  // lower strip
+                                testSegStrip(sp0, sp1, sec.floorHeight, adj.floorHeight, HoveredSurface::LowerWall);
+                        }
                     }
                 }
             }
@@ -1729,9 +1762,35 @@ void Viewport3D::draw(EditMapDocument&      doc,
                 imageTopLeft.y + (1.0f - (c.y / c.w * 0.5f + 0.5f)) * fh);
         };
 
+        // Bezier evaluation helper for outline drawing (same logic as the inline version
+        // defined before the ray picking code above; extracted for reuse by the sector
+        // outline lambda which needs to call it from a capture context).
+        auto evalWallPtOutline = [](const world::Wall& w, glm::vec2 wP1, float t) -> glm::vec2
+        {
+            const float u = 1.0f - t;
+            if (!w.curveControlA.has_value()) return w.p0 + t * (wP1 - w.p0);
+            if (w.curveControlB.has_value())
+                return u*u*u*w.p0 + 3.0f*u*u*t*(*w.curveControlA)
+                     + 3.0f*u*t*t*(*w.curveControlB) + t*t*t*wP1;
+            return u*u*w.p0 + 2.0f*u*t*(*w.curveControlA) + t*t*wP1;
+        };
+
+        // Helper: draw a near-plane-clipped line between two clip-space points.
+        auto drawClippedLine = [&](const glm::vec4& a, const glm::vec4& b, ImU32 col)
+        {
+            const bool aIn = a.w > kNearEps;
+            const bool bIn = b.w > kNearEps;
+            if (!aIn && !bIn) return;
+            if (aIn && bIn) { dl->AddLine(projClip(a), projClip(b), col, 2.0f); return; }
+            const float t = (kNearEps - a.w) / (b.w - a.w);
+            const glm::vec4 clip = glm::mix(a, b, t);
+            if (aIn) dl->AddLine(projClip(a),    projClip(clip), col, 2.0f);
+            else     dl->AddLine(projClip(clip), projClip(b),    col, 2.0f);
+        };
+
         // Draw the boundary edges of a sector polygon at a given Y height.
-        // Uses Sutherland-Hodgman near-plane clipping on the full polygon so the
-        // near-plane cap edge is generated when multiple vertices are behind the camera.
+        // Curved walls are expanded into their Bezier subdivision points so the
+        // outline matches the actual geometry.
         auto drawSectorOutline = [&](world::SectorId sid, float y, ImU32 lineCol)
         {
             if (sid >= static_cast<world::SectorId>(sectors.size())) return;
@@ -1739,22 +1798,37 @@ void Viewport3D::draw(EditMapDocument&      doc,
             const std::size_t ns = sec.walls.size();
             if (ns < 2) return;
 
-            // Build clip-space polygon.
-            std::vector<glm::vec4> in(ns);
+            // Build expanded clip-space polygon (inserts Bezier interior points).
+            std::vector<glm::vec4> in;
+            in.reserve(ns * 4);
             for (std::size_t i = 0; i < ns; ++i)
-                in[i] = VP * glm::vec4(sec.walls[i].p0.x, y, sec.walls[i].p0.y, 1.0f);
+            {
+                const world::Wall& wall   = sec.walls[i];
+                const glm::vec2    wallP1 = sec.walls[(i + 1) % ns].p0;
+                in.push_back(VP * glm::vec4(wall.p0.x, y, wall.p0.y, 1.0f));
+                if (wall.curveControlA.has_value())
+                {
+                    const u32 nSeg = std::clamp(wall.curveSubdivisions, 4u, 64u);
+                    for (u32 k = 1; k < nSeg; ++k)
+                    {
+                        const float t  = static_cast<float>(k) / static_cast<float>(nSeg);
+                        const glm::vec2 pt = evalWallPtOutline(wall, wallP1, t);
+                        in.push_back(VP * glm::vec4(pt.x, y, pt.y, 1.0f));
+                    }
+                }
+            }
+            const std::size_t total = in.size();
 
             // Sutherland-Hodgman clip against near plane (w > kNearEps).
             std::vector<glm::vec4> poly;
-            poly.reserve(ns + 1);
-            for (std::size_t i = 0; i < ns; ++i)
+            poly.reserve(total + 1);
+            for (std::size_t i = 0; i < total; ++i)
             {
                 const glm::vec4& cur  = in[i];
-                const glm::vec4& next = in[(i + 1) % ns];
+                const glm::vec4& next = in[(i + 1) % total];
                 const bool curIn  = cur.w  > kNearEps;
                 const bool nextIn = next.w > kNearEps;
-                if (curIn)
-                    poly.push_back(cur);
+                if (curIn) poly.push_back(cur);
                 if (curIn != nextIn)
                 {
                     const float t = (kNearEps - cur.w) / (next.w - cur.w);
@@ -1768,10 +1842,10 @@ void Viewport3D::draw(EditMapDocument&      doc,
                             lineCol, 2.0f);
         };
 
-        // Draw a wall quad outline using Sutherland-Hodgman near-plane clipping.
-        // Clips all 4 corners as a polygon so the near-plane "cap" edge is always
-        // drawn even when multiple corners are behind the camera.
-        // yBottom/yTop define the vertical extent of the quad (strip support).
+        // Draw a wall outline following the Bezier curve when curved.
+        // For straight walls: single clipped quad.
+        // For curved walls: top and bottom polylines + vertical ends.
+        // yBottom/yTop define the vertical extent.
         auto drawWallOutline = [&](world::SectorId sid, std::size_t wi,
                                    float yBottom, float yTop,
                                    ImU32 fillCol, ImU32 lineCol)
@@ -1780,48 +1854,70 @@ void Viewport3D::draw(EditMapDocument&      doc,
             const world::Sector& sec = sectors[sid];
             const std::size_t    ns  = sec.walls.size();
             if (wi >= ns) return;
-            const glm::vec2 p0 = sec.walls[wi].p0;
+            const world::Wall& wall = sec.walls[wi];
+            const glm::vec2 p0 = wall.p0;
             const glm::vec2 p1 = sec.walls[(wi + 1) % ns].p0;
 
-            // Clip-space corners: bl, br, tr, tl (CCW order).
-            const glm::vec4 in[4] = {
-                VP * glm::vec4(p0.x, yBottom, p0.y, 1.0f),
-                VP * glm::vec4(p1.x, yBottom, p1.y, 1.0f),
-                VP * glm::vec4(p1.x, yTop,    p1.y, 1.0f),
-                VP * glm::vec4(p0.x, yTop,    p0.y, 1.0f),
-            };
-
-            // Sutherland-Hodgman clip against w > kNearEps (near plane).
-            // A quad can yield at most 5 vertices after one half-plane clip.
-            glm::vec4 poly[5];
-            int n = 0;
-            for (int i = 0; i < 4; ++i)
+            if (wall.curveControlA.has_value())
             {
-                const glm::vec4& cur  = in[i];
-                const glm::vec4& next = in[(i + 1) % 4];
-                const bool curIn  = cur.w  > kNearEps;
-                const bool nextIn = next.w > kNearEps;
-                if (curIn)
-                    poly[n++] = cur;
-                if (curIn != nextIn)
+                // Curved wall: draw top and bottom polylines following the curve,
+                // plus vertical end lines at p0 and p1.
+                const u32 nSeg = std::clamp(wall.curveSubdivisions, 4u, 64u);
+
+                std::vector<glm::vec4> botPts, topPts;
+                botPts.reserve(nSeg + 1);
+                topPts.reserve(nSeg + 1);
+                for (u32 k = 0; k <= nSeg; ++k)
                 {
-                    const float t = (kNearEps - cur.w) / (next.w - cur.w);
-                    poly[n++] = glm::mix(cur, next, t);
+                    const float t  = static_cast<float>(k) / static_cast<float>(nSeg);
+                    const glm::vec2 pt = evalWallPtOutline(wall, p1, t);
+                    botPts.push_back(VP * glm::vec4(pt.x, yBottom, pt.y, 1.0f));
+                    topPts.push_back(VP * glm::vec4(pt.x, yTop,    pt.y, 1.0f));
                 }
+                // Bottom and top polylines.
+                for (u32 k = 0; k < nSeg; ++k)
+                {
+                    drawClippedLine(botPts[k], botPts[k+1], lineCol);
+                    drawClippedLine(topPts[k], topPts[k+1], lineCol);
+                }
+                // Vertical end lines.
+                drawClippedLine(botPts.front(), topPts.front(), lineCol);
+                drawClippedLine(botPts.back(),  topPts.back(),  lineCol);
             }
-            if (n < 2) return;
-
-            // Draw outline edges.
-            for (int i = 0; i < n; ++i)
-                dl->AddLine(projClip(poly[i]), projClip(poly[(i + 1) % n]),
-                            lineCol, 2.0f);
-
-            // Fill: fan triangulation from poly[0].
-            if (fillCol & IM_COL32(0, 0, 0, 255))
-                for (int i = 1; i + 1 < n; ++i)
-                    dl->AddTriangleFilled(projClip(poly[0]),
-                                         projClip(poly[i]),
-                                         projClip(poly[i + 1]), fillCol);
+            else
+            {
+                // Straight wall: existing clipped-quad approach.
+                const glm::vec4 in[4] = {
+                    VP * glm::vec4(p0.x, yBottom, p0.y, 1.0f),
+                    VP * glm::vec4(p1.x, yBottom, p1.y, 1.0f),
+                    VP * glm::vec4(p1.x, yTop,    p1.y, 1.0f),
+                    VP * glm::vec4(p0.x, yTop,    p0.y, 1.0f),
+                };
+                glm::vec4 poly[5];
+                int n = 0;
+                for (int i = 0; i < 4; ++i)
+                {
+                    const glm::vec4& cur  = in[i];
+                    const glm::vec4& next = in[(i + 1) % 4];
+                    const bool curIn  = cur.w > kNearEps;
+                    const bool nextIn = next.w > kNearEps;
+                    if (curIn) poly[n++] = cur;
+                    if (curIn != nextIn)
+                    {
+                        const float t = (kNearEps - cur.w) / (next.w - cur.w);
+                        poly[n++] = glm::mix(cur, next, t);
+                    }
+                }
+                if (n < 2) return;
+                for (int i = 0; i < n; ++i)
+                    dl->AddLine(projClip(poly[i]), projClip(poly[(i + 1) % n]),
+                                lineCol, 2.0f);
+                if (fillCol & IM_COL32(0, 0, 0, 255))
+                    for (int i = 1; i + 1 < n; ++i)
+                        dl->AddTriangleFilled(projClip(poly[0]),
+                                             projClip(poly[i]),
+                                             projClip(poly[i + 1]), fillCol);
+            }
         };
 
         // Helper: get strip y-range for a hovered/selected portal wall surface.
