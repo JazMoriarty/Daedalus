@@ -28,6 +28,14 @@
 #include "document/commands/cmd_set_map_defaults.h"
 #include "document/commands/cmd_set_global_ambient.h"
 #include "daedalus/editor/editor_layer.h"  // PlayerStart
+#include "document/commands/cmd_set_vertex_height.h"
+#include "document/commands/cmd_set_sector_floor_shape.h"
+#include "document/commands/cmd_set_floor_portal.h"
+#include "document/commands/cmd_set_wall_curve.h"
+#include "document/commands/cmd_add_detail_brush.h"
+#include "document/commands/cmd_remove_detail_brush.h"
+#include "document/commands/cmd_set_detail_brush.h"
+#include "document/commands/cmd_set_heightfield.h"
 
 #include <gtest/gtest.h>
 #include <filesystem>
@@ -1178,4 +1186,438 @@ TEST(CmdSetGlobalAmbient, UndoRestores)
 
     EXPECT_FLOAT_EQ(doc.mapData().globalAmbientColor.r,   origColor.r);
     EXPECT_FLOAT_EQ(doc.mapData().globalAmbientIntensity, origI);
+}
+
+// ─── CmdSetVertexHeight ──────────────────────────────────────────────────────
+
+TEST(CmdSetVertexHeight, SetsFloorOverride)
+{
+    EditMapDocument doc;
+    addSquare(doc);
+
+    doc.pushCommand(std::make_unique<CmdSetVertexHeight>(
+        doc, 0u, 1u, 2.5f, std::nullopt));
+
+    ASSERT_TRUE(doc.mapData().sectors[0].walls[1].floorHeightOverride.has_value());
+    EXPECT_FLOAT_EQ(*doc.mapData().sectors[0].walls[1].floorHeightOverride, 2.5f);
+    EXPECT_FALSE(doc.mapData().sectors[0].walls[1].ceilHeightOverride.has_value());
+}
+
+TEST(CmdSetVertexHeight, UndoRestoresOverride)
+{
+    EditMapDocument doc;
+    addSquare(doc);
+
+    doc.pushCommand(std::make_unique<CmdSetVertexHeight>(
+        doc, 0u, 0u, 1.0f, 5.0f));
+    ASSERT_TRUE(doc.mapData().sectors[0].walls[0].floorHeightOverride.has_value());
+
+    doc.undo();
+
+    EXPECT_FALSE(doc.mapData().sectors[0].walls[0].floorHeightOverride.has_value());
+    EXPECT_FALSE(doc.mapData().sectors[0].walls[0].ceilHeightOverride.has_value());
+}
+
+TEST(CmdSetVertexHeight, ClearOverrideWithNullopt)
+{
+    EditMapDocument doc;
+    addSquare(doc);
+    // Pre-set an override directly.
+    doc.mapData().sectors[0].walls[2].floorHeightOverride = 3.0f;
+
+    doc.pushCommand(std::make_unique<CmdSetVertexHeight>(
+        doc, 0u, 2u, std::nullopt, std::nullopt));
+
+    EXPECT_FALSE(doc.mapData().sectors[0].walls[2].floorHeightOverride.has_value());
+}
+
+TEST(CmdSetVertexHeight, OutOfRangeIsNoop)
+{
+    EditMapDocument doc;
+    EXPECT_NO_THROW(doc.pushCommand(std::make_unique<CmdSetVertexHeight>(
+        doc, 99u, 0u, 1.0f, 1.0f)));
+}
+
+// ─── CmdSetSectorFloorShape ──────────────────────────────────────────────────
+
+TEST(CmdSetSectorFloorShape, SetsFloorShapeFlat)
+{
+    EditMapDocument doc;
+    addSquare(doc);
+
+    doc.pushCommand(std::make_unique<CmdSetSectorFloorShape>(
+        doc, 0u, FloorShape::Heightfield, std::nullopt));
+    ASSERT_EQ(doc.mapData().sectors[0].floorShape, FloorShape::Heightfield);
+
+    doc.pushCommand(std::make_unique<CmdSetSectorFloorShape>(
+        doc, 0u, FloorShape::Flat, std::nullopt));
+
+    EXPECT_EQ(doc.mapData().sectors[0].floorShape, FloorShape::Flat);
+}
+
+TEST(CmdSetSectorFloorShape, SetsStairProfile)
+{
+    EditMapDocument doc;
+    addSquare(doc);
+
+    StairProfile p;
+    p.stepCount   = 8u;
+    p.riserHeight = 0.3f;
+    p.treadDepth  = 0.6f;
+    doc.pushCommand(std::make_unique<CmdSetSectorFloorShape>(
+        doc, 0u, FloorShape::VisualStairs, p));
+
+    ASSERT_EQ(doc.mapData().sectors[0].floorShape, FloorShape::VisualStairs);
+    ASSERT_TRUE(doc.mapData().sectors[0].stairProfile.has_value());
+    EXPECT_EQ  (doc.mapData().sectors[0].stairProfile->stepCount,   8u);
+    EXPECT_FLOAT_EQ(doc.mapData().sectors[0].stairProfile->riserHeight, 0.3f);
+    EXPECT_FLOAT_EQ(doc.mapData().sectors[0].stairProfile->treadDepth,  0.6f);
+}
+
+TEST(CmdSetSectorFloorShape, UndoRestoresFloorShape)
+{
+    EditMapDocument doc;
+    addSquare(doc);
+    ASSERT_EQ(doc.mapData().sectors[0].floorShape, FloorShape::Flat);
+
+    StairProfile p; p.stepCount = 4u;
+    doc.pushCommand(std::make_unique<CmdSetSectorFloorShape>(
+        doc, 0u, FloorShape::VisualStairs, p));
+    doc.undo();
+
+    EXPECT_EQ(doc.mapData().sectors[0].floorShape, FloorShape::Flat);
+    EXPECT_FALSE(doc.mapData().sectors[0].stairProfile.has_value());
+}
+
+TEST(CmdSetSectorFloorShape, OutOfRangeIsNoop)
+{
+    EditMapDocument doc;
+    EXPECT_NO_THROW(doc.pushCommand(std::make_unique<CmdSetSectorFloorShape>(
+        doc, 99u, FloorShape::Flat, std::nullopt)));
+}
+
+// ─── CmdSetFloorPortal ───────────────────────────────────────────────────────
+
+TEST(CmdSetFloorPortal, SetsFloorPortal)
+{
+    EditMapDocument doc;
+    addSquare(doc);
+    addSquare(doc, 4.0f, {10.0f, 0.0f});
+
+    doc.pushCommand(std::make_unique<CmdSetFloorPortal>(
+        doc, 0u, HPortalSurface::Floor, 1u, daedalus::UUID{}));
+
+    EXPECT_EQ(doc.mapData().sectors[0].floorPortalSectorId, 1u);
+    EXPECT_EQ(doc.mapData().sectors[0].ceilPortalSectorId,  INVALID_SECTOR_ID);
+}
+
+TEST(CmdSetFloorPortal, SetsCeilingPortal)
+{
+    EditMapDocument doc;
+    addSquare(doc);
+    addSquare(doc, 4.0f, {10.0f, 0.0f});
+
+    doc.pushCommand(std::make_unique<CmdSetFloorPortal>(
+        doc, 0u, HPortalSurface::Ceiling, 1u, daedalus::UUID{}));
+
+    EXPECT_EQ(doc.mapData().sectors[0].ceilPortalSectorId,  1u);
+    EXPECT_EQ(doc.mapData().sectors[0].floorPortalSectorId, INVALID_SECTOR_ID);
+}
+
+TEST(CmdSetFloorPortal, UndoRestoresFloorPortal)
+{
+    EditMapDocument doc;
+    addSquare(doc);
+    addSquare(doc, 4.0f, {10.0f, 0.0f});
+
+    doc.pushCommand(std::make_unique<CmdSetFloorPortal>(
+        doc, 0u, HPortalSurface::Floor, 1u, daedalus::UUID{}));
+    ASSERT_EQ(doc.mapData().sectors[0].floorPortalSectorId, 1u);
+
+    doc.undo();
+
+    EXPECT_EQ(doc.mapData().sectors[0].floorPortalSectorId, INVALID_SECTOR_ID);
+}
+
+TEST(CmdSetFloorPortal, ClearPortalWithInvalidId)
+{
+    EditMapDocument doc;
+    addSquare(doc);
+    doc.mapData().sectors[0].floorPortalSectorId = 0u;  // self-link for test.
+
+    doc.pushCommand(std::make_unique<CmdSetFloorPortal>(
+        doc, 0u, HPortalSurface::Floor, INVALID_SECTOR_ID, daedalus::UUID{}));
+
+    EXPECT_EQ(doc.mapData().sectors[0].floorPortalSectorId, INVALID_SECTOR_ID);
+}
+
+// ─── CmdSetWallCurve ─────────────────────────────────────────────────────────
+
+TEST(CmdSetWallCurve, EnablesQuadraticCurve)
+{
+    EditMapDocument doc;
+    addSquare(doc);
+
+    const glm::vec2 ctrl{2.0f, 3.0f};
+    doc.pushCommand(std::make_unique<CmdSetWallCurve>(
+        doc, 0u, 0u, ctrl, std::nullopt, 16u));
+
+    const Wall& w = doc.mapData().sectors[0].walls[0];
+    ASSERT_TRUE(w.curveControlA.has_value());
+    EXPECT_FLOAT_EQ(w.curveControlA->x, 2.0f);
+    EXPECT_FLOAT_EQ(w.curveControlA->y, 3.0f);
+    EXPECT_FALSE(w.curveControlB.has_value());
+    EXPECT_EQ(w.curveSubdivisions, 16u);
+}
+
+TEST(CmdSetWallCurve, EnablesCubicCurve)
+{
+    EditMapDocument doc;
+    addSquare(doc);
+
+    doc.pushCommand(std::make_unique<CmdSetWallCurve>(
+        doc, 0u, 1u, glm::vec2{1.0f, 0.0f}, glm::vec2{3.0f, 0.0f}, 8u));
+
+    const Wall& w = doc.mapData().sectors[0].walls[1];
+    ASSERT_TRUE(w.curveControlA.has_value());
+    ASSERT_TRUE(w.curveControlB.has_value());
+    EXPECT_FLOAT_EQ(w.curveControlB->x, 3.0f);
+}
+
+TEST(CmdSetWallCurve, UndoRestoresCurve)
+{
+    EditMapDocument doc;
+    addSquare(doc);
+
+    doc.pushCommand(std::make_unique<CmdSetWallCurve>(
+        doc, 0u, 0u, glm::vec2{1.0f, 1.0f}, std::nullopt, 12u));
+    ASSERT_TRUE(doc.mapData().sectors[0].walls[0].curveControlA.has_value());
+
+    doc.undo();
+
+    EXPECT_FALSE(doc.mapData().sectors[0].walls[0].curveControlA.has_value());
+    EXPECT_EQ(doc.mapData().sectors[0].walls[0].curveSubdivisions, 12u);  // subdivisions unchanged
+}
+
+TEST(CmdSetWallCurve, OutOfRangeIsNoop)
+{
+    EditMapDocument doc;
+    EXPECT_NO_THROW(doc.pushCommand(std::make_unique<CmdSetWallCurve>(
+        doc, 99u, 0u, glm::vec2{}, std::nullopt, 12u)));
+}
+
+// ─── CmdAddDetailBrush ───────────────────────────────────────────────────────
+
+TEST(CmdAddDetailBrush, AddsBrush)
+{
+    EditMapDocument doc;
+    addSquare(doc);
+    ASSERT_EQ(doc.mapData().sectors[0].details.size(), 0u);
+
+    DetailBrush db; db.type = DetailBrushType::Box;
+    doc.pushCommand(std::make_unique<CmdAddDetailBrush>(doc, 0u, db));
+
+    ASSERT_EQ(doc.mapData().sectors[0].details.size(), 1u);
+    EXPECT_EQ(doc.mapData().sectors[0].details[0].type, DetailBrushType::Box);
+}
+
+TEST(CmdAddDetailBrush, UndoRemovesBrush)
+{
+    EditMapDocument doc;
+    addSquare(doc);
+
+    DetailBrush db; db.type = DetailBrushType::Cylinder;
+    doc.pushCommand(std::make_unique<CmdAddDetailBrush>(doc, 0u, db));
+    ASSERT_EQ(doc.mapData().sectors[0].details.size(), 1u);
+
+    doc.undo();
+
+    EXPECT_EQ(doc.mapData().sectors[0].details.size(), 0u);
+}
+
+TEST(CmdAddDetailBrush, RedoRestoresBrush)
+{
+    EditMapDocument doc;
+    addSquare(doc);
+
+    DetailBrush db; db.type = DetailBrushType::Wedge;
+    doc.pushCommand(std::make_unique<CmdAddDetailBrush>(doc, 0u, db));
+    doc.undo();
+    doc.redo();
+
+    ASSERT_EQ(doc.mapData().sectors[0].details.size(), 1u);
+    EXPECT_EQ(doc.mapData().sectors[0].details[0].type, DetailBrushType::Wedge);
+}
+
+TEST(CmdAddDetailBrush, OutOfRangeIsNoop)
+{
+    EditMapDocument doc;
+    DetailBrush db;
+    EXPECT_NO_THROW(doc.pushCommand(
+        std::make_unique<CmdAddDetailBrush>(doc, 99u, db)));
+}
+
+// ─── CmdRemoveDetailBrush ────────────────────────────────────────────────────
+
+TEST(CmdRemoveDetailBrush, RemovesBrush)
+{
+    EditMapDocument doc;
+    addSquare(doc);
+
+    DetailBrush db; db.type = DetailBrushType::ArchSpan;
+    doc.mapData().sectors[0].details.push_back(db);
+    ASSERT_EQ(doc.mapData().sectors[0].details.size(), 1u);
+
+    doc.pushCommand(std::make_unique<CmdRemoveDetailBrush>(doc, 0u, 0u));
+
+    EXPECT_EQ(doc.mapData().sectors[0].details.size(), 0u);
+}
+
+TEST(CmdRemoveDetailBrush, UndoRestoresBrushAtSameIndex)
+{
+    EditMapDocument doc;
+    addSquare(doc);
+
+    DetailBrush db; db.type = DetailBrushType::ArchSpan;
+    db.geom.archHeight = 2.5f;
+    doc.mapData().sectors[0].details.push_back(db);
+
+    doc.pushCommand(std::make_unique<CmdRemoveDetailBrush>(doc, 0u, 0u));
+    ASSERT_EQ(doc.mapData().sectors[0].details.size(), 0u);
+
+    doc.undo();
+
+    ASSERT_EQ(doc.mapData().sectors[0].details.size(), 1u);
+    EXPECT_EQ(doc.mapData().sectors[0].details[0].type, DetailBrushType::ArchSpan);
+    EXPECT_FLOAT_EQ(doc.mapData().sectors[0].details[0].geom.archHeight, 2.5f);
+}
+
+TEST(CmdRemoveDetailBrush, OutOfRangeIsNoop)
+{
+    EditMapDocument doc;
+    addSquare(doc);
+    // No brushes in sector; removing index 0 should not crash.
+    EXPECT_NO_THROW(doc.pushCommand(
+        std::make_unique<CmdRemoveDetailBrush>(doc, 0u, 0u)));
+}
+
+// ─── CmdSetDetailBrush ───────────────────────────────────────────────────────
+
+TEST(CmdSetDetailBrush, ReplacesBrushType)
+{
+    EditMapDocument doc;
+    addSquare(doc);
+
+    DetailBrush original; original.type = DetailBrushType::Box;
+    doc.mapData().sectors[0].details.push_back(original);
+
+    DetailBrush updated; updated.type = DetailBrushType::Cylinder;
+    updated.geom.radius = 1.5f;
+    doc.pushCommand(std::make_unique<CmdSetDetailBrush>(doc, 0u, 0u, updated));
+
+    ASSERT_EQ(doc.mapData().sectors[0].details.size(), 1u);
+    EXPECT_EQ(doc.mapData().sectors[0].details[0].type, DetailBrushType::Cylinder);
+    EXPECT_FLOAT_EQ(doc.mapData().sectors[0].details[0].geom.radius, 1.5f);
+}
+
+TEST(CmdSetDetailBrush, UndoRestoresOriginalBrush)
+{
+    EditMapDocument doc;
+    addSquare(doc);
+
+    DetailBrush original; original.type = DetailBrushType::Wedge;
+    original.geom.halfExtents = {1.0f, 2.0f, 3.0f};
+    doc.mapData().sectors[0].details.push_back(original);
+
+    DetailBrush updated; updated.type = DetailBrushType::Box;
+    doc.pushCommand(std::make_unique<CmdSetDetailBrush>(doc, 0u, 0u, updated));
+    doc.undo();
+
+    EXPECT_EQ(doc.mapData().sectors[0].details[0].type, DetailBrushType::Wedge);
+    EXPECT_FLOAT_EQ(doc.mapData().sectors[0].details[0].geom.halfExtents.y, 2.0f);
+}
+
+// ─── CmdSetHeightfield ───────────────────────────────────────────────────────
+
+TEST(CmdSetHeightfield, SetsHeightfieldAndFlag)
+{
+    EditMapDocument doc;
+    addSquare(doc);
+    ASSERT_FALSE(doc.mapData().sectors[0].heightfield.has_value());
+    ASSERT_FALSE(hasFlag(doc.mapData().sectors[0].flags, SectorFlags::HasHeightfield));
+
+    HeightfieldFloor hf;
+    hf.gridWidth = 4u; hf.gridDepth = 4u;
+    hf.worldMin  = {0.0f, 0.0f}; hf.worldMax = {4.0f, 4.0f};
+    hf.samples.assign(16u, 0.5f);
+    doc.pushCommand(std::make_unique<CmdSetHeightfield>(doc, 0u, hf));
+
+    ASSERT_TRUE(doc.mapData().sectors[0].heightfield.has_value());
+    EXPECT_EQ(doc.mapData().sectors[0].heightfield->gridWidth, 4u);
+    EXPECT_FLOAT_EQ(doc.mapData().sectors[0].heightfield->samples[0], 0.5f);
+    EXPECT_TRUE(hasFlag(doc.mapData().sectors[0].flags, SectorFlags::HasHeightfield));
+}
+
+TEST(CmdSetHeightfield, ClearHeightfieldRemovesFlag)
+{
+    EditMapDocument doc;
+    addSquare(doc);
+    HeightfieldFloor hf;
+    hf.gridWidth = 2u; hf.gridDepth = 2u;
+    hf.worldMin  = {0.0f, 0.0f}; hf.worldMax = {2.0f, 2.0f};
+    hf.samples.assign(4u, 1.0f);
+    doc.mapData().sectors[0].heightfield = hf;
+    doc.mapData().sectors[0].flags =
+        doc.mapData().sectors[0].flags | SectorFlags::HasHeightfield;
+
+    doc.pushCommand(std::make_unique<CmdSetHeightfield>(doc, 0u, std::nullopt));
+
+    EXPECT_FALSE(doc.mapData().sectors[0].heightfield.has_value());
+    EXPECT_FALSE(hasFlag(doc.mapData().sectors[0].flags, SectorFlags::HasHeightfield));
+}
+
+TEST(CmdSetHeightfield, UndoRestoresHeightfield)
+{
+    EditMapDocument doc;
+    addSquare(doc);
+
+    HeightfieldFloor hf;
+    hf.gridWidth = 3u; hf.gridDepth = 3u;
+    hf.worldMin  = {0.0f, 0.0f}; hf.worldMax = {3.0f, 3.0f};
+    hf.samples.assign(9u, 2.0f);
+    doc.pushCommand(std::make_unique<CmdSetHeightfield>(doc, 0u, hf));
+    ASSERT_TRUE(doc.mapData().sectors[0].heightfield.has_value());
+
+    doc.undo();
+
+    EXPECT_FALSE(doc.mapData().sectors[0].heightfield.has_value());
+    EXPECT_FALSE(hasFlag(doc.mapData().sectors[0].flags, SectorFlags::HasHeightfield));
+}
+
+TEST(CmdSetHeightfield, RedoRestoresHeightfield)
+{
+    EditMapDocument doc;
+    addSquare(doc);
+
+    HeightfieldFloor hf;
+    hf.gridWidth = 2u; hf.gridDepth = 2u;
+    hf.worldMin  = {0.0f, 0.0f}; hf.worldMax = {2.0f, 2.0f};
+    hf.samples   = {1.0f, 2.0f, 3.0f, 4.0f};
+    doc.pushCommand(std::make_unique<CmdSetHeightfield>(doc, 0u, hf));
+    doc.undo();
+    doc.redo();
+
+    ASSERT_TRUE(doc.mapData().sectors[0].heightfield.has_value());
+    EXPECT_EQ(doc.mapData().sectors[0].heightfield->samples.size(), 4u);
+    EXPECT_FLOAT_EQ(doc.mapData().sectors[0].heightfield->samples[3], 4.0f);
+}
+
+TEST(CmdSetHeightfield, OutOfRangeIsNoop)
+{
+    EditMapDocument doc;
+    HeightfieldFloor hf;
+    hf.gridWidth = 2u; hf.gridDepth = 2u;
+    hf.samples.assign(4u, 0.0f);
+    EXPECT_NO_THROW(doc.pushCommand(
+        std::make_unique<CmdSetHeightfield>(doc, 99u, hf)));
 }

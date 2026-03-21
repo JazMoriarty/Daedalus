@@ -41,6 +41,14 @@ add_executable(DaedalusEditTests
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/document/commands/cmd_set_map_meta.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/document/commands/cmd_set_map_defaults.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/document/commands/cmd_set_global_ambient.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src/document/commands/cmd_set_vertex_height.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src/document/commands/cmd_set_sector_floor_shape.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src/document/commands/cmd_set_floor_portal.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src/document/commands/cmd_set_wall_curve.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src/document/commands/cmd_add_detail_brush.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src/document/commands/cmd_remove_detail_brush.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src/document/commands/cmd_set_detail_brush.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src/document/commands/cmd_set_heightfield.cpp
 )
 
 target_include_directories(DaedalusEditTests

@@ -4,8 +4,6 @@
 #include "daedalus/world/map_data.h"
 #include "document/commands/cmd_set_sector_floor_shape.h"
 #include "document/commands/cmd_draw_sector.h"
-#include "document/commands/cmd_link_portal.h"
-#include "document/commands/cmd_set_sector_heights.h"
 
 #include "imgui.h"
 
@@ -147,14 +145,14 @@ void StaircaseGeneratorPanel::applySectorChain(EditMapDocument& doc,
         centroid /= static_cast<float>(sec.walls.size());
     }
 
-    const float baseFloor = sectors[startSid].ceilHeight;  // chain starts at ceiling of start.
+    const float baseFloor = sectors[startSid].ceilHeight;  // chain starts at ceiling of start sector.
     const float half      = m_corridorWidth * 0.5f;
 
-    std::vector<std::unique_ptr<ICommand>> steps_cmds;
+    // Pre-compute the sector indices these steps will occupy once appended.
+    // CmdDrawSector::execute() always appends, so step i lands at (currentSize + i).
+    const auto baseIdx = static_cast<world::SectorId>(sectors.size());
 
-    // Record indices of the new sectors so we can link portals between them.
-    std::vector<world::SectorId> newIds;
-    newIds.reserve(static_cast<std::size_t>(steps));
+    std::vector<std::unique_ptr<ICommand>> cmds;
 
     for (int i = 0; i < steps; ++i)
     {
@@ -162,10 +160,10 @@ void StaircaseGeneratorPanel::applySectorChain(EditMapDocument& doc,
         const glm::vec2 nearCentre = centroid + fwd * (static_cast<float>(i) * m_treadDepth);
 
         // Four corners of the step quad (CCW from above).
-        const glm::vec2 p0 = nearCentre - right * half;              // entry left
-        const glm::vec2 p1 = nearCentre + fwd   * m_treadDepth - right * half;  // exit left
-        const glm::vec2 p2 = nearCentre + fwd   * m_treadDepth + right * half;  // exit right
-        const glm::vec2 p3 = nearCentre + right * half;              // entry right
+        const glm::vec2 p0 = nearCentre - right * half;                         // entry left
+        const glm::vec2 p1 = nearCentre + fwd * m_treadDepth - right * half;    // exit  left
+        const glm::vec2 p2 = nearCentre + fwd * m_treadDepth + right * half;    // exit  right
+        const glm::vec2 p3 = nearCentre + right * half;                         // entry right
 
         world::Sector sec;
         sec.floorHeight = baseFloor + static_cast<float>(i) * m_riserHeight;
@@ -178,32 +176,20 @@ void StaircaseGeneratorPanel::applySectorChain(EditMapDocument& doc,
         sec.walls[2].p0 = p2;
         sec.walls[3].p0 = p3;
 
-        steps_cmds.push_back(std::make_unique<CmdDrawSector>(doc, sec));
+        // Embed portal IDs directly in the sector data rather than using
+        // CmdLinkPortal (which would require the sectors to already exist at
+        // construction time and would trigger its DAEDALUS_ASSERT).
+        // wall[1] (exit)  → next step;  wall[3] (entry) → previous step.
+        if (i + 1 < steps)
+            sec.walls[1].portalSectorId = baseIdx + static_cast<world::SectorId>(i + 1);
+        if (i > 0)
+            sec.walls[3].portalSectorId = baseIdx + static_cast<world::SectorId>(i - 1);
 
-        // Record where the new sector will be (at time of compound execution).
-        // CmdDrawSector appends to sectors, so the index is sectors.size() + i
-        // at the point when this compound executes.
-        // We store the pre-execution size + offset; actual linking uses CmdLinkPortal
-        // which resolves at execute() time using the live sector list.
-        newIds.push_back(static_cast<world::SectorId>(sectors.size() + i));
-    }
-
-    // Link adjacent steps via wall portals (wall 0 = entry face, wall 1 = exit face).
-    // Step i's exit wall (index 1, going toward fwd) aligns with step i+1's entry (index 3).
-    // Note: portal linking requires matching geometry; we rely on CmdLinkPortal's geometry
-    // match logic.  For the sector-chain case the walls are perfectly aligned so auto-match
-    // will succeed.  We push the links as part of the same CompoundCommand.
-    for (int i = 0; i + 1 < steps; ++i)
-    {
-        // Exit wall of step i is wall index 1 (p1→p2 direction).
-        // Entry wall of step i+1 is wall index 3 (p3→p0 direction, reversed).
-        // CmdLinkPortal links two specified walls bidirectionally.
-        steps_cmds.push_back(std::make_unique<CmdLinkPortal>(
-            doc, newIds[i], 1u, newIds[i + 1], 3u));
+        cmds.push_back(std::make_unique<CmdDrawSector>(doc, sec));
     }
 
     doc.pushCommand(std::make_unique<CompoundCommand>(
-        "Generate Sector Chain Staircase", std::move(steps_cmds)));
+        "Generate Sector Chain Staircase", std::move(cmds)));
 
     char buf[80];
     std::snprintf(buf, sizeof(buf), "Generated %d-step sector chain.", steps);

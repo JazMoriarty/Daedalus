@@ -462,8 +462,8 @@ void PropertyInspector::draw(EditMapDocument&      doc,
                 const int maxSec = static_cast<int>(doc.mapData().sectors.size()) - 1;
                 int tgtInt = linked ? static_cast<int>(curTarget) : -1;
                 ImGui::SetNextItemWidth(-1.0f);
-                if (dragIntUndo("##hptgt", &tgtInt, 0.5f, -1, std::max(maxSec, 0),
-                                tgtInt < 0 ? "ID: (none)" : "ID: %d"))
+                // Format: -1 displays as "ID: -1" meaning "no portal"; >=0 is the target sector index.
+                if (dragIntUndo("##hptgt", &tgtInt, 0.5f, -1, std::max(maxSec, 0), "ID: %d"))
                 {
                     const world::SectorId newTgt = (tgtInt < 0)
                         ? world::INVALID_SECTOR_ID
