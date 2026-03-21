@@ -41,6 +41,9 @@
 #include <span>
 #include <unordered_map>
 
+#include <glm/gtc/constants.hpp>  // glm::two_pi, glm::pi
+#include <glm/gtc/matrix_inverse.hpp>
+
 namespace daedalus::world
 {
 
@@ -379,6 +382,402 @@ static void buildHeightArrays(const Sector&       sector,
     }
 }
 
+// ─── Bezier evaluation helpers (Phase 1F-C step 6) ──────────────────────────────
+
+// Evaluate a quadratic Bezier at parameter t ∈ [0, 1].
+// B(t) = (1−t)²·p0 + 2t(1−t)·ca + t²·p1
+[[nodiscard]] static glm::vec2 evalBezierQuadratic(
+    glm::vec2 p0, glm::vec2 ca, glm::vec2 p1, float t) noexcept
+{
+    const float mt = 1.0f - t;
+    return mt*mt*p0 + 2.0f*mt*t*ca + t*t*p1;
+}
+
+// Evaluate a cubic Bezier at parameter t ∈ [0, 1].
+// B(t) = (1−t)³·p0 + 3t(1−t)²·ca + 3t²(1−t)·cb + t³·p1
+[[nodiscard]] static glm::vec2 evalBezierCubic(
+    glm::vec2 p0, glm::vec2 ca, glm::vec2 cb, glm::vec2 p1, float t) noexcept
+{
+    const float mt = 1.0f - t;
+    return mt*mt*mt*p0 + 3.0f*mt*mt*t*ca + 3.0f*mt*t*t*cb + t*t*t*p1;
+}
+
+// ─── Detail brush geometry generators (Phase 1F-C step 9) ───────────────────────
+
+// Append a single quad to verts/indices.  pos[4] are in CCW order from the
+// outside (the correct front face for the given normal direction).
+// Uses CW-in-NDC winding to match the wall / ceiling convention.
+static void appendDetailQuad(
+    std::vector<render::StaticMeshVertex>& verts,
+    std::vector<u32>&                      indices,
+    const glm::vec3 pos[4],
+    glm::vec3       worldNormal,
+    glm::vec3       worldTangent,
+    const float     uvCoords[4][2]) noexcept
+{
+    const u32 base = static_cast<u32>(verts.size());
+    for (int i = 0; i < 4; ++i)
+    {
+        verts.push_back(makeVertex(
+            pos[i].x, pos[i].y, pos[i].z,
+            worldNormal.x,  worldNormal.y,  worldNormal.z,
+            uvCoords[i][0], uvCoords[i][1],
+            worldTangent.x, worldTangent.y, worldTangent.z, 1.0f));
+    }
+    // CW in NDC (matches appendWallQuad convention).
+    indices.push_back(base+0); indices.push_back(base+2); indices.push_back(base+1);
+    indices.push_back(base+0); indices.push_back(base+3); indices.push_back(base+2);
+}
+
+// Helper: transform a local-space position by xform.
+[[nodiscard]] static glm::vec3 xformPos(const glm::mat4& xform,
+                                         glm::vec3 local) noexcept
+{
+    return glm::vec3(xform * glm::vec4(local, 1.0f));
+}
+
+// Helper: transform a local-space normal by the normal matrix (upper-3×3 of
+// the inverse-transpose of the transform).
+[[nodiscard]] static glm::vec3 xformNormal(const glm::mat3& normalMat,
+                                            glm::vec3 local) noexcept
+{
+    return glm::normalize(normalMat * local);
+}
+
+// ─── appendDetailBox ─────────────────────────────────────────────────────────────
+// 6-faced axis-aligned box in local space, transformed to world space.
+static void appendDetailBox(
+    std::vector<render::StaticMeshVertex>& verts,
+    std::vector<u32>&                      indices,
+    const glm::mat4&                       xform,
+    const glm::mat3&                       normalMat,
+    const DetailBrushGeomParams&           p) noexcept
+{
+    const float hx = p.halfExtents.x, hy = p.halfExtents.y, hz = p.halfExtents.z;
+
+    // Each face: local normal, tangent, 4 CCW positions from outside.
+    // Use explicit glm::vec3 constructors; brace-initialization does not deduce
+    // template arguments for aggregate sub-objects in all compilers.
+    struct FaceDesc { glm::vec3 n, t; glm::vec3 v[4]; };
+    const FaceDesc faces[6] = {
+        // Bottom (-Y)
+        {glm::vec3{0,-1,0}, glm::vec3{1,0,0},
+         {glm::vec3{-hx,-hy,-hz}, glm::vec3{hx,-hy,-hz},
+          glm::vec3{hx,-hy,hz},   glm::vec3{-hx,-hy,hz}}},
+        // Top (+Y)
+        {glm::vec3{0,+1,0}, glm::vec3{1,0,0},
+         {glm::vec3{-hx,+hy,+hz}, glm::vec3{hx,+hy,+hz},
+          glm::vec3{hx,+hy,-hz},  glm::vec3{-hx,+hy,-hz}}},
+        // Front (+Z)
+        {glm::vec3{0,0,+1}, glm::vec3{1,0,0},
+         {glm::vec3{-hx,-hy,+hz}, glm::vec3{hx,-hy,+hz},
+          glm::vec3{hx,+hy,+hz},  glm::vec3{-hx,+hy,+hz}}},
+        // Back (-Z)
+        {glm::vec3{0,0,-1}, glm::vec3{-1,0,0},
+         {glm::vec3{hx,-hy,-hz},  glm::vec3{-hx,-hy,-hz},
+          glm::vec3{-hx,+hy,-hz}, glm::vec3{hx,+hy,-hz}}},
+        // Right (+X)
+        {glm::vec3{+1,0,0}, glm::vec3{0,0,1},
+         {glm::vec3{hx,-hy,-hz}, glm::vec3{hx,-hy,+hz},
+          glm::vec3{hx,+hy,+hz}, glm::vec3{hx,+hy,-hz}}},
+        // Left (-X)
+        {glm::vec3{-1,0,0}, glm::vec3{0,0,-1},
+         {glm::vec3{-hx,-hy,+hz}, glm::vec3{-hx,-hy,-hz},
+          glm::vec3{-hx,+hy,-hz}, glm::vec3{-hx,+hy,+hz}}},
+    };
+
+    for (const auto& face : faces)
+    {
+        glm::vec3 wpos[4];
+        for (int i = 0; i < 4; ++i) wpos[i] = xformPos(xform, face.v[i]);
+        const glm::vec3 wn = xformNormal(normalMat, face.n);
+        const glm::vec3 wt = xformNormal(normalMat, face.t);
+
+        // UV: project local vertex onto the face's 2D tangent/bitangent plane.
+        const glm::vec3 bt = glm::cross(face.n, face.t);
+        float uvs[4][2];
+        for (int i = 0; i < 4; ++i)
+        {
+            uvs[i][0] = glm::dot(face.v[i], face.t)  + 0.5f;
+            uvs[i][1] = glm::dot(face.v[i], bt) + 0.5f;
+        }
+        appendDetailQuad(verts, indices, wpos, wn, wt, uvs);
+    }
+}
+
+// ─── appendDetailWedge ────────────────────────────────────────────────────────────
+// Right triangular prism with slopeAxis=1 (Z-slope, default): full height
+// at z=−hz tapering to zero at z=+hz.
+// slopeAxis=0 (X-slope): full height at x=−hx tapering to zero at x=+hx.
+static void appendDetailWedge(
+    std::vector<render::StaticMeshVertex>& verts,
+    std::vector<u32>&                      indices,
+    const glm::mat4&                       xform,
+    const glm::mat3&                       normalMat,
+    const DetailBrushGeomParams&           p) noexcept
+{
+    const float hx = p.halfExtents.x, hy = p.halfExtents.y, hz = p.halfExtents.z;
+
+    // Vertex key abbreviations (slopeAxis=1, slope along Z):
+    //   BLB = bottom-left-back, BRB = bottom-right-back, TLB = top-left-back, TRB = top-right-back
+    //   BLF = bottom-left-front, BRF = bottom-right-front  (no top-front vertices)
+    const glm::vec3 BLB{-hx,-hy,-hz}, BRB{+hx,-hy,-hz},
+                    TLB{-hx,+hy,-hz}, TRB{+hx,+hy,-hz},
+                    BLF{-hx,-hy,+hz}, BRF{+hx,-hy,+hz};
+
+    // Slope normal for the top face: the slope rises from z=+hz (floor height)
+    // to full height at z=−hz.  Normal points away from the prism interior:
+    // slope = (rise/run) in YZ plane → normal = normalize(0, hz, hy).
+    const glm::vec3 slopeN = glm::normalize(glm::vec3(0.0f, hz, hy));
+
+    // Only slopeAxis=1 is implemented; slopeAxis=0 (X slope) can be achieved
+    // by rotating the brush 90° around Y in the transform.
+    // (slopeAxis=0 support deferred; document here for future implementor.)
+
+    struct QuadFace { glm::vec3 n, t, v[4]; };
+    const QuadFace quads[3] = {
+        // Bottom (-Y)
+        {{0,-1,0},{1,0,0},{BLB,BRB,BRF,BLF}},
+        // Back (-Z)
+        {{0,0,-1},{-1,0,0},{BRB,BLB,TLB,TRB}},
+        // Slope (top face)
+        {slopeN,{1,0,0},{TLB,BLF,BRF,TRB}},
+    };
+    for (const auto& q : quads)
+    {
+        glm::vec3 wpos[4];
+        for (int i = 0; i < 4; ++i) wpos[i] = xformPos(xform, q.v[i]);
+        const glm::vec3 wn = xformNormal(normalMat, q.n);
+        const glm::vec3 wt = xformNormal(normalMat, q.t);
+        const glm::vec3 bt = glm::cross(q.n, q.t);
+        float uvs[4][2];
+        for (int i = 0; i < 4; ++i)
+        { uvs[i][0] = glm::dot(q.v[i], q.t)+0.5f; uvs[i][1] = glm::dot(q.v[i], bt)+0.5f; }
+        appendDetailQuad(verts, indices, wpos, wn, wt, uvs);
+    }
+
+    // Two triangular end faces (left and right).
+    // Left (-X): BLB, BLF, TLB.
+    // Right (+X): BRF, BRB, TRB.
+    const glm::vec3 leftN  = xformNormal(normalMat, {-1,0,0});
+    const glm::vec3 rightN = xformNormal(normalMat, {+1,0,0});
+    const glm::vec3 leftT  = xformNormal(normalMat, {0,0,1});
+    const glm::vec3 rightT = xformNormal(normalMat, {0,0,-1});
+
+    auto emitTri = [&](glm::vec3 a, glm::vec3 b, glm::vec3 c,
+                        glm::vec3 wn, glm::vec3 wt)
+    {
+        const u32 base = static_cast<u32>(verts.size());
+        auto emit = [&](glm::vec3 lp, float u, float v)
+        {
+            const glm::vec3 wp = xformPos(xform, lp);
+            verts.push_back(makeVertex(wp.x,wp.y,wp.z, wn.x,wn.y,wn.z, u,v, wt.x,wt.y,wt.z,1));
+        };
+        emit(a, 0.0f, 0.0f); emit(b, 1.0f, 0.0f); emit(c, 0.5f, 1.0f);
+        // CW in NDC
+        indices.push_back(base+0); indices.push_back(base+2); indices.push_back(base+1);
+    };
+    emitTri(BLB, BLF, TLB, leftN,  leftT);
+    emitTri(BRF, BRB, TRB, rightN, rightT);
+}
+
+// ─── appendDetailCylinder ────────────────────────────────────────────────────────
+// Faceted cylinder: N side quads + top and bottom polygon caps.
+static void appendDetailCylinder(
+    std::vector<render::StaticMeshVertex>& verts,
+    std::vector<u32>&                      indices,
+    const glm::mat4&                       xform,
+    const glm::mat3&                       normalMat,
+    const DetailBrushGeomParams&           p) noexcept
+{
+    const u32   N  = std::clamp(p.segmentCount, 4u, 64u);
+    const float r  = p.radius;
+    const float hh = p.height * 0.5f;
+    const float tau = glm::two_pi<float>();
+
+    // Side quads
+    for (u32 i = 0; i < N; ++i)
+    {
+        const float t0 = tau * static_cast<float>(i)   / static_cast<float>(N);
+        const float t1 = tau * static_cast<float>(i+1) / static_cast<float>(N);
+        const float tm = (t0 + t1) * 0.5f;  // midpoint angle for face normal
+
+        const glm::vec3 localP0 = {r*std::cos(t0), -hh, r*std::sin(t0)};
+        const glm::vec3 localP1 = {r*std::cos(t1), -hh, r*std::sin(t1)};
+        const glm::vec3 localP2 = {r*std::cos(t1),  hh, r*std::sin(t1)};
+        const glm::vec3 localP3 = {r*std::cos(t0),  hh, r*std::sin(t0)};
+
+        const glm::vec3 localN  = {std::cos(tm), 0.0f, std::sin(tm)};
+        const glm::vec3 localT  = {-std::sin(t0), 0.0f, std::cos(t0)};  // tangent at p0
+
+        const glm::vec3 wn = xformNormal(normalMat, localN);
+        const glm::vec3 wt = xformNormal(normalMat, localT);
+        glm::vec3 wpos[4] = {
+            xformPos(xform, localP0), xformPos(xform, localP1),
+            xformPos(xform, localP2), xformPos(xform, localP3)
+        };
+        // UV: u wraps around circumference, v = 0 bottom, 1 top
+        const float u0 = static_cast<float>(i)   / static_cast<float>(N);
+        const float u1 = static_cast<float>(i+1) / static_cast<float>(N);
+        const float uvs[4][2] = {{u0,0},{u1,0},{u1,1},{u0,1}};
+        appendDetailQuad(verts, indices, wpos, wn, wt, uvs);
+    }
+
+    // Top and bottom caps using appendHorizontalSurface.
+    std::vector<glm::vec2> capPoly(N);
+    for (u32 i = 0; i < N; ++i)
+    {
+        const float t = tau * static_cast<float>(i) / static_cast<float>(N);
+        const glm::vec3 lp = xformPos(xform, {r*std::cos(t), -hh, r*std::sin(t)});
+        capPoly[i] = {lp.x, lp.z};
+    }
+    std::vector<float> botH(N), topH(N);
+    for (u32 i = 0; i < N; ++i)
+    {
+        const float t = tau * static_cast<float>(i) / static_cast<float>(N);
+        botH[i] = xformPos(xform, {r*std::cos(t), -hh, r*std::sin(t)}).y;
+        topH[i] = xformPos(xform, {r*std::cos(t),  hh, r*std::sin(t)}).y;
+    }
+    appendHorizontalSurface(verts, indices, capPoly, std::span<const float>(botH),
+                            -1.0f, 1.0f, 1.0f, 0.0f, 0.0f);  // bottom cap (normal down)
+    appendHorizontalSurface(verts, indices, capPoly, std::span<const float>(topH),
+                            +1.0f, 1.0f, 1.0f, 0.0f, 0.0f);  // top cap (normal up)
+}
+
+// ─── appendDetailArchSpan ────────────────────────────────────────────────────────
+// Curved arch band in the local XY plane, with depth `thickness` along Z.
+// Profile: Semicircular (elliptical), Gothic, and Segmental share the same
+// elliptical code for Phase 1F-C; profile differentiation is a Phase 1F-D item.
+// The arch spans from x=−spanWidth/2 to x=+spanWidth/2 along local X,
+// rising to archHeight along local Y, with depth thickness along local Z.
+// Generates: inner face (Z=0), outer face (Z=thickness), and two base end quads.
+static void appendDetailArchSpan(
+    std::vector<render::StaticMeshVertex>& verts,
+    std::vector<u32>&                      indices,
+    const glm::mat4&                       xform,
+    const glm::mat3&                       normalMat,
+    const DetailBrushGeomParams&           p) noexcept
+{
+    const u32   N    = std::clamp(p.archSegments, 4u, 64u);
+    const float rx   = p.spanWidth  * 0.5f;   // X semi-axis
+    const float ry   = p.archHeight;           // Y semi-axis
+    const float thk  = p.thickness;
+    const float pi   = glm::pi<float>();
+
+    // Gothic / Segmental: both currently fall back to Semicircular.
+    // TODO(Phase 1F-D): implement distinct Gothic and Segmental arch profiles.
+
+    // Arch curve: parametric ellipse from θ=0 to θ=π.
+    // x(θ) = −cos(θ)*rx,  y(θ) = sin(θ)*ry
+    // Normal at θ: radially outward = normalize(sin(θ)/rx, cos(θ)/ry, 0).
+    // (This is the outward ellipse normal, perpendicular to the arch curve.)
+    auto archPt = [&](float theta) -> glm::vec2
+    {
+        return {-std::cos(theta) * rx, std::sin(theta) * ry};
+    };
+    auto archNormal2D = [&](float theta) -> glm::vec2
+    {
+        return glm::normalize(glm::vec2(std::sin(theta) * ry, std::cos(theta) * rx));
+    };
+
+    // Emit arch face (N quads) at a given Z position, with inward/outward normal.
+    auto emitArchFace = [&](float z, float normalZ)
+    {
+        for (u32 i = 0; i < N; ++i)
+        {
+            const float t0 = pi * static_cast<float>(i)   / static_cast<float>(N);
+            const float t1 = pi * static_cast<float>(i+1) / static_cast<float>(N);
+            const float tm = (t0 + t1) * 0.5f;
+
+            const glm::vec2 a0 = archPt(t0), a1 = archPt(t1);
+
+            const glm::vec3 lp0{a0.x, a0.y, z},      lp1{a1.x, a1.y, z};
+            const glm::vec3 lp2{a1.x, a1.y, z+thk},  lp3{a0.x, a0.y, z+thk};
+
+            const glm::vec2 n2 = archNormal2D(tm);
+            const glm::vec3 localN{n2.x * normalZ, n2.y * normalZ, 0.0f};
+            const glm::vec3 localT = glm::normalize(
+                glm::vec3(a1.x - a0.x, a1.y - a0.y, 0.0f));
+
+            const glm::vec3 wn = xformNormal(normalMat, localN);
+            const glm::vec3 wt = xformNormal(normalMat, localT);
+            glm::vec3 wpos[4] = {
+                xformPos(xform, lp0), xformPos(xform, lp1),
+                xformPos(xform, lp2), xformPos(xform, lp3)
+            };
+            const float u0 = static_cast<float>(i)   / static_cast<float>(N);
+            const float u1 = static_cast<float>(i+1) / static_cast<float>(N);
+            const float uvs[4][2] = {{u0,0},{u1,0},{u1,1},{u0,1}};
+            appendDetailQuad(verts, indices, wpos, wn, wt, uvs);
+        }
+    };
+
+    emitArchFace(0.0f, -1.0f);   // inner face at Z=0 (normal inward = −outward)
+    emitArchFace(0.0f,  1.0f);   // outer face at Z=thk (normal outward)
+
+    // Left end face (base at X=−rx, Y=0, depth from Z=0 to Z=thk)
+    {
+        const glm::vec3 lp0{-rx, 0.0f, 0.0f}, lp1{-rx, 0.0f, thk},
+                        lp2{-rx, 0.0f, thk},  lp3{-rx, 0.0f, 0.0f};
+        // Small end cap: just a degenerate closing quad at θ=0
+        const glm::vec2 a0 = archPt(0.0f);
+        const glm::vec3 base0{a0.x, a0.y, 0.0f}, base1{a0.x, a0.y, thk};
+        // Base endpoint is (rx,0,0) — use vertical closing quad.
+        const glm::vec3 endPts[4] = {
+            xformPos(xform, {-rx, 0.0f, 0.0f}), xformPos(xform, {-rx, 0.0f, thk}),
+            xformPos(xform, {base0.x, base0.y, thk}), xformPos(xform, base0)
+        };
+        const glm::vec3 wn = xformNormal(normalMat, {-1,0,0});
+        const glm::vec3 wt = xformNormal(normalMat, {0,0,1});
+        const float uvs[4][2] = {{0,0},{1,0},{1,1},{0,1}};
+        appendDetailQuad(verts, indices, endPts, wn, wt, uvs);
+    }
+    {
+        const glm::vec2 a1 = archPt(pi);
+        const glm::vec3 endPts[4] = {
+            xformPos(xform, {rx, 0.0f, thk}), xformPos(xform, {rx, 0.0f, 0.0f}),
+            xformPos(xform, {a1.x, a1.y, 0.0f}), xformPos(xform, {a1.x, a1.y, thk})
+        };
+        const glm::vec3 wn = xformNormal(normalMat, {+1,0,0});
+        const glm::vec3 wt = xformNormal(normalMat, {0,0,-1});
+        const float uvs[4][2] = {{0,0},{1,0},{1,1},{0,1}};
+        appendDetailQuad(verts, indices, endPts, wn, wt, uvs);
+    }
+}
+
+// ─── appendDetailBrush ────────────────────────────────────────────────────────────
+// Dispatch to the appropriate generator.  ImportedMesh brushes are skipped
+// here — they are handled by the asset pipeline compile step.
+static void appendDetailBrush(
+    std::vector<render::StaticMeshVertex>& verts,
+    std::vector<u32>&                      indices,
+    const DetailBrush&                     brush) noexcept
+{
+    if (brush.type == DetailBrushType::ImportedMesh) return;  // asset pipeline step
+
+    // Compute the normal matrix once per brush: upper-3×3 of the inverse-transpose.
+    const glm::mat3 normalMat = glm::mat3(
+        glm::transpose(glm::inverse(glm::mat3(brush.transform))));
+
+    switch (brush.type)
+    {
+    case DetailBrushType::Box:
+        appendDetailBox(verts, indices, brush.transform, normalMat, brush.geom);
+        break;
+    case DetailBrushType::Wedge:
+        appendDetailWedge(verts, indices, brush.transform, normalMat, brush.geom);
+        break;
+    case DetailBrushType::Cylinder:
+        appendDetailCylinder(verts, indices, brush.transform, normalMat, brush.geom);
+        break;
+    case DetailBrushType::ArchSpan:
+        appendDetailArchSpan(verts, indices, brush.transform, normalMat, brush.geom);
+        break;
+    default:
+        break;  // ImportedMesh and unknown types: nothing to emit here
+    }
+}
+
 } // anonymous namespace
 
 // ─── tessellateMap ───────────────────────────────────────────────────────────────
@@ -435,66 +834,101 @@ std::vector<render::MeshData> tessellateMap(const WorldMapData& map)
             const float uScale = (wall.uvScale.x > 0.0f) ? wall.uvScale.x : 1.0f;
             const float vScale = (wall.uvScale.y > 0.0f) ? wall.uvScale.y : 1.0f;
 
-            if (wall.portalSectorId == INVALID_SECTOR_ID)
-            {
-                appendWallQuad(mesh.vertices, mesh.indices,
-                               wall.p0, wallP1,
-                               yF0, yC0, yF1, yC1,
-                               uScale, vScale,
-                               wall.uvOffset.x, wall.uvOffset.y,
-                               wall.uvRotation);
-            }
-            else
-            {
-                const std::size_t adjId = wall.portalSectorId;
-                if (adjId >= map.sectors.size()) { continue; }
-                const Sector& adj = map.sectors[adjId];
+            // ── Curved wall subdivision (Phase 1F-C step 6) ─────────────────────
+            // When curveControlA is set, evaluate the Bezier at N+1 parameter
+            // values and emit N wall quads (one per segment).  Heights are
+            // linearly interpolated from [yF0,yC0] at t=0 to [yF1,yC1] at t=1.
+            // Portal curved walls reuse the same strip logic after subdivision.
+            const bool isCurved = wall.curveControlA.has_value();
+            const u32  nSeg     = isCurved
+                ? std::clamp(wall.curveSubdivisions, 4u, 64u)
+                : 1u;
 
-                // Use adj scalar heights for strip bounds (Phase 1F-A).
-                // Per-vertex cross-sector strips deferred to Phase 1F-B.
-                const float adjCeil  = adj.ceilHeight;
-                const float adjFloor = adj.floorHeight;
+            auto evalCurve = [&](float t) -> glm::vec2
+            {
+                const glm::vec2 p0 = wall.p0, p1 = wallP1;
+                if (wall.curveControlB)
+                    return evalBezierCubic(p0, *wall.curveControlA, *wall.curveControlB, p1, t);
+                return evalBezierQuadratic(p0, *wall.curveControlA, p1, t);
+            };
 
-                if (yC0 > adjCeil || yC1 > adjCeil)
+            // Segment loop: executes once (t: 0→1) for straight walls,
+            // nSeg times for curved walls.
+            for (u32 si = 0; si < nSeg; ++si)
+            {
+                const float t0 = static_cast<float>(si)   / static_cast<float>(nSeg);
+                const float t1 = static_cast<float>(si+1) / static_cast<float>(nSeg);
+
+                const glm::vec2 segP0 = isCurved ? evalCurve(t0) : wall.p0;
+                const glm::vec2 segP1 = isCurved ? evalCurve(t1) : wallP1;
+
+                // Per-segment heights by linear interpolation.
+                const float segYF0 = yF0 + t0 * (yF1 - yF0);
+                const float segYC0 = yC0 + t0 * (yC1 - yC0);
+                const float segYF1 = yF0 + t1 * (yF1 - yF0);
+                const float segYC1 = yC0 + t1 * (yC1 - yC0);
+
+                if (wall.portalSectorId == INVALID_SECTOR_ID)
                 {
-                    // Clamp: where this sector's ceiling dips below adjCeil, the
-                    // strip top is clamped to adjCeil (zero-height, invisible edge)
-                    // rather than producing an inverted quad.
-                    const float sF0 = adjCeil, sC0 = std::max(yC0, adjCeil);
-                    const float sF1 = adjCeil, sC1 = std::max(yC1, adjCeil);
-                    if (sC0 > sF0 || sC1 > sF1)
-                        appendWallQuad(mesh.vertices, mesh.indices,
-                                       wall.p0, wallP1,
-                                       sF0, sC0, sF1, sC1,
-                                       uScale, vScale,
-                                       wall.uvOffset.x, wall.uvOffset.y,
-                                       wall.uvRotation);
+                    appendWallQuad(mesh.vertices, mesh.indices,
+                                   segP0, segP1,
+                                   segYF0, segYC0, segYF1, segYC1,
+                                   uScale, vScale,
+                                   wall.uvOffset.x, wall.uvOffset.y,
+                                   wall.uvRotation);
                 }
-                if (yF0 < adjFloor || yF1 < adjFloor)
+                else
                 {
-                    // Clamp: where this sector's floor rises above adjFloor, the
-                    // strip bottom is clamped to adjFloor (zero-height, invisible edge)
-                    // rather than producing an inverted quad.
-                    const float sF0 = std::min(yF0, adjFloor), sC0 = adjFloor;
-                    const float sF1 = std::min(yF1, adjFloor), sC1 = adjFloor;
-                    if (sC0 > sF0 || sC1 > sF1)
-                        appendWallQuad(mesh.vertices, mesh.indices,
-                                       wall.p0, wallP1,
-                                       sF0, sC0, sF1, sC1,
-                                       uScale, vScale,
-                                       wall.uvOffset.x, wall.uvOffset.y,
-                                       wall.uvRotation);
+                    const std::size_t adjId = wall.portalSectorId;
+                    if (adjId >= map.sectors.size()) { break; }
+                    const Sector& adj = map.sectors[adjId];
+
+                    // Use adj scalar heights for strip bounds (Phase 1F-A).
+                    // Per-vertex cross-sector strips deferred to Phase 1F-B.
+                    const float adjCeil  = adj.ceilHeight;
+                    const float adjFloor = adj.floorHeight;
+
+                    if (segYC0 > adjCeil || segYC1 > adjCeil)
+                    {
+                        const float sF0 = adjCeil, sC0 = std::max(segYC0, adjCeil);
+                        const float sF1 = adjCeil, sC1 = std::max(segYC1, adjCeil);
+                        if (sC0 > sF0 || sC1 > sF1)
+                            appendWallQuad(mesh.vertices, mesh.indices,
+                                           segP0, segP1,
+                                           sF0, sC0, sF1, sC1,
+                                           uScale, vScale,
+                                           wall.uvOffset.x, wall.uvOffset.y,
+                                           wall.uvRotation);
+                    }
+                    if (segYF0 < adjFloor || segYF1 < adjFloor)
+                    {
+                        const float sF0 = std::min(segYF0, adjFloor), sC0 = adjFloor;
+                        const float sF1 = std::min(segYF1, adjFloor), sC1 = adjFloor;
+                        if (sC0 > sF0 || sC1 > sF1)
+                            appendWallQuad(mesh.vertices, mesh.indices,
+                                           segP0, segP1,
+                                           sF0, sC0, sF1, sC1,
+                                           uScale, vScale,
+                                           wall.uvOffset.x, wall.uvOffset.y,
+                                           wall.uvRotation);
+                    }
                 }
-            }
-        }
-    }
+            }  // end segment loop
+        }  // end wall loop
+
+        // ── Detail brushes (Phase 1F-C step 9) ──────────────────────────────
+        for (const auto& brush : sector.details)
+            appendDetailBrush(mesh.vertices, mesh.indices, brush);
+    }  // end sector loop
 
     return result;
 }
 
 // ─── tessellateMapTagged ─────────────────────────────────────────────────────────────
 //
-// Groups every surface into per-materialId batches.
+// Groups every surface into per-materialId batches.  Detail brushes are
+// compiled into the batch for their materialId.  Curved walls are subdivided
+// into per-segment quads using the same Bezier logic as tessellateMap.
 
 std::vector<std::vector<TaggedMeshBatch>> tessellateMapTagged(const WorldMapData& map)
 {
@@ -564,7 +998,7 @@ std::vector<std::vector<TaggedMeshBatch>> tessellateMapTagged(const WorldMapData
                                     -1.0f, 1.0f, 1.0f, 0.0f, 0.0f);
         }
 
-        // ── Walls ────────────────────────────────────────────────────────────────
+        // ── Walls (with curved subdivision, Phase 1F-C) ─────────────────────────
         for (std::size_t wi = 0; wi < n; ++wi)
         {
             const Wall&       wall   = sector.walls[wi];
@@ -577,56 +1011,88 @@ std::vector<std::vector<TaggedMeshBatch>> tessellateMapTagged(const WorldMapData
             const float uScale = (wall.uvScale.x > 0.0f) ? wall.uvScale.x : 1.0f;
             const float vScale = (wall.uvScale.y > 0.0f) ? wall.uvScale.y : 1.0f;
 
-            if (wall.portalSectorId == INVALID_SECTOR_ID)
-            {
-                TaggedMeshBatch& batch = getBatch(wall.frontMaterialId);
-                appendWallQuad(batch.mesh.vertices, batch.mesh.indices,
-                               wall.p0, wallP1,
-                               yF0, yC0, yF1, yC1,
-                               uScale, vScale,
-                               wall.uvOffset.x, wall.uvOffset.y,
-                               wall.uvRotation);
-            }
-            else
-            {
-                const std::size_t adjId = wall.portalSectorId;
-                if (adjId >= map.sectors.size()) continue;
-                const Sector& adj = map.sectors[adjId];
+            const bool isCurved = wall.curveControlA.has_value();
+            const u32  nSeg     = isCurved ? std::clamp(wall.curveSubdivisions, 4u, 64u) : 1u;
 
-                const float adjCeil  = adj.ceilHeight;
-                const float adjFloor = adj.floorHeight;
+            auto evalCurve2 = [&](float t) -> glm::vec2
+            {
+                const glm::vec2 p0 = wall.p0, p1 = wallP1;
+                if (wall.curveControlB)
+                    return evalBezierCubic(p0, *wall.curveControlA, *wall.curveControlB, p1, t);
+                return evalBezierQuadratic(p0, *wall.curveControlA, p1, t);
+            };
 
-                if (yC0 > adjCeil || yC1 > adjCeil)
+            for (u32 si = 0; si < nSeg; ++si)
+            {
+                const float t0 = static_cast<float>(si)   / static_cast<float>(nSeg);
+                const float t1 = static_cast<float>(si+1) / static_cast<float>(nSeg);
+
+                const glm::vec2 segP0 = isCurved ? evalCurve2(t0) : wall.p0;
+                const glm::vec2 segP1 = isCurved ? evalCurve2(t1) : wallP1;
+
+                const float segYF0 = yF0 + t0 * (yF1 - yF0);
+                const float segYC0 = yC0 + t0 * (yC1 - yC0);
+                const float segYF1 = yF0 + t1 * (yF1 - yF0);
+                const float segYC1 = yC0 + t1 * (yC1 - yC0);
+
+                if (wall.portalSectorId == INVALID_SECTOR_ID)
                 {
-                    const float sF0 = adjCeil, sC0 = std::max(yC0, adjCeil);
-                    const float sF1 = adjCeil, sC1 = std::max(yC1, adjCeil);
-                    if (sC0 > sF0 || sC1 > sF1)
+                    TaggedMeshBatch& batch = getBatch(wall.frontMaterialId);
+                    appendWallQuad(batch.mesh.vertices, batch.mesh.indices,
+                                   segP0, segP1,
+                                   segYF0, segYC0, segYF1, segYC1,
+                                   uScale, vScale,
+                                   wall.uvOffset.x, wall.uvOffset.y,
+                                   wall.uvRotation);
+                }
+                else
+                {
+                    const std::size_t adjId = wall.portalSectorId;
+                    if (adjId >= map.sectors.size()) break;
+                    const Sector& adj = map.sectors[adjId];
+
+                    const float adjCeil  = adj.ceilHeight;
+                    const float adjFloor = adj.floorHeight;
+
+                    if (segYC0 > adjCeil || segYC1 > adjCeil)
                     {
-                        TaggedMeshBatch& batch = getBatch(wall.upperMaterialId);
-                        appendWallQuad(batch.mesh.vertices, batch.mesh.indices,
-                                       wall.p0, wallP1,
-                                       sF0, sC0, sF1, sC1,
-                                       uScale, vScale,
-                                       wall.uvOffset.x, wall.uvOffset.y,
-                                       wall.uvRotation);
+                        const float sF0 = adjCeil, sC0 = std::max(segYC0, adjCeil);
+                        const float sF1 = adjCeil, sC1 = std::max(segYC1, adjCeil);
+                        if (sC0 > sF0 || sC1 > sF1)
+                        {
+                            TaggedMeshBatch& batch = getBatch(wall.upperMaterialId);
+                            appendWallQuad(batch.mesh.vertices, batch.mesh.indices,
+                                           segP0, segP1,
+                                           sF0, sC0, sF1, sC1,
+                                           uScale, vScale,
+                                           wall.uvOffset.x, wall.uvOffset.y,
+                                           wall.uvRotation);
+                        }
+                    }
+                    if (segYF0 < adjFloor || segYF1 < adjFloor)
+                    {
+                        const float sF0 = std::min(segYF0, adjFloor), sC0 = adjFloor;
+                        const float sF1 = std::min(segYF1, adjFloor), sC1 = adjFloor;
+                        if (sC0 > sF0 || sC1 > sF1)
+                        {
+                            TaggedMeshBatch& batch = getBatch(wall.lowerMaterialId);
+                            appendWallQuad(batch.mesh.vertices, batch.mesh.indices,
+                                           segP0, segP1,
+                                           sF0, sC0, sF1, sC1,
+                                           uScale, vScale,
+                                           wall.uvOffset.x, wall.uvOffset.y,
+                                           wall.uvRotation);
+                        }
                     }
                 }
-                if (yF0 < adjFloor || yF1 < adjFloor)
-                {
-                    const float sF0 = std::min(yF0, adjFloor), sC0 = adjFloor;
-                    const float sF1 = std::min(yF1, adjFloor), sC1 = adjFloor;
-                    if (sC0 > sF0 || sC1 > sF1)
-                    {
-                        TaggedMeshBatch& batch = getBatch(wall.lowerMaterialId);
-                        appendWallQuad(batch.mesh.vertices, batch.mesh.indices,
-                                       wall.p0, wallP1,
-                                       sF0, sC0, sF1, sC1,
-                                       uScale, vScale,
-                                       wall.uvOffset.x, wall.uvOffset.y,
-                                       wall.uvRotation);
-                    }
-                }
-            }
+            }  // end segment loop
+        }
+
+        // ── Detail brushes (Phase 1F-C step 9) ──────────────────────────────
+        for (const auto& brush : sector.details)
+        {
+            TaggedMeshBatch& batch = getBatch(brush.materialId);
+            appendDetailBrush(batch.mesh.vertices, batch.mesh.indices, brush);
         }
     }
 

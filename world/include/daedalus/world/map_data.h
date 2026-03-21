@@ -65,9 +65,68 @@ struct Wall
     // sector's default height for other walls that have no override set.
     std::optional<f32> floorHeightOverride;  ///< Per-vertex floor Y override at p0.
     std::optional<f32> ceilHeightOverride;   ///< Per-vertex ceiling Y override at p0.
+
+    // ─── Phase 1F-C: Bezier curve handles ─────────────────────────────────
+    // When curveControlA is set, the wall is tessellated as a Bezier curve
+    // rather than a straight segment.  curveSubdivisions controls the number of
+    // straight-segment quads used to approximate the curve (default 12).
+    //
+    // One control point → quadratic Bezier (P0, Ca, P1).
+    // Two control points → cubic Bezier (P0, Ca, Cb, P1).
+    std::optional<glm::vec2> curveControlA;         ///< Bezier control point in XZ map space.
+    std::optional<glm::vec2> curveControlB;         ///< Second control point (cubic only).
+    u32                      curveSubdivisions = 12u; ///< Segment count, clamped to [4, 64].
 };
 
-// ─── Sector ───────────────────────────────────────────────────────────────────
+// ─── DetailBrushGeomParams ────────────────────────────────────────────────────
+// Flat parameter struct for all DetailBrush types.  Only fields relevant to
+// the active DetailBrushType are meaningful; unused fields retain defaults.
+// Must be declared before Sector so std::vector<DetailBrush> is well-formed.
+
+struct DetailBrushGeomParams
+{
+    // ── Box / Wedge ───────────────────────────────────────────────────────
+    glm::vec3   halfExtents = {0.5f, 0.5f, 0.5f};  ///< Half-extent on each axis.
+    u32         slopeAxis   = 1u;                   ///< Wedge slope axis (0=X, 1=Z).
+
+    // ── Cylinder ─────────────────────────────────────────────────────────
+    f32         radius         = 0.5f;  ///< Cylinder radius.
+    f32         height         = 1.0f;  ///< Cylinder height.
+    u32         segmentCount   = 12u;   ///< Side face count, clamped to [4, 64].
+
+    // ── ArchSpan ─────────────────────────────────────────────────────────
+    f32         spanWidth    = 2.0f;  ///< Arch span along local X (world units).
+    f32         archHeight   = 1.0f;  ///< Arch height above its base along local Y.
+    f32         thickness    = 0.2f;  ///< Arch band depth along local Z.
+    ArchProfile archProfile  = ArchProfile::Semicircular;
+    u32         archSegments = 12u;   ///< Number of curve-approximation segments.
+
+    // ── ImportedMesh ───────────────────────────────────────────────────────
+    UUID        meshAssetId;  ///< Pre-compiled GLTF asset UUID.
+};
+
+// ─── DetailBrush ──────────────────────────────────────────────────────────────
+// A Layer 2 static geometry element placed within a sector.
+//
+// Detail brushes are compiled into the sector's tagged GPU mesh batch at
+// level-compile time.  They do not create portals or affect portal visibility.
+// Physics shapes for brushes with collidable = true are registered as part of
+// the sector's static compound body by the engine's physics world builder.
+//
+// ImportedMesh brushes are handled by the asset pipeline compile step;
+// the tessellator skips them (no geometry is emitted by tessellateMapTagged).
+
+struct DetailBrush
+{
+    glm::mat4             transform   = glm::mat4(1.0f);  ///< World-space transform.
+    DetailBrushType       type        = DetailBrushType::Box;
+    DetailBrushGeomParams geom;                            ///< Type-specific parameters.
+    UUID                  materialId;                      ///< Material for rendering.
+    bool                  collidable  = false;  ///< Whether a physics shape is registered.
+    bool                  castsShadow = true;   ///< Whether the brush casts shadows.
+};
+
+// ─── Sector ─────────────────────────────────────────────────────────────────
 // A convex or concave horizontal region of the world.
 //
 // walls forms a closed polygon (CCW winding from above). The sector's
@@ -82,11 +141,11 @@ struct Sector
     f32 floorHeight = 0.0f;  ///< World Y of the floor surface.
     f32 ceilHeight  = 4.0f;  ///< World Y of the ceiling surface.
 
-    // ─── Material references ──────────────────────────────────────────────────
+    // ─── Material references ───────────────────────────────────────────────────
     UUID floorMaterialId;    ///< Floor surface material.
     UUID ceilMaterialId;     ///< Ceiling surface material.
 
-    // ─── Lighting ─────────────────────────────────────────────────────────────
+    // ─── Lighting ─────────────────────────────────────────────────────────
     glm::vec3 ambientColor     = {0.05f, 0.05f, 0.08f};
     f32       ambientIntensity = 1.0f;
 
@@ -100,16 +159,20 @@ struct Sector
 
     // ─── Phase 1F-B: floor and ceiling portals (Sector-Over-Sector) ──────────────
     // When valid, the floor or ceiling surface becomes a portal opening into the
-    // specified sector.  The surface is rendered using the portal material (e.g.
-    // a grate, glass, or water texture) rather than the solid floor/ceil material.
-    // INVALID_SECTOR_ID means no portal — the surface is solid (default).
+    // specified sector.  INVALID_SECTOR_ID means no portal — the surface is solid.
     SectorId floorPortalSectorId = INVALID_SECTOR_ID;  ///< Target sector below floor.
     SectorId ceilPortalSectorId  = INVALID_SECTOR_ID;  ///< Target sector above ceiling.
     UUID     floorPortalMaterialId;  ///< Material for the floor portal surface.
     UUID     ceilPortalMaterialId;   ///< Material for the ceiling portal surface.
+
+    // ─── Phase 1F-C: detail geometry (Layer 2) ──────────────────────────────
+    // Static mesh shapes compiled into this sector's tagged GPU mesh batch at
+    // level-compile time.  Portal visibility culls at sector granularity,
+    // automatically excluding all detail brushes in culled sectors.
+    std::vector<DetailBrush> details;
 };
 
-// ─── WorldMapData
+// ─── WorldMapData ─────────────────────────────────────────────────────────────
 // The complete in-memory representation of a .dmap file.
 //
 // Sector IDs are implicit indices into the sectors vector (sector 0 is

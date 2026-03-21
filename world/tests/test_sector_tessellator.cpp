@@ -351,6 +351,146 @@ TEST(SectorTessellatorTest, VisualStairsProducesMoreGeometryThanFlat)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Phase 1F-C tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+// A curved wall (quadratic Bezier, curveSubdivisions=8) should produce
+// 8×4=32 wall vertices instead of the 4 for a straight wall.
+TEST(SectorTessellatorTest, CurvedWallProducesMoreQuadsThanStraight)
+{
+    // Flat reference: 4-wall box, all straight.
+    const WorldMapData flat = makeSingleRoomMap();
+    const auto flatMesh = tessellateMap(flat);
+    ASSERT_EQ(flatMesh.size(), 1u);
+    // Flat: 4 walls × 4 vertices = 16 wall verts.
+
+    // Curved map: same box but south wall has a Bezier handle.
+    WorldMapData curved;
+    Sector sec;
+    sec.floorHeight = 0.0f; sec.ceilHeight = 4.0f;
+    Wall w0; w0.p0 = {-5,-5};  // south wall: start at SW
+    w0.curveControlA   = glm::vec2{0.0f, -8.0f};  // control point bulges south
+    w0.curveSubdivisions = 8u;
+    sec.walls.push_back(w0);
+    Wall w1; w1.p0 = { 5,-5}; sec.walls.push_back(w1);
+    Wall w2; w2.p0 = { 5, 5}; sec.walls.push_back(w2);
+    Wall w3; w3.p0 = {-5, 5}; sec.walls.push_back(w3);
+    curved.sectors.push_back(std::move(sec));
+
+    const auto curvedMesh = tessellateMap(curved);
+    ASSERT_EQ(curvedMesh.size(), 1u);
+
+    // Curved wall: south wall produces 8 segments × 4 vertices = 32 verts for that wall.
+    // Remaining 3 straight walls: 3 × 4 = 12 verts.
+    // Floor + ceiling: 4 + 4 = 8 verts.
+    // Total: 32 + 12 + 8 = 52.
+    EXPECT_EQ(curvedMesh[0].vertices.size(), 52u)
+        << "Curved wall with 8 subdivisions should produce 52 total vertices";
+
+    // Curved sector must produce strictly more wall vertices than flat.
+    EXPECT_GT(curvedMesh[0].vertices.size(), flatMesh[0].vertices.size())
+        << "Curved map must have more vertices than the flat equivalent";
+}
+
+// All normals on the curved wall segments must remain unit-length.
+TEST(SectorTessellatorTest, CurvedWallNormalsAreUnitLength)
+{
+    WorldMapData map;
+    Sector sec;
+    sec.floorHeight = 0.0f; sec.ceilHeight = 4.0f;
+    Wall w0; w0.p0 = {-5,-5};
+    w0.curveControlA   = glm::vec2{0.0f, -9.0f};
+    w0.curveSubdivisions = 12u;
+    sec.walls.push_back(w0);
+    Wall w1; w1.p0 = { 5,-5}; sec.walls.push_back(w1);
+    Wall w2; w2.p0 = { 5, 5}; sec.walls.push_back(w2);
+    Wall w3; w3.p0 = {-5, 5}; sec.walls.push_back(w3);
+    map.sectors.push_back(std::move(sec));
+
+    const auto meshes = tessellateMap(map);
+    ASSERT_FALSE(meshes.empty());
+
+    // Skip floor (4v) and ceiling (4v); check all wall vertices.
+    for (std::size_t i = 8; i < meshes[0].vertices.size(); ++i)
+    {
+        const auto& v = meshes[0].vertices[i];
+        const float len = std::sqrt(v.normal[0]*v.normal[0] +
+                                    v.normal[1]*v.normal[1] +
+                                    v.normal[2]*v.normal[2]);
+        EXPECT_NEAR(len, 1.0f, 1e-4f) << "curved wall vertex " << i << " normal length";
+    }
+}
+
+// A sector with a Box detail brush should produce more vertices than without.
+TEST(SectorTessellatorTest, DetailBoxProducesGeometry)
+{
+    // Reference: flat 4-wall box, no details.
+    const WorldMapData refMap = makeSingleRoomMap();
+    const auto refMesh = tessellateMap(refMap);
+    ASSERT_EQ(refMesh.size(), 1u);
+    const std::size_t refVertCount = refMesh[0].vertices.size();
+
+    // Same sector with one Box detail brush (identity transform, unit half-extents).
+    WorldMapData detMap;
+    Sector sec;
+    sec.floorHeight = 0.0f; sec.ceilHeight = 4.0f;
+    Wall w0; w0.p0 = {-5,-5}; sec.walls.push_back(w0);
+    Wall w1; w1.p0 = { 5,-5}; sec.walls.push_back(w1);
+    Wall w2; w2.p0 = { 5, 5}; sec.walls.push_back(w2);
+    Wall w3; w3.p0 = {-5, 5}; sec.walls.push_back(w3);
+
+    DetailBrush box;
+    box.type = DetailBrushType::Box;
+    box.geom.halfExtents = glm::vec3{0.5f, 0.5f, 0.5f};
+    sec.details.push_back(box);
+    detMap.sectors.push_back(std::move(sec));
+
+    const auto detMesh = tessellateMap(detMap);
+    ASSERT_EQ(detMesh.size(), 1u);
+
+    // Box has 6 faces × 4 verts = 24 extra verts.
+    EXPECT_EQ(detMesh[0].vertices.size(), refVertCount + 24u)
+        << "Box detail brush should add exactly 24 vertices (6 faces × 4)";
+}
+
+// A Cylinder detail with segmentCount=8 should produce exactly 8 side quads
+// (8×4=32 side verts) plus two 8-gon caps (8+8=16 cap verts) = 48 total brush verts.
+TEST(SectorTessellatorTest, DetailCylinderFaceCount)
+{
+    WorldMapData map;
+    Sector sec;
+    sec.floorHeight = 0.0f; sec.ceilHeight = 4.0f;
+    Wall w0; w0.p0 = {-5,-5}; sec.walls.push_back(w0);
+    Wall w1; w1.p0 = { 5,-5}; sec.walls.push_back(w1);
+    Wall w2; w2.p0 = { 5, 5}; sec.walls.push_back(w2);
+    Wall w3; w3.p0 = {-5, 5}; sec.walls.push_back(w3);
+
+    DetailBrush cyl;
+    cyl.type            = DetailBrushType::Cylinder;
+    cyl.geom.radius     = 1.0f;
+    cyl.geom.height     = 2.0f;
+    cyl.geom.segmentCount = 8u;
+    sec.details.push_back(cyl);
+    map.sectors.push_back(std::move(sec));
+
+    // Also test via tessellateMapTagged to verify detail dispatch there.
+    const auto tagged = tessellateMapTagged(map);
+    ASSERT_EQ(tagged.size(), 1u);
+
+    // Sum all tagged batch vertices for this sector.
+    std::size_t totalVerts = 0;
+    for (const auto& batch : tagged[0])
+        totalVerts += batch.mesh.vertices.size();
+
+    // Sector floor + ceiling: 4+4 = 8 verts.
+    // 4 walls: 16 verts.
+    // Cylinder brush: 8 side quads (32 verts) + bottom cap (8 verts) + top cap (8 verts) = 48 verts.
+    // Total: 8 + 16 + 48 = 72.
+    EXPECT_EQ(totalVerts, 72u)
+        << "Cylinder(N=8) should add 48 verts to a flat 4-wall sector (total 72)";
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Original tests (unchanged below)
 // ─────────────────────────────────────────────────────────────────────────────
 

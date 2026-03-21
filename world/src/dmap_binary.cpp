@@ -63,6 +63,32 @@
 //   [4]  ceilPortalSectorId  u32  (0xFFFFFFFF = none)
 //   [16] floorPortalMaterialId UUID
 //   [16] ceilPortalMaterialId  UUID
+//
+//     v4 wall additions (appended after v2 heightFlags, omitted when reading v1/v2/v3):
+//     [1]  curveFlags     u8   bit 0 = hasCurveControlA, bit 1 = hasCurveControlB
+//     [4]  curveSubdivisions u32 (always written in v4, default 12)
+//     [8]  curveControlA  f32[2]  (only if bit 0 set)
+//     [8]  curveControlB  f32[2]  (only if bit 1 set)
+//
+//   v4 sector additions (appended after v3 portal fields, omitted when reading v1/v2/v3):
+//   [4]  detailCount u32
+//   Per detail brush (detailCount records, fixed size 156 bytes each):
+//     [64] transform       f32[16]
+//     [4]  type            u32 (DetailBrushType)
+//     --- geometry params (all always written) ---
+//     [12] halfExtents     f32[3]
+//     [4]  slopeAxis       u32
+//     [4]  radius          f32
+//     [4]  height          f32
+//     [4]  segmentCount    u32
+//     [4]  spanWidth       f32
+//     [4]  archHeight      f32
+//     [4]  thickness       f32
+//     [4]  archProfile     u32 (ArchProfile)
+//     [4]  archSegments    u32
+//     [16] meshAssetId     UUID
+//     [16] materialId      UUID
+//     [4]  brushFlags      u32 (bit 0 = collidable, bit 1 = castsShadow)
 
 #include "daedalus/world/dmap_io.h"
 
@@ -76,7 +102,7 @@ namespace
 {
 
 constexpr u32 k_MAGIC   = 0x50414D44u;  // 'D','M','A','P' as little-endian u32
-constexpr u32 k_VERSION = 3u;
+constexpr u32 k_VERSION = 4u;
 
 // ─── Write helpers ────────────────────────────────────────────────────────────
 
@@ -105,6 +131,12 @@ struct Writer
 
     void writeVec2(const glm::vec2& v) { write(v.x); write(v.y); }
     void writeVec3(const glm::vec3& v) { write(v.x); write(v.y); write(v.z); }
+    void writeMat4(const glm::mat4& m)
+    {
+        for (int c = 0; c < 4; ++c)
+            for (int r = 0; r < 4; ++r)
+                write(m[c][r]);
+    }
 };
 
 // ─── Read helpers ─────────────────────────────────────────────────────────────
@@ -148,6 +180,13 @@ struct Reader
     [[nodiscard]] bool readVec3(glm::vec3& v) noexcept
     {
         return read(v.x) && read(v.y) && read(v.z);
+    }
+    [[nodiscard]] bool readMat4(glm::mat4& m) noexcept
+    {
+        for (int c = 0; c < 4; ++c)
+            for (int r = 0; r < 4; ++r)
+                if (!read(m[c][r])) return false;
+        return true;
     }
 };
 
@@ -206,6 +245,14 @@ std::expected<void, DmapError> saveDmap(const WorldMapData&         map,
             w.write(hFlags);
             if (wall.floorHeightOverride) w.write(*wall.floorHeightOverride);
             if (wall.ceilHeightOverride)  w.write(*wall.ceilHeightOverride);
+            // v4: Bezier curve handles
+            const u8 cFlags =
+                (wall.curveControlA.has_value() ? 0x01u : 0u) |
+                (wall.curveControlB.has_value() ? 0x02u : 0u);
+            w.write(cFlags);
+            w.write(wall.curveSubdivisions);
+            if (wall.curveControlA) w.writeVec2(*wall.curveControlA);
+            if (wall.curveControlB) w.writeVec2(*wall.curveControlB);
         }
         // v2: floor shape and optional stair profile
         w.write(static_cast<u32>(sec.floorShape));
@@ -223,6 +270,29 @@ std::expected<void, DmapError> saveDmap(const WorldMapData&         map,
         w.write(sec.ceilPortalSectorId);
         w.writeUUID(sec.floorPortalMaterialId);
         w.writeUUID(sec.ceilPortalMaterialId);
+        // v4: detail brushes (fixed-size record per brush)
+        w.write(static_cast<u32>(sec.details.size()));
+        for (const auto& brush : sec.details)
+        {
+            w.writeMat4(brush.transform);
+            w.write(static_cast<u32>(brush.type));
+            w.writeVec3(brush.geom.halfExtents);
+            w.write(brush.geom.slopeAxis);
+            w.write(brush.geom.radius);
+            w.write(brush.geom.height);
+            w.write(brush.geom.segmentCount);
+            w.write(brush.geom.spanWidth);
+            w.write(brush.geom.archHeight);
+            w.write(brush.geom.thickness);
+            w.write(static_cast<u32>(brush.geom.archProfile));
+            w.write(brush.geom.archSegments);
+            w.writeUUID(brush.geom.meshAssetId);
+            w.writeUUID(brush.materialId);
+            const u32 brushFlags =
+                (brush.collidable  ? 0x01u : 0u) |
+                (brush.castsShadow ? 0x02u : 0u);
+            w.write(brushFlags);
+        }
     }
 
     if (!ofs) { return std::unexpected(DmapError::WriteError); }
@@ -334,6 +404,25 @@ std::expected<WorldMapData, DmapError> loadDmap(const std::filesystem::path& pat
                     wall.ceilHeightOverride = v;
                 }
             }
+            // v4 additions: Bezier curve handles
+            if (version >= 4)
+            {
+                u8 cFlags = 0;
+                if (!r.read(cFlags)) return std::unexpected(DmapError::ParseError);
+                if (!r.read(wall.curveSubdivisions)) return std::unexpected(DmapError::ParseError);
+                if (cFlags & 0x01u)
+                {
+                    glm::vec2 ca{0.0f};
+                    if (!r.readVec2(ca)) return std::unexpected(DmapError::ParseError);
+                    wall.curveControlA = ca;
+                }
+                if (cFlags & 0x02u)
+                {
+                    glm::vec2 cb{0.0f};
+                    if (!r.readVec2(cb)) return std::unexpected(DmapError::ParseError);
+                    wall.curveControlB = cb;
+                }
+            }
         }
         // v2 additions: floor shape and optional stair profile
         if (version >= 2)
@@ -358,6 +447,38 @@ std::expected<WorldMapData, DmapError> loadDmap(const std::filesystem::path& pat
                 return std::unexpected(DmapError::ParseError);
             if (!r.readUUID(sec.floorPortalMaterialId) || !r.readUUID(sec.ceilPortalMaterialId))
                 return std::unexpected(DmapError::ParseError);
+        }
+        // v4: detail brushes
+        if (version >= 4)
+        {
+            u32 detailCount = 0;
+            if (!r.read(detailCount)) return std::unexpected(DmapError::ParseError);
+            sec.details.resize(detailCount);
+            for (auto& brush : sec.details)
+            {
+                if (!r.readMat4(brush.transform)) return std::unexpected(DmapError::ParseError);
+                u32 typeRaw = 0;
+                if (!r.read(typeRaw)) return std::unexpected(DmapError::ParseError);
+                brush.type = static_cast<DetailBrushType>(typeRaw);
+                if (!r.readVec3(brush.geom.halfExtents) || !r.read(brush.geom.slopeAxis))
+                    return std::unexpected(DmapError::ParseError);
+                if (!r.read(brush.geom.radius) || !r.read(brush.geom.height) ||
+                    !r.read(brush.geom.segmentCount))
+                    return std::unexpected(DmapError::ParseError);
+                if (!r.read(brush.geom.spanWidth) || !r.read(brush.geom.archHeight) ||
+                    !r.read(brush.geom.thickness))
+                    return std::unexpected(DmapError::ParseError);
+                u32 profileRaw = 0;
+                if (!r.read(profileRaw) || !r.read(brush.geom.archSegments))
+                    return std::unexpected(DmapError::ParseError);
+                brush.geom.archProfile = static_cast<ArchProfile>(profileRaw);
+                if (!r.readUUID(brush.geom.meshAssetId) || !r.readUUID(brush.materialId))
+                    return std::unexpected(DmapError::ParseError);
+                u32 brushFlags = 0;
+                if (!r.read(brushFlags)) return std::unexpected(DmapError::ParseError);
+                brush.collidable  = (brushFlags & 0x01u) != 0u;
+                brush.castsShadow = (brushFlags & 0x02u) != 0u;
+            }
         }
     }
 

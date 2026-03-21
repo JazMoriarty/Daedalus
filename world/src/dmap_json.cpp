@@ -54,7 +54,7 @@ namespace daedalus::world
 namespace
 {
 
-constexpr u32 k_JSON_VERSION = 3u;
+constexpr u32 k_JSON_VERSION = 4u;
 
 // ─── UUID helpers ─────────────────────────────────────────────────────────────
 
@@ -100,6 +100,14 @@ constexpr u32 k_JSON_VERSION = 3u;
     // Phase 1F-A: emit only when set (omitted fields default to nullopt on load).
     if (w.floorHeightOverride) j["floor_height_override"] = *w.floorHeightOverride;
     if (w.ceilHeightOverride)  j["ceil_height_override"]  = *w.ceilHeightOverride;
+    // Phase 1F-C: curve handles (omit when no curve set).
+    if (w.curveControlA)
+    {
+        j["curve_control_a"]   = {w.curveControlA->x, w.curveControlA->y};
+        j["curve_subdivisions"] = w.curveSubdivisions;
+        if (w.curveControlB)
+            j["curve_control_b"] = {w.curveControlB->x, w.curveControlB->y};
+    }
     return j;
 }
 
@@ -138,6 +146,38 @@ constexpr u32 k_JSON_VERSION = 3u;
         j["floor_portal_material"] = uuidToString(sec.floorPortalMaterialId);
     if (sec.ceilPortalSectorId != INVALID_SECTOR_ID)
         j["ceil_portal_material"] = uuidToString(sec.ceilPortalMaterialId);
+    // Phase 1F-C: detail brushes (omit when empty).
+    if (!sec.details.empty())
+    {
+        nlohmann::json jd = nlohmann::json::array();
+        for (const auto& brush : sec.details)
+        {
+            nlohmann::json jb;
+            // transform: flat array of 16 floats
+            nlohmann::json jt = nlohmann::json::array();
+            for (int c = 0; c < 4; ++c)
+                for (int r = 0; r < 4; ++r)
+                    jt.push_back(brush.transform[c][r]);
+            jb["transform"]      = std::move(jt);
+            jb["type"]           = static_cast<u32>(brush.type);
+            jb["half_extents"]   = {brush.geom.halfExtents.x, brush.geom.halfExtents.y, brush.geom.halfExtents.z};
+            jb["slope_axis"]     = brush.geom.slopeAxis;
+            jb["radius"]         = brush.geom.radius;
+            jb["height"]         = brush.geom.height;
+            jb["segment_count"]  = brush.geom.segmentCount;
+            jb["span_width"]     = brush.geom.spanWidth;
+            jb["arch_height"]    = brush.geom.archHeight;
+            jb["thickness"]      = brush.geom.thickness;
+            jb["arch_profile"]   = static_cast<u32>(brush.geom.archProfile);
+            jb["arch_segments"]  = brush.geom.archSegments;
+            jb["mesh_asset_id"]  = uuidToString(brush.geom.meshAssetId);
+            jb["material_id"]    = uuidToString(brush.materialId);
+            jb["collidable"]     = brush.collidable;
+            jb["cast_shadow"]    = brush.castsShadow;
+            jd.push_back(std::move(jb));
+        }
+        j["details"] = std::move(jd);
+    }
     return j;
 }
 
@@ -184,6 +224,16 @@ constexpr u32 k_JSON_VERSION = 3u;
             out.floorHeightOverride = jw["floor_height_override"].get<float>();
         if (jw.contains("ceil_height_override"))
             out.ceilHeightOverride = jw["ceil_height_override"].get<float>();
+        // Phase 1F-C: curve handles.
+        if (jw.contains("curve_control_a"))
+        {
+            out.curveControlA = glm::vec2{jw["curve_control_a"][0].get<float>(),
+                                          jw["curve_control_a"][1].get<float>()};
+            out.curveSubdivisions = jw.value("curve_subdivisions", out.curveSubdivisions);
+            if (jw.contains("curve_control_b"))
+                out.curveControlB = glm::vec2{jw["curve_control_b"][0].get<float>(),
+                                              jw["curve_control_b"][1].get<float>()};
+        }
         return true;
     }
     catch (...) { return false; }
@@ -232,6 +282,42 @@ constexpr u32 k_JSON_VERSION = 3u;
             out.floorPortalMaterialId = uuidFromString(jsec["floor_portal_material"].get<std::string>());
         if (jsec.contains("ceil_portal_material"))
             out.ceilPortalMaterialId = uuidFromString(jsec["ceil_portal_material"].get<std::string>());
+        // Phase 1F-C: detail brushes.
+        if (jsec.contains("details"))
+        {
+            for (const auto& jb : jsec["details"])
+            {
+                DetailBrush brush;
+                // transform
+                const auto& jt = jb["transform"];
+                for (int c = 0; c < 4; ++c)
+                    for (int r = 0; r < 4; ++r)
+                        brush.transform[c][r] = jt[c*4+r].get<float>();
+                brush.type = static_cast<DetailBrushType>(
+                    jb.value("type", static_cast<u32>(DetailBrushType::Box)));
+                if (jb.contains("half_extents"))
+                    brush.geom.halfExtents = {jb["half_extents"][0].get<float>(),
+                                              jb["half_extents"][1].get<float>(),
+                                              jb["half_extents"][2].get<float>()};
+                brush.geom.slopeAxis    = jb.value("slope_axis",    brush.geom.slopeAxis);
+                brush.geom.radius       = jb.value("radius",        brush.geom.radius);
+                brush.geom.height       = jb.value("height",        brush.geom.height);
+                brush.geom.segmentCount = jb.value("segment_count", brush.geom.segmentCount);
+                brush.geom.spanWidth    = jb.value("span_width",    brush.geom.spanWidth);
+                brush.geom.archHeight   = jb.value("arch_height",   brush.geom.archHeight);
+                brush.geom.thickness    = jb.value("thickness",     brush.geom.thickness);
+                brush.geom.archProfile  = static_cast<ArchProfile>(
+                    jb.value("arch_profile", static_cast<u32>(brush.geom.archProfile)));
+                brush.geom.archSegments = jb.value("arch_segments",  brush.geom.archSegments);
+                if (jb.contains("mesh_asset_id"))
+                    brush.geom.meshAssetId = uuidFromString(jb["mesh_asset_id"].get<std::string>());
+                if (jb.contains("material_id"))
+                    brush.materialId = uuidFromString(jb["material_id"].get<std::string>());
+                brush.collidable  = jb.value("collidable",  brush.collidable);
+                brush.castsShadow = jb.value("cast_shadow", brush.castsShadow);
+                out.details.push_back(std::move(brush));
+            }
+        }
         for (const auto& jw : jsec["walls"])
         {
             Wall w;
