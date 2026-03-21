@@ -247,6 +247,11 @@ static void appendHorizontalSurface(
 // Phase 1F-A: per-end heights replace the single yFloor/yCeil pair.
 // For flat walls (yFloor0==yFloor1, yCeil0==yCeil1) output is identical to old.
 //
+// n0_xz / n1_xz: explicit inward XZ normals at p0 and p1.  When both are zero,
+// the normal is derived from the chord direction (straight-wall behaviour).
+// For curved wall segments these are set to the Bezier tangent normals at each
+// endpoint so lighting interpolates smoothly across segment boundaries.
+//
 // UV v = (yCeil_local − y) / vScale + vOff so the texture top aligns with the
 // ceiling at each wall column regardless of slope.
 static void appendWallQuad(
@@ -257,18 +262,38 @@ static void appendWallQuad(
     float yFloor1, float yCeil1,
     float uScale,  float vScale,
     float uOff,    float vOff,
-    float uvRotation = 0.0f) noexcept
+    float uvRotation = 0.0f,
+    glm::vec2 n0_xz = {0.0f, 0.0f},  ///< Inward XZ normal at p0; {0,0} → derive from chord.
+    glm::vec2 n1_xz = {0.0f, 0.0f}   ///< Inward XZ normal at p1; {0,0} → derive from chord.
+) noexcept
 {
     const glm::vec2 dir2D = p1World - p0World;
     const float     len   = std::sqrt(dir2D.x * dir2D.x + dir2D.y * dir2D.y);
     if (len < 1e-6f) return;
 
-    const float invLen = 1.0f / len;
-    const float tx = dir2D.x * invLen;
-    const float tz = dir2D.y * invLen;
-    const float nx = -tz;
-    const float nz =  tx;
+    // ── Normals ───────────────────────────────────────────────────────────────
+    // Default: chord-perpendicular (straight-wall convention, unchanged from before).
+    // Override: Bezier tangent normals provided by the caller for curved segments.
+    const float invLen  = 1.0f / len;
+    const float tx_cord = dir2D.x * invLen;
+    const float tz_cord = dir2D.y * invLen;
+    const float nx_cord = -tz_cord;
+    const float nz_cord =  tx_cord;
 
+    const bool useCustomNormals =
+        (n0_xz.x != 0.0f || n0_xz.y != 0.0f) ||
+        (n1_xz.x != 0.0f || n1_xz.y != 0.0f);
+
+    const float nx0 = useCustomNormals ? n0_xz.x : nx_cord;
+    const float nz0 = useCustomNormals ? n0_xz.y : nz_cord;
+    const float nx1 = useCustomNormals ? n1_xz.x : nx_cord;
+    const float nz1 = useCustomNormals ? n1_xz.y : nz_cord;
+
+    // Tangent is always from the chord direction for UV mapping.
+    const float tx = tx_cord;
+    const float tz = tz_cord;
+
+    // ── UVs ───────────────────────────────────────────────────────────────────
     const float u0   = 0.0f / uScale + uOff;
     const float u1   = len  / uScale + uOff;
     const float v_bl = (yCeil0 - yFloor0) / vScale + vOff;
@@ -282,13 +307,13 @@ static void appendWallQuad(
     auto rotV = [cosR, sinR](float u, float v) noexcept { return u * sinR + v * cosR; };
 
     const u32 base = static_cast<u32>(verts.size());
-    verts.push_back(makeVertex(p0World.x, yFloor0, p0World.y, nx,0,nz,
+    verts.push_back(makeVertex(p0World.x, yFloor0, p0World.y, nx0,0,nz0,
                                rotU(u0,v_bl), rotV(u0,v_bl), tx,0,tz,1));
-    verts.push_back(makeVertex(p1World.x, yFloor1, p1World.y, nx,0,nz,
+    verts.push_back(makeVertex(p1World.x, yFloor1, p1World.y, nx1,0,nz1,
                                rotU(u1,v_br), rotV(u1,v_br), tx,0,tz,1));
-    verts.push_back(makeVertex(p1World.x, yCeil1,  p1World.y, nx,0,nz,
+    verts.push_back(makeVertex(p1World.x, yCeil1,  p1World.y, nx1,0,nz1,
                                rotU(u1,v_tr), rotV(u1,v_tr), tx,0,tz,1));
-    verts.push_back(makeVertex(p0World.x, yCeil0,  p0World.y, nx,0,nz,
+    verts.push_back(makeVertex(p0World.x, yCeil0,  p0World.y, nx0,0,nz0,
                                rotU(u0,v_tl), rotV(u0,v_tl), tx,0,tz,1));
 
     indices.push_back(base + 0); indices.push_back(base + 2); indices.push_back(base + 1);
@@ -489,6 +514,34 @@ static void buildHeightArrays(const Sector&       sector,
 {
     const float mt = 1.0f - t;
     return mt*mt*mt*p0 + 3.0f*mt*mt*t*ca + 3.0f*mt*t*t*cb + t*t*t*p1;
+}
+
+// First derivative of a quadratic Bezier: dB/dt = 2(1-t)(ca-p0) + 2t(p1-ca)
+[[nodiscard]] static glm::vec2 evalBezierQuadraticTangent(
+    glm::vec2 p0, glm::vec2 ca, glm::vec2 p1, float t) noexcept
+{
+    return 2.0f * (1.0f - t) * (ca - p0) + 2.0f * t * (p1 - ca);
+}
+
+// First derivative of a cubic Bezier:
+// dB/dt = 3(1-t)²(ca-p0) + 6(1-t)t(cb-ca) + 3t²(p1-cb)
+[[nodiscard]] static glm::vec2 evalBezierCubicTangent(
+    glm::vec2 p0, glm::vec2 ca, glm::vec2 cb, glm::vec2 p1, float t) noexcept
+{
+    const float mt = 1.0f - t;
+    return 3.0f*mt*mt*(ca-p0) + 6.0f*mt*t*(cb-ca) + 3.0f*t*t*(p1-cb);
+}
+
+// Compute the inward-facing XZ wall normal from a 2D tangent vector.
+// Matches the convention in appendWallQuad: normal = 90° CCW rotation of the
+// unit tangent, i.e. (-tz, tx).
+// Falls back to {0, 1} for degenerate (zero-length) tangents.
+[[nodiscard]] static glm::vec2 wallNormalFromTangent2D(glm::vec2 tangent) noexcept
+{
+    const float len = std::sqrt(tangent.x*tangent.x + tangent.y*tangent.y);
+    if (len < 1e-6f) return {0.0f, 1.0f};
+    const glm::vec2 t = tangent / len;
+    return {-t.y, t.x};  // 90° CCW rotation — inward normal for CCW wall winding
 }
 
 // ─── buildExpandedPoly ───────────────────────────────────────────────────────────────────────
@@ -1007,6 +1060,18 @@ std::vector<render::MeshData> tessellateMap(const WorldMapData& map)
                 ? std::clamp(wall.curveSubdivisions, 4u, 64u)
                 : 1u;
 
+            // Bezier tangent helper: evaluates dB/dt in the XZ plane at t.
+            // Used to derive per-vertex normals that interpolate smoothly across
+            // segment boundaries, eliminating lighting discontinuities.
+            auto evalCurveTangent = [&](float t) -> glm::vec2
+            {
+                const glm::vec2 p0 = wall.p0, p1 = wallP1;
+                if (wall.curveControlB)
+                    return evalBezierCubicTangent(p0, *wall.curveControlA,
+                                                  *wall.curveControlB, p1, t);
+                return evalBezierQuadraticTangent(p0, *wall.curveControlA, p1, t);
+            };
+
             auto evalCurve = [&](float t) -> glm::vec2
             {
                 const glm::vec2 p0 = wall.p0, p1 = wallP1;
@@ -1025,6 +1090,16 @@ std::vector<render::MeshData> tessellateMap(const WorldMapData& map)
                 const glm::vec2 segP0 = isCurved ? evalCurve(t0) : wall.p0;
                 const glm::vec2 segP1 = isCurved ? evalCurve(t1) : wallP1;
 
+                // Per-vertex smooth normals for curved walls: derived from the
+                // Bezier tangent at each endpoint so adjacent segments share the
+                // same normal direction — eliminating lighting discontinuities.
+                // Straight walls pass {0,0} → appendWallQuad falls back to
+                // chord-derived normal (identical to previous behaviour).
+                const glm::vec2 segN0 = isCurved
+                    ? wallNormalFromTangent2D(evalCurveTangent(t0)) : glm::vec2{0.0f, 0.0f};
+                const glm::vec2 segN1 = isCurved
+                    ? wallNormalFromTangent2D(evalCurveTangent(t1)) : glm::vec2{0.0f, 0.0f};
+
                 // Per-segment heights by linear interpolation.
                 const float segYF0 = yF0 + t0 * (yF1 - yF0);
                 const float segYC0 = yC0 + t0 * (yC1 - yC0);
@@ -1038,7 +1113,7 @@ std::vector<render::MeshData> tessellateMap(const WorldMapData& map)
                                    segYF0, segYC0, segYF1, segYC1,
                                    uScale, vScale,
                                    wall.uvOffset.x, wall.uvOffset.y,
-                                   wall.uvRotation);
+                                   wall.uvRotation, segN0, segN1);
                 }
                 else
                 {
@@ -1061,7 +1136,7 @@ std::vector<render::MeshData> tessellateMap(const WorldMapData& map)
                                            sF0, sC0, sF1, sC1,
                                            uScale, vScale,
                                            wall.uvOffset.x, wall.uvOffset.y,
-                                           wall.uvRotation);
+                                           wall.uvRotation, segN0, segN1);
                     }
                     if (segYF0 < adjFloor || segYF1 < adjFloor)
                     {
@@ -1073,7 +1148,7 @@ std::vector<render::MeshData> tessellateMap(const WorldMapData& map)
                                            sF0, sC0, sF1, sC1,
                                            uScale, vScale,
                                            wall.uvOffset.x, wall.uvOffset.y,
-                                           wall.uvRotation);
+                                           wall.uvRotation, segN0, segN1);
                     }
                 }
             }  // end segment loop
@@ -1187,6 +1262,16 @@ std::vector<std::vector<TaggedMeshBatch>> tessellateMapTagged(const WorldMapData
             const bool isCurved = wall.curveControlA.has_value();
             const u32  nSeg     = isCurved ? std::clamp(wall.curveSubdivisions, 4u, 64u) : 1u;
 
+            // Bezier tangent helper (same logic as tessellateMap variant above).
+            auto evalCurveTangent2 = [&](float t) -> glm::vec2
+            {
+                const glm::vec2 p0 = wall.p0, p1 = wallP1;
+                if (wall.curveControlB)
+                    return evalBezierCubicTangent(p0, *wall.curveControlA,
+                                                  *wall.curveControlB, p1, t);
+                return evalBezierQuadraticTangent(p0, *wall.curveControlA, p1, t);
+            };
+
             auto evalCurve2 = [&](float t) -> glm::vec2
             {
                 const glm::vec2 p0 = wall.p0, p1 = wallP1;
@@ -1203,6 +1288,11 @@ std::vector<std::vector<TaggedMeshBatch>> tessellateMapTagged(const WorldMapData
                 const glm::vec2 segP0 = isCurved ? evalCurve2(t0) : wall.p0;
                 const glm::vec2 segP1 = isCurved ? evalCurve2(t1) : wallP1;
 
+                const glm::vec2 segN0 = isCurved
+                    ? wallNormalFromTangent2D(evalCurveTangent2(t0)) : glm::vec2{0.0f, 0.0f};
+                const glm::vec2 segN1 = isCurved
+                    ? wallNormalFromTangent2D(evalCurveTangent2(t1)) : glm::vec2{0.0f, 0.0f};
+
                 const float segYF0 = yF0 + t0 * (yF1 - yF0);
                 const float segYC0 = yC0 + t0 * (yC1 - yC0);
                 const float segYF1 = yF0 + t1 * (yF1 - yF0);
@@ -1216,7 +1306,7 @@ std::vector<std::vector<TaggedMeshBatch>> tessellateMapTagged(const WorldMapData
                                    segYF0, segYC0, segYF1, segYC1,
                                    uScale, vScale,
                                    wall.uvOffset.x, wall.uvOffset.y,
-                                   wall.uvRotation);
+                                   wall.uvRotation, segN0, segN1);
                 }
                 else
                 {
@@ -1239,7 +1329,7 @@ std::vector<std::vector<TaggedMeshBatch>> tessellateMapTagged(const WorldMapData
                                            sF0, sC0, sF1, sC1,
                                            uScale, vScale,
                                            wall.uvOffset.x, wall.uvOffset.y,
-                                           wall.uvRotation);
+                                           wall.uvRotation, segN0, segN1);
                         }
                     }
                     if (segYF0 < adjFloor || segYF1 < adjFloor)
@@ -1254,7 +1344,7 @@ std::vector<std::vector<TaggedMeshBatch>> tessellateMapTagged(const WorldMapData
                                            sF0, sC0, sF1, sC1,
                                            uScale, vScale,
                                            wall.uvOffset.x, wall.uvOffset.y,
-                                           wall.uvRotation);
+                                           wall.uvRotation, segN0, segN1);
                         }
                     }
                 }
