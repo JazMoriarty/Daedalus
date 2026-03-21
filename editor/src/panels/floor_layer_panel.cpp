@@ -6,12 +6,13 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <string>
 #include <vector>
 
 namespace daedalus::editor
 {
 
-// ─── collectLayer ─────────────────────────────────────────────────────────────
+// ─── collectLayer ─────────────────────────────────────────────────────────────────────────
 // BFS over floorPortalSectorId / ceilPortalSectorId links from a seed sector
 // to collect all sectors that belong to the same vertical stack.
 
@@ -37,7 +38,6 @@ std::vector<world::SectorId> FloorLayerPanel::collectLayer(const EditMapDocument
         result.push_back(cur);
 
         const auto& sec = sectors[cur];
-
         for (const world::SectorId neighbour :
              {sec.floorPortalSectorId, sec.ceilPortalSectorId})
         {
@@ -54,15 +54,16 @@ std::vector<world::SectorId> FloorLayerPanel::collectLayer(const EditMapDocument
     return result;
 }
 
-// ─── isSectorVisible ─────────────────────────────────────────────────────────
+// ─── isSectorFullOpacity ─────────────────────────────────────────────────────────────────
 
-bool FloorLayerPanel::isSectorVisible(world::SectorId id) const noexcept
+bool FloorLayerPanel::isSectorFullOpacity(float floorH, float ceilH) const noexcept
 {
     if (!m_filterEnabled) return true;
-    return std::binary_search(m_visibleSectors.begin(), m_visibleSectors.end(), id);
+    // Full opacity when the edit height falls within [floorH, ceilH].
+    return m_editHeight >= floorH && m_editHeight <= ceilH;
 }
 
-// ─── draw ─────────────────────────────────────────────────────────────────────
+// ─── draw ──────────────────────────────────────────────────────────────────────────────
 
 void FloorLayerPanel::draw(EditMapDocument& doc)
 {
@@ -78,11 +79,77 @@ void FloorLayerPanel::draw(EditMapDocument& doc)
         return;
     }
 
-    // Partition all sectors into vertical stacks (portal-linked groups).
-    // Each sector appears in exactly one group.
-    std::vector<bool>                           assigned(n, false);
-    std::vector<std::vector<world::SectorId>>   groups;
+    // ── Show All toggle ─────────────────────────────────────────────────────────────
+    bool showAll = !m_filterEnabled;
+    if (ImGui::Checkbox("Show All##flall", &showAll))
+        m_filterEnabled = !showAll;
 
+    // ── Edit height slider ──────────────────────────────────────────────────────────
+    // Compute map Y bounds for slider range.
+    float mapMinY =  1e9f;
+    float mapMaxY = -1e9f;
+    for (const auto& sec : sectors)
+    {
+        mapMinY = std::min(mapMinY, sec.floorHeight);
+        mapMaxY = std::max(mapMaxY, sec.ceilHeight);
+    }
+    if (mapMinY > mapMaxY) { mapMinY = -16.0f; mapMaxY = 16.0f; }
+
+    ImGui::Spacing();
+    ImGui::TextDisabled("Edit height (world Y)");
+    if (m_filterEnabled)
+    {
+        ImGui::SetNextItemWidth(-1.0f);
+        ImGui::SliderFloat("##editH", &m_editHeight, mapMinY, mapMaxY, "%.2f m");
+        // Right-click to save a named preset.
+        if (ImGui::BeginPopupContextItem("##editHCtx"))
+        {
+            static char s_presetName[64] = "Floor";
+            ImGui::SetNextItemWidth(120.0f);
+            ImGui::InputText("Name##pname", s_presetName, sizeof(s_presetName));
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Save##psave"))
+            {
+                m_presets.push_back({std::string(s_presetName), m_editHeight});
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::EndPopup();
+        }
+        ImGui::TextDisabled("(right-click to save preset)");
+    }
+    else
+    {
+        ImGui::TextDisabled("Disabled — enable by unchecking Show All");
+    }
+
+    // ── Presets ──────────────────────────────────────────────────────────────────
+    if (!m_presets.empty())
+    {
+        ImGui::Spacing();
+        ImGui::TextDisabled("Presets");
+        for (std::size_t pi = 0; pi < m_presets.size(); ++pi)
+        {
+            ImGui::PushID(static_cast<int>(pi));
+            if (ImGui::SmallButton(m_presets[pi].name.c_str()))
+            {
+                m_editHeight    = m_presets[pi].y;
+                m_filterEnabled = true;
+            }
+            ImGui::SameLine();
+            if (ImGui::SmallButton("x##delpset"))
+            {
+                m_presets.erase(m_presets.begin() + static_cast<std::ptrdiff_t>(pi));
+                ImGui::PopID();
+                break;
+            }
+            ImGui::PopID();
+        }
+    }
+
+    // ── Floor group list ───────────────────────────────────────────────────────────
+    // Partition sectors into portal-linked vertical stacks.
+    std::vector<bool>                         assigned(n, false);
+    std::vector<std::vector<world::SectorId>> groups;
     for (world::SectorId i = 0; i < n; ++i)
     {
         if (assigned[i]) continue;
@@ -91,24 +158,14 @@ void FloorLayerPanel::draw(EditMapDocument& doc)
         groups.push_back(std::move(layer));
     }
 
-    // "Show all" row.
-    {
-        const bool selected = !m_filterEnabled;
-        if (ImGui::Selectable("All floors##flall", selected))
-        {
-            m_filterEnabled = false;
-            m_visibleSectors.clear();
-        }
-    }
+    ImGui::Spacing();
+    ImGui::SeparatorText("Floor Groups");
 
-    ImGui::Separator();
-
-    // Per-group rows.
     for (std::size_t gi = 0; gi < groups.size(); ++gi)
     {
         const auto& grp = groups[gi];
 
-        // Determine the Y range of the group for display.
+        // Y range of this group.
         float minY =  1e9f;
         float maxY = -1e9f;
         for (const auto sid : grp)
@@ -116,23 +173,27 @@ void FloorLayerPanel::draw(EditMapDocument& doc)
             minY = std::min(minY, sectors[sid].floorHeight);
             maxY = std::max(maxY, sectors[sid].ceilHeight);
         }
+        const float midY = (minY + maxY) * 0.5f;
 
-        char label[64];
-        std::snprintf(label, sizeof(label), "Floor %zu  (Y %.1f \xe2\x80\x93 %.1f)  %zu sector(s)##fl%zu",
+        // Highlight the group that contains the current edit height.
+        const bool isActiveGroup = m_filterEnabled &&
+                                   m_editHeight >= minY && m_editHeight <= maxY;
+
+        char label[72];
+        std::snprintf(label, sizeof(label),
+                      "Floor %zu  (%.1f \xe2\x80\x93 %.1f m)  %zu sec##fg%zu",
                       gi, minY, maxY, grp.size(), gi);
 
-        const bool isThisGroup = m_filterEnabled &&
-                                 m_visibleSectors == grp;
-
-        if (ImGui::Selectable(label, isThisGroup))
+        // Clicking a group jumps the edit height to its midpoint.
+        if (ImGui::Selectable(label, isActiveGroup))
         {
-            m_filterEnabled  = true;
-            m_visibleSectors = grp;
+            m_editHeight    = midY;
+            m_filterEnabled = true;
         }
     }
 
     ImGui::Spacing();
-    ImGui::TextDisabled("Dims sectors not in the selected floor in the 2D viewport.");
+    ImGui::TextDisabled("Sectors outside edit height are shown at 20%% opacity in 2D.");
 
     ImGui::End();
 }

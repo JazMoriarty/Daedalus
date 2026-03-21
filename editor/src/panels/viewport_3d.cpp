@@ -15,6 +15,8 @@
 #include "document/commands/cmd_set_wall_material.h"
 #include "document/commands/cmd_set_sector_material.h"
 #include "document/commands/cmd_set_wall_uv.h"
+#include "document/commands/cmd_set_heightfield.h"
+#include "document/commands/cmd_set_vertex_height.h"
 #include "daedalus/editor/compound_command.h"
 #include "uv_utils.h"
 
@@ -230,7 +232,224 @@ void Viewport3D::setGizmoMode(GizmoMode mode) noexcept
     m_gizmoDragAxis = -1;
 }
 
-// ─── drawGizmoAndHandleDrag ───────────────────────────────────────────────────
+// ─── applyTerrainBrush ─────────────────────────────────────────────────────────────────────────
+// Modifies the heightfield in-place at m_terrainHitXZ within m_terrainBrushRadius.
+// Called every captured-mouse frame while a paint button is held; dt provides
+// time-based strength scaling so the effect rate is fps-independent.
+
+void Viewport3D::applyTerrainBrush(world::Sector& sector, float dt) noexcept
+{
+    world::HeightfieldFloor& hf = *sector.heightfield;
+    const float rSq  = m_terrainBrushRadius * m_terrainBrushRadius;
+    const float str  = m_terrainBrushStrength * dt;
+    const float invW = (hf.gridWidth  > 1) ? 1.0f / static_cast<float>(hf.gridWidth  - 1) : 0.0f;
+    const float invD = (hf.gridDepth  > 1) ? 1.0f / static_cast<float>(hf.gridDepth  - 1) : 0.0f;
+    const float worldW = hf.worldMax.x - hf.worldMin.x;
+    const float worldD = hf.worldMax.y - hf.worldMin.y;
+
+    // For Smooth: compute local average first so the brush applies consistently.
+    float localAvg = 0.0f;
+    int   localCnt = 0;
+    if (m_terrainBrushMode == TerrainBrushMode::Smooth)
+    {
+        for (uint32_t j = 0; j < hf.gridDepth; ++j)
+        for (uint32_t i = 0; i < hf.gridWidth;  ++i)
+        {
+            const float wx = hf.worldMin.x + static_cast<float>(i) * invW * worldW;
+            const float wz = hf.worldMin.y + static_cast<float>(j) * invD * worldD;
+            const float dx = wx - m_terrainHitXZ.x;
+            const float dz = wz - m_terrainHitXZ.y;
+            if (dx*dx + dz*dz <= rSq)
+            {
+                localAvg += hf.samples[j * hf.gridWidth + i];
+                ++localCnt;
+            }
+        }
+        if (localCnt > 0) localAvg /= static_cast<float>(localCnt);
+    }
+
+    // For Flatten: sample height at the exact hit point once.
+    float flattenY = sector.floorHeight;
+    if (m_terrainBrushMode == TerrainBrushMode::Flatten)
+    {
+        // Sample the heightfield at the hit XZ via bilinear interpolation.
+        const float normI = (m_terrainHitXZ.x - hf.worldMin.x) / worldW;
+        const float normJ = (m_terrainHitXZ.y - hf.worldMin.y) / worldD;
+        const float fi = normI * static_cast<float>(hf.gridWidth  - 1);
+        const float fj = normJ * static_cast<float>(hf.gridDepth  - 1);
+        const auto  ci = static_cast<uint32_t>(std::clamp(fi, 0.0f, static_cast<float>(hf.gridWidth  - 1)));
+        const auto  cj = static_cast<uint32_t>(std::clamp(fj, 0.0f, static_cast<float>(hf.gridDepth  - 1)));
+        flattenY = hf.samples[cj * hf.gridWidth + ci];
+    }
+
+    for (uint32_t j = 0; j < hf.gridDepth; ++j)
+    for (uint32_t i = 0; i < hf.gridWidth;  ++i)
+    {
+        const float wx = hf.worldMin.x + static_cast<float>(i) * invW * worldW;
+        const float wz = hf.worldMin.y + static_cast<float>(j) * invD * worldD;
+        const float dx = wx - m_terrainHitXZ.x;
+        const float dz = wz - m_terrainHitXZ.y;
+        if (dx*dx + dz*dz > rSq) continue;
+
+        float& h = hf.samples[j * hf.gridWidth + i];
+        switch (m_terrainBrushMode)
+        {
+        case TerrainBrushMode::Raise:   h += str;               break;
+        case TerrainBrushMode::Lower:   h -= str;               break;
+        case TerrainBrushMode::Smooth:  h += (localAvg - h) * std::min(str * 2.0f, 1.0f); break;
+        case TerrainBrushMode::Flatten: h += (flattenY  - h) * std::min(str * 2.0f, 1.0f); break;
+        }
+    }
+}
+
+// ─── drawTerrainAndHeightOverlays ──────────────────────────────────────────────────────────
+// Draws:
+//   • Terrain brush circle overlay (when mouse captured + terrain sector selected)
+//   • Per-vertex floor/ceiling height handles (when not captured + Vertex selection)
+
+void Viewport3D::drawTerrainAndHeightOverlays(EditMapDocument&  doc,
+                                               const glm::mat4& view,
+                                               const glm::mat4& proj,
+                                               const ImVec2&    imageTopLeft,
+                                               unsigned viewW, unsigned viewH)
+{
+    ImDrawList* dl    = ImGui::GetWindowDrawList();
+    const float fw    = static_cast<float>(viewW);
+    const float fh    = static_cast<float>(viewH);
+    const glm::mat4 VP = proj * view;
+
+    // Project world point to ImGui screen space.
+    auto projectWorld = [&](glm::vec3 world) -> ImVec2
+    {
+        glm::vec4 clip = VP * glm::vec4(world, 1.0f);
+        if (clip.w <= 0.0f) return ImVec2(-1e5f, -1e5f);
+        const float nx = clip.x / clip.w;
+        const float ny = clip.y / clip.w;
+        return ImVec2(imageTopLeft.x + (nx * 0.5f + 0.5f) * fw,
+                      imageTopLeft.y + (1.0f - (ny * 0.5f + 0.5f)) * fh);
+    };
+
+    // ── Terrain brush circle (fly mode + terrain sector) ─────────────────────────────
+    if (m_mouseCaptured && m_terrainHitValid)
+    {
+        // Project 8 points around the brush circle onto the floor plane to screen.
+        constexpr int kSegs = 24;
+        std::vector<ImVec2> circlePts;
+        circlePts.reserve(kSegs);
+        const float y = m_terrainSectorId != world::INVALID_SECTOR_ID &&
+                        m_terrainSectorId < static_cast<world::SectorId>(doc.mapData().sectors.size())
+                        ? doc.mapData().sectors[m_terrainSectorId].floorHeight
+                        : 0.0f;
+        for (int k = 0; k < kSegs; ++k)
+        {
+            const float a = glm::two_pi<float>() * static_cast<float>(k) / kSegs;
+            circlePts.push_back(projectWorld(glm::vec3(
+                m_terrainHitXZ.x + std::cos(a) * m_terrainBrushRadius,
+                y,
+                m_terrainHitXZ.y + std::sin(a) * m_terrainBrushRadius)));
+        }
+        const ImU32 brushCol = m_terrainBrushMode == TerrainBrushMode::Raise
+            ? IM_COL32(80, 220, 80, 220)
+            : m_terrainBrushMode == TerrainBrushMode::Lower
+            ? IM_COL32(220, 80, 80, 220)
+            : IM_COL32(220, 180, 50, 220);
+        for (int k = 0; k < kSegs; ++k)
+            dl->AddLine(circlePts[k], circlePts[(k + 1) % kSegs], brushCol, 1.5f);
+
+        // Crosshair at hit point.
+        const ImVec2 hitScreen = projectWorld(glm::vec3(m_terrainHitXZ.x, y, m_terrainHitXZ.y));
+        constexpr float kCross = 5.0f;
+        dl->AddLine({hitScreen.x - kCross, hitScreen.y}, {hitScreen.x + kCross, hitScreen.y},
+                    brushCol, 1.5f);
+        dl->AddLine({hitScreen.x, hitScreen.y - kCross}, {hitScreen.x, hitScreen.y + kCross},
+                    brushCol, 1.5f);
+    }
+
+    // ── Per-vertex height handles (Vertex selection, not captured) ─────────────────────
+    if (!m_mouseCaptured)
+    {
+        const SelectionState& sel = doc.selection();
+        if (sel.type == SelectionType::Vertex &&
+            sel.vertexSectorId != world::INVALID_SECTOR_ID)
+        {
+            const auto& sectors  = doc.mapData().sectors;
+            const world::SectorId sid = sel.vertexSectorId;
+            if (sid >= static_cast<world::SectorId>(sectors.size())) return;
+
+            const world::Sector& sector = sectors[sid];
+            const std::size_t    ns     = sector.walls.size();
+            const ImVec2 mousePos = ImGui::GetIO().MousePos;
+
+            constexpr float kHandleR = 6.0f;
+            constexpr float kHitR    = kHandleR + 4.0f;
+
+            int newHovered = -1;
+
+            for (std::size_t vi = 0; vi < ns; ++vi)
+            {
+                const world::Wall& wall = sector.walls[vi];
+                const float floorY = wall.floorHeightOverride.value_or(sector.floorHeight);
+                const float ceilY  = wall.ceilHeightOverride.value_or(sector.ceilHeight);
+
+                const ImVec2 floorScreen = projectWorld({wall.p0.x, floorY, wall.p0.y});
+                const ImVec2 ceilScreen  = projectWorld({wall.p0.x, ceilY,  wall.p0.y});
+
+                // Floor handle (cyan)
+                const int floorHandle = static_cast<int>(vi) * 2;
+                const bool floorHov   = (m_hoveredHeightHandle == floorHandle);
+                dl->AddCircleFilled(floorScreen, kHandleR,
+                    floorHov ? IM_COL32(100, 255, 255, 240)
+                             : IM_COL32(0,   200, 200, 180));
+                dl->AddCircle(floorScreen, kHandleR, IM_COL32(0, 255, 255, 200), 12, 1.2f);
+
+                // Ceiling handle (magenta)
+                const int ceilHandle = static_cast<int>(vi) * 2 + 1;
+                const bool ceilHov   = (m_hoveredHeightHandle == ceilHandle);
+                dl->AddCircleFilled(ceilScreen,  kHandleR,
+                    ceilHov  ? IM_COL32(255, 100, 255, 240)
+                              : IM_COL32(200, 0,   200, 180));
+                dl->AddCircle(ceilScreen, kHandleR, IM_COL32(255, 0, 255, 200), 12, 1.2f);
+
+                // Hover detection.
+                auto distSq = [](ImVec2 a, ImVec2 b) {
+                    const float dx = a.x - b.x; const float dy = a.y - b.y;
+                    return dx*dx + dy*dy;
+                };
+                if (distSq(mousePos, floorScreen) <= kHitR * kHitR) newHovered = floorHandle;
+                if (distSq(mousePos, ceilScreen)  <= kHitR * kHitR) newHovered = ceilHandle;
+            }
+
+            // Scroll-to-adjust height when hovering a handle.
+            const float scroll = ImGui::GetIO().MouseWheel;
+            if (m_hoveredHeightHandle >= 0 && scroll != 0.0f &&
+                ImGui::IsWindowHovered())
+            {
+                const std::size_t vi  = static_cast<std::size_t>(m_hoveredHeightHandle / 2);
+                const bool isFloor    = (m_hoveredHeightHandle % 2 == 0);
+                if (vi < ns)
+                {
+                    const world::Wall& wall = sector.walls[vi];
+                    const float cur = isFloor
+                        ? wall.floorHeightOverride.value_or(sector.floorHeight)
+                        : wall.ceilHeightOverride.value_or(sector.ceilHeight);
+                    const float newVal = cur + scroll * 0.25f;
+                    doc.pushCommand(std::make_unique<CmdSetVertexHeight>(
+                        doc, sid, vi,
+                        isFloor ? std::optional<float>(newVal) : wall.floorHeightOverride,
+                        isFloor ? wall.ceilHeightOverride       : std::optional<float>(newVal)));
+                }
+            }
+
+            m_hoveredHeightHandle = newHovered;
+        }
+        else
+        {
+            m_hoveredHeightHandle = -1;
+        }
+    }
+}
+
+// ─── drawGizmoAndHandleDrag ─────────────────────────────────────────────────────────────────────────
 
 void Viewport3D::drawGizmoAndHandleDrag(EditMapDocument&  doc,
                                         const glm::mat4& view,
@@ -657,6 +876,91 @@ void Viewport3D::draw(EditMapDocument&      doc,
         if (keys[SDL_SCANCODE_D]) m_eye += right                        * spd;
         if (keys[SDL_SCANCODE_Q]) m_eye -= glm::vec3(0.0f, 1.0f, 0.0f) * spd;
         if (keys[SDL_SCANCODE_E]) m_eye += glm::vec3(0.0f, 1.0f, 0.0f) * spd;
+
+        // ── Terrain paint (fly mode + heightfield sector selected) ─────────────────
+        {
+            const SelectionState& sel = doc.selection();
+            world::SectorId terrSid   = world::INVALID_SECTOR_ID;
+            if (sel.type == SelectionType::Sector && !sel.sectors.empty())
+            {
+                const world::SectorId candidate = sel.sectors.front();
+                const auto& sectors = doc.mapData().sectors;
+                if (candidate < static_cast<world::SectorId>(sectors.size()) &&
+                    sectors[candidate].floorShape == world::FloorShape::Heightfield &&
+                    sectors[candidate].heightfield.has_value())
+                    terrSid = candidate;
+            }
+            m_terrainSectorId = terrSid;
+
+            if (terrSid != world::INVALID_SECTOR_ID)
+            {
+                world::Sector& terrSec = doc.mapData().sectors[terrSid];
+
+                // Hit point: ray from m_eye along fwd, intersect y = floorHeight plane.
+                m_terrainHitValid = false;
+                constexpr float kMinFwdY = 1e-3f;
+                if (std::abs(fwd.y) > kMinFwdY)
+                {
+                    const float t = (terrSec.floorHeight - m_eye.y) / fwd.y;
+                    if (t > 0.0f)
+                    {
+                        m_terrainHitXZ    = {m_eye.x + fwd.x * t, m_eye.z + fwd.z * t};
+                        m_terrainHitValid = true;
+                    }
+                }
+
+                // Brush mode: Shift = Smooth, Alt = Flatten, plain = Raise/Lower.
+                const bool shiftDown = keys[SDL_SCANCODE_LSHIFT] || keys[SDL_SCANCODE_RSHIFT];
+                const bool altDown   = keys[SDL_SCANCODE_LALT]   || keys[SDL_SCANCODE_RALT];
+
+                // Scroll wheel: adjust brush radius (takes priority over camera dolly).
+                if (io.MouseWheel != 0.0f)
+                    m_terrainBrushRadius = std::clamp(m_terrainBrushRadius + io.MouseWheel * 0.25f,
+                                                      0.25f, 20.0f);
+
+                // Mouse button state in fly mode (ImGui position is hidden, use SDL).
+                const Uint32 sdlButtons = SDL_GetMouseState(nullptr, nullptr);
+                const bool lmbHeld = (sdlButtons & SDL_BUTTON_LMASK) != 0;
+                const bool rmbHeld = (sdlButtons & SDL_BUTTON_RMASK) != 0;
+
+                if (lmbHeld || rmbHeld)
+                {
+                    // Choose mode based on modifier keys and button.
+                    if (shiftDown)    m_terrainBrushMode = TerrainBrushMode::Smooth;
+                    else if (altDown) m_terrainBrushMode = TerrainBrushMode::Flatten;
+                    else if (lmbHeld) m_terrainBrushMode = TerrainBrushMode::Raise;
+                    else              m_terrainBrushMode = TerrainBrushMode::Lower;
+
+                    // Snapshot the heightfield before the first frame of this drag.
+                    if (!m_terrainPainting)
+                    {
+                        m_terrainPrePaint  = *terrSec.heightfield;
+                        m_terrainPainting  = true;
+                    }
+
+                    if (m_terrainHitValid)
+                    {
+                        applyTerrainBrush(terrSec, dt);
+                        doc.markDirty();
+                    }
+                }
+                else if (m_terrainPainting)
+                {
+                    // Buttons released: push undoable command for the whole stroke.
+                    m_terrainPainting = false;
+                    // Swap: restore pre-paint so CmdSetHeightfield captures correct old state.
+                    world::HeightfieldFloor finalHf = *terrSec.heightfield;
+                    terrSec.heightfield = m_terrainPrePaint;
+                    doc.pushCommand(std::make_unique<CmdSetHeightfield>(doc, terrSid, finalHf));
+                }
+            }
+            else
+            {
+                // No terrain sector — cancel any in-progress paint.
+                m_terrainPainting = false;
+                m_terrainHitValid = false;
+            }
+        }
     }
     else
     {
@@ -671,8 +975,8 @@ void Viewport3D::draw(EditMapDocument&      doc,
                 m_altFocus = m_eye + fwd * 10.0f;
             }
 
-            // Scroll: dolly forward/backward along view direction.
-            if (io.MouseWheel != 0.0f)
+            // Scroll: dolly forward/backward when NOT hovering a height handle.
+            if (io.MouseWheel != 0.0f && m_hoveredHeightHandle < 0)
                 m_eye += fwd * io.MouseWheel * 0.5f;
         }
 
@@ -1166,7 +1470,22 @@ void Viewport3D::draw(EditMapDocument&      doc,
     if (m_mouseCaptured)
     {
         ImGui::SetCursorPos(ImVec2(8.0f, 8.0f));
-        ImGui::TextDisabled("[Tab] release cursor   WASD = move   Q/E = up/down   Shift = fast");
+        if (m_terrainSectorId != world::INVALID_SECTOR_ID)
+        {
+            // Terrain paint mode hint.
+            const char* modeName =
+                m_terrainBrushMode == TerrainBrushMode::Raise   ? "Raise" :
+                m_terrainBrushMode == TerrainBrushMode::Lower   ? "Lower" :
+                m_terrainBrushMode == TerrainBrushMode::Smooth  ? "Smooth" : "Flatten";
+            ImGui::TextDisabled(
+                "TERRAIN PAINT [%s]  LMB=Raise  RMB=Lower  Shift=Smooth  Alt=Flatten"
+                "  Scroll=radius (%.1f m)  [Tab]=exit",
+                modeName, m_terrainBrushRadius);
+        }
+        else
+        {
+            ImGui::TextDisabled("[Tab] release cursor   WASD = move   Q/E = up/down   Shift = fast");
+        }
     }
     else
     {
@@ -1958,6 +2277,7 @@ void Viewport3D::draw(EditMapDocument&      doc,
 
     // ── Gizmo overlay (drawn on top of the image) ──────────────────────
     drawGizmoAndHandleDrag(doc, view, proj, imageTopLeft, w, h);
+    drawTerrainAndHeightOverlays(doc, view, proj, imageTopLeft, w, h);
 
     // ── Forward-vector overlay (shown while 2D viewport is rotating an entity) ───
     if (entityRotating && entityRotIdx < doc.entities().size())

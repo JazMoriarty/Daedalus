@@ -2,6 +2,7 @@
 
 #include "daedalus/world/world_types.h"
 
+#include <string>
 #include <vector>
 
 namespace daedalus::editor
@@ -9,17 +10,19 @@ namespace daedalus::editor
 
 class EditMapDocument;
 
-/// Panel that shows vertically-stacked floor layers linked via floor/ceiling
-/// portals and lets the user filter the 2D viewport to one floor at a time.
+/// Panel that implements the Multi-Floor 2D View described in the design spec.
 ///
-/// A "floor layer" is the transitive closure of sectors connected by
-/// floorPortalSectorId / ceilPortalSectorId links.  The panel lists all layers
-/// and exposes a "show all floors" / "show layer N" toggle so that in a
-/// multi-floor map the 2D viewport is not cluttered by overlapping sectors.
+/// An **edit height slider** controls the current working Y level.  Sectors
+/// whose [floorHeight, ceilHeight] range does not include this value are shown
+/// at 20 % opacity in the 2D viewport.  This makes multi-floor maps legible:
+/// only the floor the designer is currently editing renders at full brightness.
 ///
-/// The active floor filter index is stored here; Viewport2D reads it via
-/// activeFloorFilter() to dim or hide out-of-layer sectors when
-/// floorFilterEnabled() is true.
+/// A floor-group list (sectors partitioned into portal-linked vertical stacks)
+/// lets the user jump between floors quickly: clicking a group sets the edit
+/// height to the midpoint of that group's Y range.
+///
+/// **Show All** disables the height filter and renders every floor at full
+/// opacity for top-level spatial reasoning and cross-floor portal linking.
 class FloorLayerPanel
 {
 public:
@@ -30,20 +33,24 @@ public:
 
     // ─── Viewport2D integration ───────────────────────────────────────────────
 
-    /// True when a specific floor layer is selected (not "show all").
-    [[nodiscard]] bool floorFilterEnabled() const noexcept { return m_filterEnabled; }
+    /// True when the height filter is active (not "show all").
+    [[nodiscard]] bool heightFilterActive() const noexcept { return m_filterEnabled; }
 
-    /// Returns true if the given sector should be displayed at full opacity.
-    /// When the filter is disabled every sector returns true.
-    [[nodiscard]] bool isSectorVisible(world::SectorId id) const noexcept;
+    /// Returns true if a sector spanning [floorH, ceilH] should be rendered at
+    /// full opacity at the current edit height.  Always true when the filter is
+    /// disabled.  Sectors whose range contains the edit height return true;
+    /// all others return false and should be drawn at 20 % opacity.
+    [[nodiscard]] bool isSectorFullOpacity(float floorH, float ceilH) const noexcept;
 
 private:
-    bool m_filterEnabled = false;
+    bool  m_filterEnabled = false;
+    float m_editHeight    = 0.0f;  ///< Current working Y level (world units).
 
-    /// The sectors belonging to the currently selected floor layer.
-    std::vector<world::SectorId> m_visibleSectors;
+    /// User-saved named height presets.
+    struct Preset { std::string name; float y; };
+    std::vector<Preset> m_presets;
 
-    /// Collect the transitive portal-linked group starting from `seed`.
+    /// Transitive portal-linked group starting from `seed`.
     static std::vector<world::SectorId> collectLayer(const EditMapDocument& doc,
                                                      world::SectorId        seed);
 };

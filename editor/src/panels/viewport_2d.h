@@ -6,6 +6,7 @@
 
 #include <cstddef>
 #include <glm/glm.hpp>
+#include <optional>
 #include <vector>
 
 struct ImDrawList; // global-namespace forward declaration
@@ -18,6 +19,7 @@ namespace daedalus::editor
 enum class PendingPlacement : uint8_t { None, Entity, Light };
 
 class EditMapDocument;
+class FloorLayerPanel;
 class IEditorTool;
 class DrawSectorTool;
 class SelectTool;
@@ -37,11 +39,14 @@ public:
     /// drawTool is used for the in-progress polygon overlay and may be nullptr.
     /// selectTool is non-null only when the select tool is the active tool;
     /// used for rect-select overlay and drag detection.
+    /// floorLayer is optional; when non-null it is used to dim out-of-range
+    /// sectors in the 2D view at 20 % opacity.
     void draw(EditMapDocument& doc,
               IEditorTool*     activeTool,
               DrawSectorTool*  drawTool,
               SelectTool*      selectTool,
-              VertexTool*      vertexTool);
+              VertexTool*      vertexTool,
+              FloorLayerPanel* floorLayer = nullptr);
 
     // ─── Camera state (accessed by DrawSectorTool overlay) ────────────────────
 
@@ -156,6 +161,13 @@ private:
     glm::vec2 m_flyCameraPos    = {};
     float     m_flyCameraYaw    = 0.0f;
 
+    // ─── Bezier curve handle drag state ───────────────────────────────────────────────
+    bool                        m_curveDragActive    = false;
+    world::SectorId             m_curveDragSectorId  = world::INVALID_SECTOR_ID;
+    std::size_t                 m_curveDragWallIndex = 0;
+    std::optional<glm::vec2>    m_curveDragOldControlA;  ///< Pre-drag value for undo.
+    bool                        m_curveDragMoved     = false;
+
     // Continuous validation overlay cache.
     std::vector<WallHighlight> m_wallHighlights;    ///< Last computed highlights.
     bool                       m_highlightsDirty = true; ///< Recompute on next draw.
@@ -173,9 +185,15 @@ private:
     void drawGrid(ImDrawList* dl,
                   glm::vec2 canvasMin, glm::vec2 canvasMax) const;
 
-    void drawSectors(ImDrawList* dl,
+    void drawSectors(ImDrawList*            dl,
                      const EditMapDocument& doc,
-                     glm::vec2 canvasMin) const;
+                     glm::vec2              canvasMin,
+                     const FloorLayerPanel* floorLayer) const;
+
+    /// Draw dashed XZ footprints for all detail brushes in the map.
+    void drawDetailBrushFootprints(ImDrawList*            dl,
+                                   const EditMapDocument& doc,
+                                   glm::vec2              canvasMin) const;
 
     void drawEntities(ImDrawList* dl,
                       const EditMapDocument& doc,

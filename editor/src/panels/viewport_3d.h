@@ -195,11 +195,32 @@ private:
     world::SectorId m_uvEditSectorId     = world::INVALID_SECTOR_ID;
     std::size_t     m_uvEditWallIdx      = 0;
 
-    // ─── UV clipboard (C to copy, Enter to paste) ────────────────────────────
+    // ─── UV clipboard (C to copy, Enter to paste) ────────────────────────────────────
     bool      m_uvClipValid    = false;
     glm::vec2 m_uvClipOffset   = {0.0f, 0.0f};
     glm::vec2 m_uvClipScale    = {1.0f, 1.0f};
     float     m_uvClipRotation = 0.0f;
+
+    // ─── Terrain paint state ───────────────────────────────────────────────────
+    // Active when m_mouseCaptured and the selected sector has FloorShape::Heightfield.
+
+    enum class TerrainBrushMode : uint8_t { Raise, Lower, Smooth, Flatten };
+
+    bool               m_terrainPainting   = false;  ///< True while a paint drag is in progress.
+    TerrainBrushMode   m_terrainBrushMode  = TerrainBrushMode::Raise;
+    float              m_terrainBrushRadius = 2.0f;   ///< World-unit brush radius.
+    float              m_terrainBrushStrength = 0.5f; ///< Raise/lower units per second.
+    glm::vec2          m_terrainHitXZ{};              ///< Last XZ brush hit point.
+    bool               m_terrainHitValid   = false;   ///< True when the brush hit the terrain.
+    world::HeightfieldFloor m_terrainPrePaint;        ///< Snapshot before drag begins (for undo).
+    world::SectorId    m_terrainSectorId   = world::INVALID_SECTOR_ID;
+
+    // ─── Per-vertex height handle state (Vertex tool mode) ──────────────────────
+    // Which handle the cursor is currently over.  -1 = none.
+    // Even indices = floor handles, odd indices = ceiling handles, alternating per vertex.
+    // e.g. vertex i: floor handle = 2*i, ceil handle = 2*i+1.
+    int         m_hoveredHeightHandle     = -1;
+    float       m_hoveredHandleOrigValue  = 0.0f;  ///< Value at scroll-start for undo.
 
     void ensureInit(rhi::IRenderDevice& device, unsigned w, unsigned h);
     void retessellate(rhi::IRenderDevice& device, const world::WorldMapData& map);
@@ -212,6 +233,16 @@ private:
                                 const ImVec2&    imageTopLeft,
                                 unsigned         viewW,
                                 unsigned         viewH);
+
+    /// Apply terrain brush at the stored hit point to the sector's heightfield.
+    void applyTerrainBrush(world::Sector& sector, float dt) noexcept;
+
+    /// Draw terrain brush circle overlay and per-vertex height handles.
+    void drawTerrainAndHeightOverlays(EditMapDocument&  doc,
+                                      const glm::mat4& view,
+                                      const glm::mat4& proj,
+                                      const ImVec2&    imageTopLeft,
+                                      unsigned viewW, unsigned viewH);
 };
 
 } // namespace daedalus::editor

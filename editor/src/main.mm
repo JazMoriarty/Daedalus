@@ -40,6 +40,8 @@
 #include "panels/object_browser_panel.h"
 #include "panels/layers_panel.h"
 #include "panels/help_panel.h"
+#include "panels/floor_layer_panel.h"
+#include "panels/staircase_generator_panel.h"
 #include "document/commands/cmd_place_light.h"
 #include "document/commands/cmd_delete_light.h"
 #include "document/commands/cmd_place_entity.h"
@@ -241,6 +243,8 @@ static void drawMenuBar(EditMapDocument& doc,
                          bool&             showOutputLog,
                          bool&             showRenderSettings,
                          bool&             showNormalMapGen,
+                         bool&             showFloorLayers,
+                         bool&             showStaircaseGen,
                          bool&             showHelp)
 {
     if (ImGui::BeginMainMenuBar())
@@ -349,6 +353,8 @@ static void drawMenuBar(EditMapDocument& doc,
             ImGui::Separator();
             ImGui::MenuItem("Render Settings", nullptr, &showRenderSettings);
             ImGui::MenuItem("Normal Map Generator", nullptr, &showNormalMapGen);
+            ImGui::MenuItem("Floor Layers", nullptr, &showFloorLayers);
+            ImGui::MenuItem("Staircase Generator", nullptr, &showStaircaseGen);
             ImGui::Separator();
             ImGui::MenuItem("Help", "F1", &showHelp);
             ImGui::EndMenu();
@@ -623,8 +629,10 @@ int main(int /*argc*/, char* /*argv*/[])
     ModelCatalog        modelCatalog;
     ModelCatalog        voxCatalog;
     AssetBrowserPanel   assetBrowser;
-    NormalMapGeneratorPanel normalMapGenPanel;
-    std::string         lastKnownAssetRoot;
+    NormalMapGeneratorPanel  normalMapGenPanel;
+    FloorLayerPanel          floorLayerPanel;
+    StaircaseGeneratorPanel  staircaseGenPanel;
+    std::string              lastKnownAssetRoot;
 
     // Panel visibility flags (controlled by Window menu)
     bool show2DViewport          = true;
@@ -636,6 +644,8 @@ int main(int /*argc*/, char* /*argv*/[])
     bool showOutputLog           = true;
     bool showRenderSettings      = true;
     bool showNormalMapGen        = false;  // Hidden by default
+    bool showFloorLayers         = false;  // Hidden by default
+    bool showStaircaseGen        = false;  // Hidden by default
     bool showHelp                = false;  // Hidden by default (opened via F1)
 
     // ── Wire up Asset Browser right-click callback to Normal Map Generator ───────
@@ -1658,7 +1668,8 @@ int main(int /*argc*/, char* /*argv*/[])
                     dlgState,
                     show2DViewport, show3DViewport, showPropertyInspector,
                     showObjectBrowser, showAssetBrowser, showLayers,
-                    showOutputLog, showRenderSettings, showNormalMapGen, showHelp);
+                    showOutputLog, showRenderSettings, showNormalMapGen,
+                    showFloorLayers, showStaircaseGen, showHelp);
 
         // ── Panels ────────────────────────────────────────────────────────────
         DrawSectorTool* drawToolPtr =
@@ -1673,7 +1684,8 @@ int main(int /*argc*/, char* /*argv*/[])
             vp2d.updateFlyCamera(vp3d.isMouseCaptured(),
                                   {vp3d.eye().x, vp3d.eye().z},
                                   vp3d.yaw());
-            vp2d.draw(doc, activeTool, drawToolPtr, selectToolPtr, vertexToolPtr);
+            vp2d.draw(doc, activeTool, drawToolPtr, selectToolPtr, vertexToolPtr,
+                      showFloorLayers ? &floorLayerPanel : nullptr);
         }
 
         // Consume a pending placement committed by a click in the 2D viewport.
@@ -1743,6 +1755,12 @@ int main(int /*argc*/, char* /*argv*/[])
         {
             normalMapGenPanel.draw(&showNormalMapGen, catalog, *device, *assetLoader, doc);
         }
+
+        if (showFloorLayers)
+            floorLayerPanel.draw(doc);
+
+        if (showStaircaseGen)
+            staircaseGenPanel.draw(doc);
 
         // ── New Map dialog ──────────────────────────────────────────────────────────────────────
         if (nmDlg.open)

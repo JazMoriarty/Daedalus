@@ -1,4 +1,5 @@
 #include "viewport_2d.h"
+#include "floor_layer_panel.h"
 #include "daedalus/editor/edit_map_document.h"
 #include "daedalus/editor/selection_state.h"
 #include "daedalus/editor/light_def.h"
@@ -14,6 +15,7 @@
 #include "document/commands/cmd_split_wall.h"
 #include "document/commands/cmd_rotate_entity.h"
 #include "document/commands/cmd_rotate_sector.h"
+#include "document/commands/cmd_set_wall_curve.h"
 
 #include "imgui.h"
 #include "imgui_internal.h"  // GImGui->ActiveId, GImGui->ActiveIdWindow, DockTabIsVisible
@@ -31,6 +33,49 @@ namespace {
 inline float snapToGrid(float v, float step) noexcept
 {
     return std::round(v / step) * step;
+}
+
+/// Evaluate a quadratic Bezier at parameter t ∈ [0,1].
+inline glm::vec2 bezierQ(glm::vec2 p0, glm::vec2 cp,
+                         glm::vec2 p1, float t) noexcept
+{
+    const float u = 1.0f - t;
+    return u * u * p0 + 2.0f * u * t * cp + t * t * p1;
+}
+
+/// Evaluate a cubic Bezier at parameter t ∈ [0,1].
+inline glm::vec2 bezierC(glm::vec2 p0, glm::vec2 ca, glm::vec2 cb,
+                         glm::vec2 p1, float t) noexcept
+{
+    const float u = 1.0f - t;
+    return u*u*u*p0 + 3.0f*u*u*t*ca + 3.0f*u*t*t*cb + t*t*t*p1;
+}
+
+/// Draw a dashed line between two screen-space points.
+void addDashedLine(ImDrawList* dl, ImVec2 a, ImVec2 b, ImU32 col,
+                   float thickness = 1.2f,
+                   float dashLen = 5.0f, float gapLen = 4.0f)
+{
+    const float dx = b.x - a.x;
+    const float dy = b.y - a.y;
+    const float len = std::sqrt(dx * dx + dy * dy);
+    if (len < 0.5f) return;
+    const float ux = dx / len;
+    const float uy = dy / len;
+    float t = 0.0f;
+    bool  drawing = true;
+    while (t < len)
+    {
+        const float segEnd = std::min(t + (drawing ? dashLen : gapLen), len);
+        if (drawing)
+        {
+            dl->AddLine(ImVec2(a.x + ux * t,      a.y + uy * t),
+                        ImVec2(a.x + ux * segEnd,  a.y + uy * segEnd),
+                        col, thickness);
+        }
+        t = segEnd;
+        drawing = !drawing;
+    }
 }
 
 } // anonymous namespace
@@ -108,14 +153,18 @@ void Viewport2D::drawGrid(ImDrawList* dl,
     }
 }
 
-// ─── Sector drawing ───────────────────────────────────────────────────────────
+// ─── Sector drawing ─────────────────────────────────────────────────────────────────────────
 
 void Viewport2D::drawSectors(ImDrawList*            dl,
                                const EditMapDocument& doc,
-                               glm::vec2              canvasMin) const
+                               glm::vec2              canvasMin,
+                               const FloorLayerPanel* floorLayer) const
 {
     const auto&           map = doc.mapData();
     const SelectionState& sel = doc.selection();
+
+    // Whether the cursor is held over a wall midpoint with Ctrl for curve creation.
+    const bool ctrlHeld = ImGui::GetIO().KeyCtrl;
 
     for (std::size_t si = 0; si < map.sectors.size(); ++si)
     {
@@ -129,8 +178,20 @@ void Viewport2D::drawSectors(ImDrawList*            dl,
         const std::size_t    n      = sector.walls.size();
         if (n < 3) continue;
 
-        const auto   sid      = static_cast<world::SectorId>(si);
-        const bool   sectSel  = sel.isSectorSelected(sid);
+        const auto sid     = static_cast<world::SectorId>(si);
+        const bool sectSel = sel.isSectorSelected(sid);
+
+        // Floor-layer dimming: sectors outside the edit height render at 20 % opacity.
+        const bool dimmed = floorLayer &&
+                            !floorLayer->isSectorFullOpacity(sector.floorHeight,
+                                                             sector.ceilHeight);
+        const float opFactor = dimmed ? 0.2f : 1.0f;
+
+        // Helper: apply opacity factor to an IM_COL32 alpha channel.
+        auto applyOp = [opFactor](ImU32 col) -> ImU32 {
+            const float a = static_cast<float>((col >> 24) & 0xFF);
+            return (col & 0x00FFFFFF) | (static_cast<ImU32>(a * opFactor) << 24);
+        };
 
         // Build screen-space vertex list.
         std::vector<ImVec2> pts;
@@ -142,52 +203,98 @@ void Viewport2D::drawSectors(ImDrawList*            dl,
         }
 
         // Filled polygon.
-        const ImU32 fillColor = sectSel
-            ? IM_COL32(80, 130, 200, 60)
-            : IM_COL32(50,  80, 120, 40);
-        dl->AddConvexPolyFilled(pts.data(), static_cast<int>(pts.size()), fillColor);
+        dl->AddConvexPolyFilled(pts.data(), static_cast<int>(pts.size()),
+            applyOp(sectSel ? IM_COL32(80, 130, 200, 60)
+                            : IM_COL32(50,  80, 120, 40)));
 
-        // Per-wall outline — colour depends on: portal, selection, default.
+        // Per-wall outline and Bezier arc.
         for (std::size_t wi = 0; wi < n; ++wi)
         {
-            const world::Wall& wall    = sector.walls[wi];
-            const ImVec2&      p0      = pts[wi];
-            const ImVec2&      p1      = pts[(wi + 1) % n];
+            const world::Wall& wall = sector.walls[wi];
+            const ImVec2&      p0   = pts[wi];
+            const ImVec2&      p1   = pts[(wi + 1) % n];
 
-            const bool isPortal   = (wall.portalSectorId != world::INVALID_SECTOR_ID);
-            const bool wallSel    = (sel.type == SelectionType::Wall &&
-                                     sel.wallSectorId == sid && sel.wallIndex == wi);
+            const bool isPortal = (wall.portalSectorId != world::INVALID_SECTOR_ID);
+            const bool wallSel  = (sel.type == SelectionType::Wall &&
+                                   sel.wallSectorId == sid && sel.wallIndex == wi);
 
             ImU32 edgeColor;
             float edgeThick;
-            if (wallSel)
+            if (wallSel)       { edgeColor = IM_COL32(255, 255, 255, 240); edgeThick = 2.5f; }
+            else if (isPortal) { edgeColor = IM_COL32(0, 210, 210, 220);  edgeThick = 2.5f; }
+            else if (sectSel)  { edgeColor = IM_COL32(120, 180, 255, 220); edgeThick = 1.5f; }
+            else               { edgeColor = IM_COL32(80,  130, 200, 180); edgeThick = 1.5f; }
+            edgeColor = applyOp(edgeColor);
+
+            if (wall.curveControlA.has_value())
             {
-                edgeColor = IM_COL32(255, 255, 255, 240);
-                edgeThick = 2.5f;
-            }
-            else if (isPortal)
-            {
-                edgeColor = IM_COL32(0, 210, 210, 220);
-                edgeThick = 2.5f;
-            }
-            else if (sectSel)
-            {
-                edgeColor = IM_COL32(120, 180, 255, 220);
-                edgeThick = 1.5f;
+                // ── Bezier arc ───────────────────────────────────────────────────
+                const glm::vec2 mapP0 = wall.p0;
+                const glm::vec2 mapP1 = sector.walls[(wi + 1) % n].p0;
+                const glm::vec2 mapCa = *wall.curveControlA;
+                const glm::vec2 mapCb = wall.curveControlB.value_or(mapCa);
+                const bool isCubic    = wall.curveControlB.has_value();
+
+                const uint32_t segs = std::clamp(wall.curveSubdivisions, 4u, 64u);
+                glm::vec2 prev = mapP0;
+                for (uint32_t k = 1; k <= segs; ++k)
+                {
+                    const float t    = static_cast<float>(k) / static_cast<float>(segs);
+                    const glm::vec2 cur = isCubic
+                        ? bezierC(mapP0, mapCa, mapCb, mapP1, t)
+                        : bezierQ(mapP0, mapCa, mapP1, t);
+                    const auto sPrev = mapToScreen(prev, canvasMin);
+                    const auto sCur  = mapToScreen(cur,  canvasMin);
+                    dl->AddLine({sPrev.x, sPrev.y}, {sCur.x, sCur.y}, edgeColor, edgeThick);
+                    prev = cur;
+                }
+
+                // Draw control point handle (small diamond) and stem line.
+                const auto scMid = mapToScreen((mapP0 + mapP1) * 0.5f, canvasMin);
+                const auto scCa  = mapToScreen(mapCa, canvasMin);
+                constexpr ImU32 kHandleCol = IM_COL32(100, 220, 255, 220);
+                dl->AddLine({scMid.x, scMid.y}, {scCa.x, scCa.y},
+                            applyOp(IM_COL32(100, 220, 255, 100)), 1.0f);
+                // Diamond: four triangles around the control point.
+                constexpr float kR = 4.0f;
+                dl->AddTriangleFilled({scCa.x,      scCa.y - kR},
+                                      {scCa.x + kR,  scCa.y},
+                                      {scCa.x,       scCa.y + kR}, applyOp(kHandleCol));
+                dl->AddTriangleFilled({scCa.x,      scCa.y - kR},
+                                      {scCa.x,       scCa.y + kR},
+                                      {scCa.x - kR,  scCa.y},      applyOp(kHandleCol));
+
+                // Second handle if cubic.
+                if (isCubic)
+                {
+                    const auto scCb = mapToScreen(*wall.curveControlB, canvasMin);
+                    dl->AddLine({scMid.x, scMid.y}, {scCb.x, scCb.y},
+                                applyOp(IM_COL32(100, 220, 255, 100)), 1.0f);
+                    dl->AddTriangleFilled({scCb.x, scCb.y - kR}, {scCb.x + kR, scCb.y},
+                                          {scCb.x, scCb.y + kR}, applyOp(kHandleCol));
+                    dl->AddTriangleFilled({scCb.x, scCb.y - kR}, {scCb.x, scCb.y + kR},
+                                          {scCb.x - kR, scCb.y}, applyOp(kHandleCol));
+                }
             }
             else
             {
-                edgeColor = IM_COL32(80, 130, 200, 180);
-                edgeThick = 1.5f;
+                // Straight wall segment.
+                dl->AddLine(p0, p1, edgeColor, edgeThick);
+
+                // Ctrl-hover hint: small circle at wall midpoint when Ctrl is held
+                // to indicate "drag here to add a Bezier curve".
+                if (ctrlHeld && !dimmed)
+                {
+                    const ImVec2 mid{(p0.x + p1.x) * 0.5f, (p0.y + p1.y) * 0.5f};
+                    dl->AddCircle(mid, 5.0f, IM_COL32(100, 220, 255, 150), 12, 1.0f);
+                }
             }
-            dl->AddLine(p0, p1, edgeColor, edgeThick);
 
             // Portal midpoint arrow (small cyan triangle).
             if (isPortal)
             {
                 const float mx = (p0.x + p1.x) * 0.5f;
                 const float my = (p0.y + p1.y) * 0.5f;
-                // Perpendicular direction (pointing inward).
                 const float dx = p1.x - p0.x;
                 const float dy = p1.y - p0.y;
                 const float len = std::sqrt(dx * dx + dy * dy);
@@ -196,12 +303,13 @@ void Viewport2D::drawSectors(ImDrawList*            dl,
                     const float nx = -dy / len;
                     const float ny =  dx / len;
                     constexpr float sz = 5.0f;
-                    const ImVec2 tip  = {mx + nx * sz,       my + ny * sz};
-                    const ImVec2 bl   = {mx - nx * 2.0f - dx * 0.12f,
-                                         my - ny * 2.0f - dy * 0.12f};
-                    const ImVec2 br   = {mx - nx * 2.0f + dx * 0.12f,
-                                         my - ny * 2.0f + dy * 0.12f};
-                    dl->AddTriangleFilled(tip, bl, br, IM_COL32(0, 210, 210, 200));
+                    const ImVec2 tip = {mx + nx * sz, my + ny * sz};
+                    const ImVec2 bl  = {mx - nx * 2.0f - dx * 0.12f,
+                                        my - ny * 2.0f - dy * 0.12f};
+                    const ImVec2 br  = {mx - nx * 2.0f + dx * 0.12f,
+                                        my - ny * 2.0f + dy * 0.12f};
+                    dl->AddTriangleFilled(tip, bl, br,
+                                         applyOp(IM_COL32(0, 210, 210, 200)));
                 }
             }
         }
@@ -212,17 +320,110 @@ void Viewport2D::drawSectors(ImDrawList*            dl,
             const bool vertSel = (sel.type == SelectionType::Vertex &&
                                   sel.vertexSectorId == sid &&
                                   sel.vertexWallIndex == wi);
-            const float  radius = vertSel ? 6.0f : 3.0f;
-            const ImU32  col    = vertSel
+            const float radius = vertSel ? 6.0f : 3.0f;
+            const ImU32 col    = applyOp(vertSel
                 ? IM_COL32(255, 255, 180, 255)
                 : (sectSel ? IM_COL32(120, 180, 255, 220)
-                           : IM_COL32( 80, 130, 200, 180));
+                           : IM_COL32( 80, 130, 200, 180)));
             dl->AddCircleFilled(pts[wi], radius, col);
         }
     }
 }
 
-// ─── Entity icons ─────────────────────────────────────────────────────────────
+// ─── Detail brush XZ footprints ───────────────────────────────────────────────────────────────
+// Draws dashed XZ outlines for each detail brush in the map.  Uses the brush's
+// world-space transform matrix to correctly handle position and rotation.
+
+void Viewport2D::drawDetailBrushFootprints(ImDrawList*            dl,
+                                            const EditMapDocument& doc,
+                                            glm::vec2              canvasMin) const
+{
+    constexpr ImU32 kBoxCol  = IM_COL32(180, 120, 200, 160);   // box / wedge: purple
+    constexpr ImU32 kCylCol  = IM_COL32(120, 200, 120, 160);   // cylinder: green
+    constexpr ImU32 kArchCol = IM_COL32(200, 160,  80, 160);   // arch: amber
+
+    const auto& sectors = doc.mapData().sectors;
+    for (const auto& sector : sectors)
+    {
+        for (const auto& db : sector.details)
+        {
+            // World-space position of the brush (XZ).
+            const glm::vec2 pos{db.transform[3].x, db.transform[3].z};
+
+            // Extract local X and Z axes in world XZ (columns 0 and 2 of mat4).
+            // These carry both rotation and scale.
+            const glm::vec2 axisX{db.transform[0].x, db.transform[0].z};
+            const glm::vec2 axisZ{db.transform[2].x, db.transform[2].z};
+
+            switch (db.type)
+            {
+            case world::DetailBrushType::Box:
+            case world::DetailBrushType::Wedge:
+            {
+                // Four corners: pos ± (axisX * halfX) ± (axisZ * halfZ)
+                const float hx = db.geom.halfExtents.x;
+                const float hz = db.geom.halfExtents.z;
+                const glm::vec2 corners[4] = {
+                    pos - axisX * hx - axisZ * hz,
+                    pos + axisX * hx - axisZ * hz,
+                    pos + axisX * hx + axisZ * hz,
+                    pos - axisX * hx + axisZ * hz,
+                };
+                for (int ci = 0; ci < 4; ++ci)
+                {
+                    const auto a = mapToScreen(corners[ci],         canvasMin);
+                    const auto b = mapToScreen(corners[(ci + 1) % 4], canvasMin);
+                    addDashedLine(dl, {a.x, a.y}, {b.x, b.y}, kBoxCol);
+                }
+                break;
+            }
+            case world::DetailBrushType::Cylinder:
+            {
+                // Approximate as a 16-segment circle scaled by radius.
+                // Use the XZ scale of the transform to size it correctly.
+                const float scaleXZ = std::max(glm::length(axisX), glm::length(axisZ));
+                const float r       = db.geom.radius * scaleXZ;
+                constexpr int kSegs = 16;
+                for (int ci = 0; ci < kSegs; ++ci)
+                {
+                    const float a0 = glm::two_pi<float>() * static_cast<float>(ci)     / kSegs;
+                    const float a1 = glm::two_pi<float>() * static_cast<float>(ci + 1) / kSegs;
+                    const glm::vec2 p0 = pos + glm::vec2{std::cos(a0), std::sin(a0)} * r;
+                    const glm::vec2 p1 = pos + glm::vec2{std::cos(a1), std::sin(a1)} * r;
+                    const auto sp0 = mapToScreen(p0, canvasMin);
+                    const auto sp1 = mapToScreen(p1, canvasMin);
+                    addDashedLine(dl, {sp0.x, sp0.y}, {sp1.x, sp1.y}, kCylCol);
+                }
+                break;
+            }
+            case world::DetailBrushType::ArchSpan:
+            {
+                // Show as a rectangle: spanWidth × archHeight.
+                const float hw = db.geom.spanWidth  * 0.5f;
+                const float hd = db.geom.thickness  * 0.5f;
+                const glm::vec2 corners[4] = {
+                    pos - axisX * hw - axisZ * hd,
+                    pos + axisX * hw - axisZ * hd,
+                    pos + axisX * hw + axisZ * hd,
+                    pos - axisX * hw + axisZ * hd,
+                };
+                for (int ci = 0; ci < 4; ++ci)
+                {
+                    const auto a = mapToScreen(corners[ci],           canvasMin);
+                    const auto b = mapToScreen(corners[(ci + 1) % 4], canvasMin);
+                    addDashedLine(dl, {a.x, a.y}, {b.x, b.y}, kArchCol);
+                }
+                break;
+            }
+            default:
+                // ImportedMesh: no footprint available at edit time.
+                break;
+            }
+        }
+    }
+}
+
+// ─── Entity icons ─────────────────────────────────────────────────────────────────────────
 
 void Viewport2D::drawEntities(ImDrawList*            dl,
                                const EditMapDocument& doc,
@@ -334,7 +535,8 @@ void Viewport2D::draw(EditMapDocument& doc,
                        IEditorTool*     activeTool,
                        DrawSectorTool*  drawTool,
                        SelectTool*      selectTool,
-                       VertexTool*      vertexTool)
+                       VertexTool*      vertexTool,
+                       FloorLayerPanel* floorLayer)
 {
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
     const bool windowOpen = ImGui::Begin("2D Viewport");
@@ -479,7 +681,8 @@ void Viewport2D::draw(EditMapDocument& doc,
 
     if (m_gridVisible)
         drawGrid(dl, canvasMin, canvasMax);
-    drawSectors(dl, doc, canvasMin);
+    drawSectors(dl, doc, canvasMin, floorLayer);
+    drawDetailBrushFootprints(dl, doc, canvasMin);
 
     // ── Continuous validation overlay ─────────────────────────────────────
     if (doc.isGeometryDirty())
@@ -771,6 +974,20 @@ void Viewport2D::draw(EditMapDocument& doc,
             m_pendingPlacementPos   = mouseMap;
         }
 
+        // ── Curve handle drag (live update on move) ─────────────────────────────
+        if (m_curveDragActive && ImGui::IsMouseDown(ImGuiMouseButton_Left))
+        {
+            const auto& sectors = doc.mapData().sectors;
+            if (m_curveDragSectorId < sectors.size() &&
+                m_curveDragWallIndex < sectors[m_curveDragSectorId].walls.size())
+            {
+                doc.mapData().sectors[m_curveDragSectorId].walls[m_curveDragWallIndex]
+                    .curveControlA = mouseMap;
+                m_curveDragMoved = true;
+                doc.markDirty();
+            }
+        }
+
         // Tool mouse events (snapped coordinates) — suppressed while placement pending.
         if (activeTool && m_pendingPlacement == PendingPlacement::None)
         {
@@ -780,6 +997,56 @@ void Viewport2D::draw(EditMapDocument& doc,
             {
                 const ImGuiIO& clickIO = ImGui::GetIO();
                 constexpr float kHitR = 10.0f;  ///< Icon hit radius in screen pixels.
+
+                // Ctrl+LMB: start a Bezier curve handle drag on the nearest wall midpoint.
+                bool handledByCtrl = false;
+                if (clickIO.KeyCtrl && !clickIO.KeyAlt)
+                {
+                    constexpr float kMidHitSq = 12.0f * 12.0f;  // screen pixels²
+                    float           bestSq     = kMidHitSq;
+                    world::SectorId bestSid    = world::INVALID_SECTOR_ID;
+                    std::size_t     bestWi     = 0;
+
+                    const auto& sectors = doc.mapData().sectors;
+                    for (std::size_t si = 0; si < sectors.size(); ++si)
+                    {
+                        const auto&       sec = sectors[si];
+                        const std::size_t ns  = sec.walls.size();
+                        for (std::size_t wi = 0; wi < ns; ++wi)
+                        {
+                            const glm::vec2 mid =
+                                (sec.walls[wi].p0 + sec.walls[(wi + 1) % ns].p0) * 0.5f;
+                            const glm::vec2 sMid = mapToScreen(mid, canvasMin);
+                            const float dx = mousePosV.x - sMid.x;
+                            const float dy = mousePosV.y - sMid.y;
+                            const float sq = dx * dx + dy * dy;
+                            if (sq < bestSq)
+                            {
+                                bestSq  = sq;
+                                bestSid = static_cast<world::SectorId>(si);
+                                bestWi  = wi;
+                            }
+                        }
+                    }
+
+                    if (bestSid != world::INVALID_SECTOR_ID)
+                    {
+                        m_curveDragActive    = true;
+                        m_curveDragSectorId  = bestSid;
+                        m_curveDragWallIndex = bestWi;
+                        m_curveDragOldControlA =
+                            sectors[bestSid].walls[bestWi].curveControlA;
+                        m_curveDragMoved = false;
+                        handledByCtrl = true;
+                    }
+                }
+
+                if (handledByCtrl)
+                {
+                    // Curve drag started; suppress normal click handling this frame.
+                }
+                else
+                {
 
                 // Alt+LMB: split the nearest wall at the clicked map position.
                 bool handledByAlt = false;
@@ -912,6 +1179,7 @@ void Viewport2D::draw(EditMapDocument& doc,
                     }
                 }
             }  // if (!handledByAlt)
+                }  // else (not handledByCtrl)
             }  // if (IsMouseClicked LMB)
             if (ImGui::IsMouseClicked(ImGuiMouseButton_Right))
             {
@@ -972,7 +1240,29 @@ void Viewport2D::draw(EditMapDocument& doc,
     // drag flags dangling and caused spurious deselection on the next Properties click.
     if (ImGui::IsMouseReleased(ImGuiMouseButton_Left))
     {
-        if (m_psDragActive)
+        // Commit curve handle drag as an undoable command.
+        if (m_curveDragActive)
+        {
+            m_curveDragActive = false;
+            if (m_curveDragMoved)
+            {
+                const auto& sectors = doc.mapData().sectors;
+                if (m_curveDragSectorId < sectors.size() &&
+                    m_curveDragWallIndex < sectors[m_curveDragSectorId].walls.size())
+                {
+                    const auto& wall = sectors[m_curveDragSectorId].walls[m_curveDragWallIndex];
+                    // Restore the old value so CmdSetWallCurve captures the correct original.
+                    const std::optional<glm::vec2> finalCp = wall.curveControlA;
+                    doc.mapData().sectors[m_curveDragSectorId]
+                        .walls[m_curveDragWallIndex].curveControlA = m_curveDragOldControlA;
+                    doc.pushCommand(std::make_unique<CmdSetWallCurve>(
+                        doc, m_curveDragSectorId, m_curveDragWallIndex,
+                        finalCp, wall.curveControlB, wall.curveSubdivisions));
+                }
+                m_curveDragMoved = false;
+            }
+        }
+        else if (m_psDragActive)
         {
             // Commit the player start move if position actually changed.
             if (doc.playerStart().has_value())
