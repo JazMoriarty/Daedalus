@@ -389,7 +389,7 @@ void HelpPanel::drawKeyboard()
 
     ImGui::Spacing();
     ImGui::SeparatorText("Advanced Geometry");
-    KeyRow("Ctrl+drag",    "Drag a wall midpoint to add / edit a Bezier curve handle (2D viewport)");
+    KeyRow("LMB drag",     "Drag a wall midpoint handle (cyan circle) to add / edit a Bezier curve");
 
     ImGui::Spacing();
     ImGui::SeparatorText("Terrain Paint  (fly mode + Heightfield sector selected)");
@@ -471,12 +471,10 @@ void HelpPanel::draw2DViewport()
     ImGui::SeparatorText("Bezier Curve Arc Overlay");
     Bullet("Walls with an active Bezier curve handle are drawn as a smooth arc "
            "rather than a straight segment.");
-    Bullet("A cyan diamond handle marks the position of the control point, "
-           "connected to the wall midpoint by a faint stem line.  Drag the diamond "
-           "in the Properties panel to reposition it, or Ctrl+drag the wall midpoint "
-           "directly in the 2D viewport to create or move it.");
-    Tip("While Ctrl is held, small circles appear at the midpoint of every straight "
-        "wall as a hint that you can drag there to add a curve.");
+    Bullet("Every wall always shows a small cyan midpoint circle.  The circle "
+           "brightens when the cursor is near it.  Click and drag it to create or "
+           "move the Bezier control point.  A cyan diamond and stem line show the "
+           "active control point position.");
 
     ImGui::Spacing();
     ImGui::SeparatorText("Detail Brush Footprints");
@@ -680,9 +678,10 @@ void HelpPanel::drawTools()
     // ─ Bezier curve handles ─────────────────────────────────────────
     ImGui::SeparatorText("Bezier Curve Handles  (Select / Draw Sector tool)");
     ImGui::TextWrapped(
-        "Hold Ctrl and drag the midpoint of any wall in the 2D viewport to pull "
-        "out a Bezier control handle.  The wall immediately bends into a smooth arc; "
-        "both the 2D and 3D viewports update in real time.");
+        "Every wall has a small cyan midpoint handle circle.  Drag it directly "
+        "in the 2D viewport to pull out a Bezier control handle.  The wall "
+        "immediately bends into a smooth arc; both the 2D and 3D viewports "
+        "update in real time.  No modifier key is required.");
     Bullet("One control point — quadratic Bezier (smooth arc).");
     Bullet("Enable \"Cubic (add B)\" in Properties > Bezier Curve to add a second "
            "control point for an S-curve.");
@@ -1410,8 +1409,8 @@ void HelpPanel::drawAdvancedGeometry()
         "Any wall can be bent into a smooth Bezier arc.  "
         "The tessellator subdivides it into straight-segment quads so the "
         "3D mesh is always smooth.");
-    Bullet("Ctrl+drag the midpoint of a wall in the 2D viewport to create a "
-           "quadratic Bezier curve (one control point).");
+    Bullet("Drag the cyan midpoint handle circle of a wall in the 2D viewport "
+           "to create a quadratic Bezier curve (one control point).");
     Bullet("Enable \"Cubic (add B)\" in Properties > Bezier Curve for an "
            "S-curve with two independent control points.");
     Bullet("Subdivisions (4–64) controls arc resolution.  Default 12 is smooth "

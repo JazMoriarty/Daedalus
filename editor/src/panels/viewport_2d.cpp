@@ -163,9 +163,6 @@ void Viewport2D::drawSectors(ImDrawList*            dl,
     const auto&           map = doc.mapData();
     const SelectionState& sel = doc.selection();
 
-    // Whether the cursor is held over a wall midpoint with Ctrl for curve creation.
-    const bool ctrlHeld = ImGui::GetIO().KeyCtrl;
-
     for (std::size_t si = 0; si < map.sectors.size(); ++si)
     {
         // Skip sectors on hidden layers.
@@ -226,6 +223,28 @@ void Viewport2D::drawSectors(ImDrawList*            dl,
             else               { edgeColor = IM_COL32(80,  130, 200, 180); edgeThick = 1.5f; }
             edgeColor = applyOp(edgeColor);
 
+            // Always draw a small midpoint handle circle so the user can
+            // click-drag it to create or edit a Bezier curve.  The handle is
+            // cyan (bright) when the cursor is near it, or a faint hint colour
+            // otherwise.  This avoids requiring a modifier key (Ctrl+click is
+            // intercepted as right-click by macOS on many configurations).
+            {
+                const glm::vec2 mapMid = (wall.p0 + sector.walls[(wi + 1) % n].p0) * 0.5f;
+                const glm::vec2 sMidV  = mapToScreen(mapMid, canvasMin);
+                const ImVec2    sMid   = {sMidV.x, sMidV.y};
+
+                // Is the cursor near this midpoint handle?
+                const ImVec2 mp = ImGui::GetIO().MousePos;
+                const float  dx = mp.x - sMid.x;
+                const float  dy = mp.y - sMid.y;
+                const bool   nearHandle = (dx*dx + dy*dy) <= 14.0f * 14.0f;
+
+                const ImU32 handleCol =
+                    nearHandle ? IM_COL32(100, 220, 255, 220)
+                              : IM_COL32(100, 220, 255,  60);
+                dl->AddCircle(sMid, 5.5f, applyOp(handleCol), 12, 1.2f);
+            }
+
             if (wall.curveControlA.has_value())
             {
                 // ── Bezier arc ───────────────────────────────────────────────────
@@ -280,14 +299,6 @@ void Viewport2D::drawSectors(ImDrawList*            dl,
             {
                 // Straight wall segment.
                 dl->AddLine(p0, p1, edgeColor, edgeThick);
-
-                // Ctrl-hover hint: small circle at wall midpoint when Ctrl is held
-                // to indicate "drag here to add a Bezier curve".
-                if (ctrlHeld && !dimmed)
-                {
-                    const ImVec2 mid{(p0.x + p1.x) * 0.5f, (p0.y + p1.y) * 0.5f};
-                    dl->AddCircle(mid, 5.0f, IM_COL32(100, 220, 255, 150), 12, 1.0f);
-                }
             }
 
             // Portal midpoint arrow (small cyan triangle).
@@ -998,11 +1009,13 @@ void Viewport2D::draw(EditMapDocument& doc,
                 const ImGuiIO& clickIO = ImGui::GetIO();
                 constexpr float kHitR = 10.0f;  ///< Icon hit radius in screen pixels.
 
-                // Ctrl+LMB: start a Bezier curve handle drag on the nearest wall midpoint.
-                bool handledByCtrl = false;
-                if (clickIO.KeyCtrl && !clickIO.KeyAlt)
+                // Midpoint handle click: start a Bezier curve drag when the cursor
+                // is on a wall midpoint handle circle.  No modifier key required —
+                // this avoids the macOS Ctrl+click → right-click OS interception.
+                bool handledByMidpoint = false;
+                if (!clickIO.KeyAlt)  // Alt is reserved for wall split
                 {
-                    constexpr float kMidHitSq = 12.0f * 12.0f;  // screen pixels²
+                    constexpr float kMidHitSq = 14.0f * 14.0f;  // screen pixels², matches visual
                     float           bestSq     = kMidHitSq;
                     world::SectorId bestSid    = world::INVALID_SECTOR_ID;
                     std::size_t     bestWi     = 0;
@@ -1037,11 +1050,11 @@ void Viewport2D::draw(EditMapDocument& doc,
                         m_curveDragOldControlA =
                             sectors[bestSid].walls[bestWi].curveControlA;
                         m_curveDragMoved = false;
-                        handledByCtrl = true;
+                        handledByMidpoint = true;
                     }
                 }
 
-                if (handledByCtrl)
+                if (handledByMidpoint)
                 {
                     // Curve drag started; suppress normal click handling this frame.
                 }
