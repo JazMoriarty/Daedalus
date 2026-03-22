@@ -50,6 +50,9 @@ private:
     struct Preset { std::string name; float y; };
     std::vector<Preset> m_presets;
 
+    /// Inline buffer for the "add preset" name field.
+    char m_addPresetBuf[64] = "Floor ";
+
     /// Transitive portal-linked group starting from `seed`.
     static std::vector<world::SectorId> collectLayer(const EditMapDocument& doc,
                                                      world::SectorId        seed);
