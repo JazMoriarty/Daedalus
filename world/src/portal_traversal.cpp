@@ -40,24 +40,22 @@ namespace daedalus::world
 namespace
 {
 
-// Project a world-space point through viewProj, returning its NDC position.
-// Returns a point where w is stored in z as a sentinel for behind-camera.
-[[nodiscard]] glm::vec3 projectToNDC(const glm::vec3& worldPos,
-                                      const glm::mat4& viewProj) noexcept
-{
-    const glm::vec4 clip = viewProj * glm::vec4(worldPos, 1.0f);
-    if (clip.w <= 0.0f)
-    {
-        // Point is behind the camera; return a sentinel with w<0.
-        return glm::vec3(0.0f, 0.0f, -1.0f);
-    }
-    return glm::vec3(clip.x / clip.w, clip.y / clip.w, clip.w);
-}
+// When the camera is standing exactly on a portal wall all four portal corners
+// project to clip.w = 0 (view-space depth = 0).  The clip.w <= 0 guard marks
+// them all as "behind", anyVisible stays false, and the old early-out fired —
+// silently dropping the adjacent sector from the visible list regardless of
+// look direction.
+//
+// The fix: track the maximum |clip.w| among behind-or-at-plane corners.
+// A small value (< kBoundaryEps) means the camera is at the portal plane →
+// force full-screen.  A large value means the portal is genuinely behind the
+// camera → skip it as before.
+static constexpr float kBoundaryEps = 0.5f;  // world units
 
 // Compute the 2D NDC AABB of a portal opening.
 // The portal spans from (x0,z0) to (x1,z1) horizontally and
 // floorY to ceilY vertically.
-// Returns false if the opening is entirely behind the camera.
+// Returns false if the opening is entirely and clearly behind the camera.
 [[nodiscard]] bool portalNDCBounds(const glm::vec2& wallP0,
                                     const glm::vec2& wallP1,
                                     float            floorY,
@@ -66,7 +64,6 @@ namespace
                                     glm::vec2&       outMin,
                                     glm::vec2&       outMax) noexcept
 {
-    // Four corners of the portal opening in world space.
     const glm::vec3 corners[4] =
     {
         {wallP0.x, floorY, wallP0.y},
@@ -77,31 +74,45 @@ namespace
 
     glm::vec2 ndcMin = glm::vec2( 2.0f,  2.0f);
     glm::vec2 ndcMax = glm::vec2(-2.0f, -2.0f);
-    bool anyVisible  = false;
-    bool anyBehind   = false;
+    bool  anyVisible    = false;
+    bool  anyBehind     = false;
+    float behindMaxAbsW = 0.0f;  // max |clip.w| for at-or-behind-plane corners
 
     for (const auto& c : corners)
     {
-        const glm::vec3 ndc = projectToNDC(c, viewProj);
-        if (ndc.z < 0.0f)
+        const glm::vec4 clip = viewProj * glm::vec4(c, 1.0f);
+        if (clip.w <= 0.0f)
         {
-            anyBehind = true;  // behind camera sentinel
+            anyBehind     = true;
+            behindMaxAbsW = std::max(behindMaxAbsW, std::abs(clip.w));
             continue;
         }
-
-        ndcMin.x = std::min(ndcMin.x, ndc.x);
-        ndcMin.y = std::min(ndcMin.y, ndc.y);
-        ndcMax.x = std::max(ndcMax.x, ndc.x);
-        ndcMax.y = std::max(ndcMax.y, ndc.y);
+        const float invW = 1.0f / clip.w;
+        ndcMin.x = std::min(ndcMin.x, clip.x * invW);
+        ndcMin.y = std::min(ndcMin.y, clip.y * invW);
+        ndcMax.x = std::max(ndcMax.x, clip.x * invW);
+        ndcMax.y = std::max(ndcMax.y, clip.y * invW);
         anyVisible = true;
     }
 
-    if (!anyVisible) { return false; }
+    if (!anyVisible)
+    {
+        // All corners are at or behind the near plane.
+        // If they are close to the plane (|w| < kBoundaryEps) the camera is
+        // sitting on the portal wall — force full-screen so the adjacent sector
+        // always renders regardless of look direction.
+        // If they are far behind (|w| >= kBoundaryEps) the portal is genuinely
+        // behind the camera and should be skipped.
+        if (anyBehind && behindMaxAbsW < kBoundaryEps)
+        {
+            outMin = glm::vec2(-1.0f, -1.0f);
+            outMax = glm::vec2( 1.0f,  1.0f);
+            return true;
+        }
+        return false;
+    }
 
-    // If the opening straddles the near plane (some corners in front, some behind),
-    // the simple corner-AABB projection underestimates the true on-screen extent and
-    // can incorrectly cull portals (causing "sky holes"). Use a conservative full
-    // screen window in this case so traversal remains stable.
+    // Some corners in front, some behind — conservative full-screen window.
     if (anyBehind)
     {
         outMin = glm::vec2(-1.0f, -1.0f);
@@ -109,7 +120,6 @@ namespace
         return true;
     }
 
-    // Clamp to screen bounds.
     outMin = glm::clamp(ndcMin, glm::vec2(-1.0f), glm::vec2(1.0f));
     outMax = glm::clamp(ndcMax, glm::vec2(-1.0f), glm::vec2(1.0f));
     return true;
@@ -126,12 +136,8 @@ namespace
     return (outMax.x - outMin.x > k_epsilon) && (outMax.y - outMin.y > k_epsilon);
 }
 
-// Compute the 2D NDC AABB of a horizontal portal opening.
-// The opening is the sector's XZ polygon (polygonPts) at world Y = y.
-// Used for floor portals (y = sector.floorHeight) and ceiling portals
-// (y = sector.ceilHeight).  Follows the same conservative near-plane
-// straddling logic as portalNDCBounds.
-// Returns false if the opening is entirely behind the camera.
+// Same boundary fix as portalNDCBounds — applied to floor/ceiling portal
+// polygon projections for Sector-Over-Sector traversal.
 [[nodiscard]] bool portalHorizontalNDCBounds(
     const std::vector<glm::vec2>& polygonPts,
     float            y,
@@ -141,21 +147,37 @@ namespace
 {
     glm::vec2 ndcMin( 2.0f,  2.0f);
     glm::vec2 ndcMax(-2.0f, -2.0f);
-    bool anyVisible = false;
-    bool anyBehind  = false;
+    bool  anyVisible    = false;
+    bool  anyBehind     = false;
+    float behindMaxAbsW = 0.0f;
 
     for (const auto& p : polygonPts)
     {
-        const glm::vec3 ndc = projectToNDC({p.x, y, p.y}, viewProj);
-        if (ndc.z < 0.0f) { anyBehind = true; continue; }
-        ndcMin.x = std::min(ndcMin.x, ndc.x);
-        ndcMin.y = std::min(ndcMin.y, ndc.y);
-        ndcMax.x = std::max(ndcMax.x, ndc.x);
-        ndcMax.y = std::max(ndcMax.y, ndc.y);
+        const glm::vec4 clip = viewProj * glm::vec4(p.x, y, p.y, 1.0f);
+        if (clip.w <= 0.0f)
+        {
+            anyBehind     = true;
+            behindMaxAbsW = std::max(behindMaxAbsW, std::abs(clip.w));
+            continue;
+        }
+        const float invW = 1.0f / clip.w;
+        ndcMin.x = std::min(ndcMin.x, clip.x * invW);
+        ndcMin.y = std::min(ndcMin.y, clip.y * invW);
+        ndcMax.x = std::max(ndcMax.x, clip.x * invW);
+        ndcMax.y = std::max(ndcMax.y, clip.y * invW);
         anyVisible = true;
     }
 
-    if (!anyVisible) { return false; }
+    if (!anyVisible)
+    {
+        if (anyBehind && behindMaxAbsW < kBoundaryEps)
+        {
+            outMin = glm::vec2(-1.0f, -1.0f);
+            outMax = glm::vec2( 1.0f,  1.0f);
+            return true;
+        }
+        return false;
+    }
     if (anyBehind)
     {
         outMin = glm::vec2(-1.0f, -1.0f);
@@ -166,6 +188,14 @@ namespace
     outMax = glm::clamp(ndcMax, glm::vec2(-1.0f), glm::vec2(1.0f));
     return true;
 }
+
+// Per-sector accumulated NDC window used by PortalTraversal::recurse.
+struct WindowState
+{
+    bool      valid = false;
+    glm::vec2 min   = glm::vec2(0.0f);
+    glm::vec2 max   = glm::vec2(0.0f);
+};
 
 } // anonymous namespace
 
@@ -188,14 +218,19 @@ public:
         std::vector<VisibleSector> result;
         result.reserve(numSectors);
 
-        // visited[i] == true once sector i has been added to result.
-        std::vector<bool> visited(numSectors, false);
+        // Per-sector accumulated visible window.
+        // Using a window-merge approach instead of a boolean visited flag:
+        // a sector can be revisited when a new portal path provides a wider
+        // window than previously seen, updating the scissor rect for rendering.
+        std::vector<WindowState> windows(numSectors);
+        // Maps sector id -> index in result[], or -1 when not yet emitted.
+        std::vector<i32> resultIndex(numSectors, -1);
 
         const glm::vec2 fullMin(-1.0f, -1.0f);
         const glm::vec2 fullMax( 1.0f,  1.0f);
 
         recurse(mapData, cameraSector, viewProj, fullMin, fullMax,
-                0, maxDepth, visited, result);
+                0, maxDepth, windows, resultIndex, result);
 
         return result;
     }
@@ -208,14 +243,53 @@ private:
                  glm::vec2                 windowMax,
                  u32                       depth,
                  const u32                 maxDepth,
-                 std::vector<bool>&        visited,
+                 std::vector<WindowState>& windows,
+                 std::vector<i32>&         resultIndex,
                  std::vector<VisibleSector>& result) const
     {
         if (depth > maxDepth) { return; }
-        if (visited[sectorId])  { return; }
 
-        visited[sectorId] = true;
-        result.push_back({ sectorId, windowMin, windowMax });
+        // If we already reached this sector with an equal-or-larger window,
+        // no new visibility can be discovered through this path.
+        auto containsWindow = [](glm::vec2 aMin, glm::vec2 aMax,
+                                 glm::vec2 bMin, glm::vec2 bMax) noexcept
+        {
+            constexpr float eps = 1e-4f;
+            return (bMin.x >= aMin.x - eps) && (bMin.y >= aMin.y - eps) &&
+                   (bMax.x <= aMax.x + eps) && (bMax.y <= aMax.y + eps);
+        };
+
+        WindowState& ws = windows[sectorId];
+        if (ws.valid)
+        {
+            if (containsWindow(ws.min, ws.max, windowMin, windowMax))
+            {
+                return;
+            }
+            // Merge windows so alternate portal paths can widen coverage.
+            ws.min = glm::min(ws.min, windowMin);
+            ws.max = glm::max(ws.max, windowMax);
+            windowMin = ws.min;
+            windowMax = ws.max;
+        }
+        else
+        {
+            ws.valid = true;
+            ws.min   = windowMin;
+            ws.max   = windowMax;
+        }
+
+        if (resultIndex[sectorId] < 0)
+        {
+            resultIndex[sectorId] = static_cast<i32>(result.size());
+            result.push_back({ sectorId, windowMin, windowMax });
+        }
+        else
+        {
+            VisibleSector& vs = result[static_cast<std::size_t>(resultIndex[sectorId])];
+            vs.windowMin = windowMin;
+            vs.windowMax = windowMax;
+        }
 
         const Sector& sector    = mapData.sectors[sectorId];
         const auto    n         = sector.walls.size();
@@ -227,7 +301,6 @@ private:
             const Wall& wall = sector.walls[wi];
             if (wall.portalSectorId == INVALID_SECTOR_ID) { continue; }
             if (wall.portalSectorId >= numSectors)         { continue; }
-            if (visited[wall.portalSectorId])              { continue; }
 
             const glm::vec2 wallP1 = sector.walls[(wi + 1) % n].p0;
 
@@ -242,14 +315,30 @@ private:
                                  viewProj, portalMin, portalMax))
             { continue; }
 
-            glm::vec2 clippedMin, clippedMax;
+            // Verify the portal is within the current sector's visible window.
+            // The intersection is used only as a visibility gate — it is NOT
+            // propagated as the window for the adjacent sector.
+            //
+            // Propagating the clipped intersection causes two compounding bugs:
+            //   1. Each portal hop narrows the window further.  After 3+ hops the
+            //      window becomes a sliver; the renderer stamps this as the scissor
+            //      rect for that sector's draw calls, clipping almost all geometry.
+            //   2. The narrowed window can fail the epsilon test for the next portal,
+            //      skipping visible sectors entirely (traversal false negatives).
+            //
+            // Instead, the adjacent sector's scissor window is set to portalMin/Max —
+            // the direct NDC extent of the portal that leads into it.  This is the
+            // correct screen region to restrict that sector's rendering to (prevents
+            // geometry bleeding outside the portal opening), and it never shrinks
+            // below the true portal footprint regardless of chain depth.
+            glm::vec2 gateMin, gateMax;
             if (!intersectWindows(windowMin, windowMax, portalMin, portalMax,
-                                  clippedMin, clippedMax))
+                                  gateMin, gateMax))
             { continue; }
 
             recurse(mapData, wall.portalSectorId, viewProj,
-                    clippedMin, clippedMax,
-                    depth + 1, maxDepth, visited, result);
+                    portalMin, portalMax,
+                    depth + 1, maxDepth, windows, resultIndex, result);
         }
 
         // ── Floor and ceiling portals (Phase 1F-B) ─────────────────────────────
@@ -257,11 +346,9 @@ private:
         // portal projection.  Only allocated when at least one portal is set—
         // the common case (no SoS) pays zero allocation cost.
         const bool hasFloorPortal = (sector.floorPortalSectorId != INVALID_SECTOR_ID
-                                     && sector.floorPortalSectorId < numSectors
-                                     && !visited[sector.floorPortalSectorId]);
+                                     && sector.floorPortalSectorId < numSectors);
         const bool hasCeilPortal  = (sector.ceilPortalSectorId != INVALID_SECTOR_ID
-                                     && sector.ceilPortalSectorId < numSectors
-                                     && !visited[sector.ceilPortalSectorId]);
+                                     && sector.ceilPortalSectorId < numSectors);
 
         if (hasFloorPortal || hasCeilPortal)
         {
@@ -276,13 +363,13 @@ private:
                 if (portalHorizontalNDCBounds(poly, sector.floorHeight,
                                               viewProj, portalMin, portalMax))
                 {
-                    glm::vec2 clippedMin, clippedMax;
+                    glm::vec2 gateMin, gateMax;
                     if (intersectWindows(windowMin, windowMax, portalMin, portalMax,
-                                         clippedMin, clippedMax))
+                                         gateMin, gateMax))
                     {
                         recurse(mapData, sector.floorPortalSectorId, viewProj,
-                                clippedMin, clippedMax,
-                                depth + 1, maxDepth, visited, result);
+                                portalMin, portalMax,
+                                depth + 1, maxDepth, windows, resultIndex, result);
                     }
                 }
             }
@@ -293,13 +380,13 @@ private:
                 if (portalHorizontalNDCBounds(poly, sector.ceilHeight,
                                               viewProj, portalMin, portalMax))
                 {
-                    glm::vec2 clippedMin, clippedMax;
+                    glm::vec2 gateMin, gateMax;
                     if (intersectWindows(windowMin, windowMax, portalMin, portalMax,
-                                         clippedMin, clippedMax))
+                                         gateMin, gateMax))
                     {
                         recurse(mapData, sector.ceilPortalSectorId, viewProj,
-                                clippedMin, clippedMax,
-                                depth + 1, maxDepth, visited, result);
+                                portalMin, portalMax,
+                                depth + 1, maxDepth, windows, resultIndex, result);
                     }
                 }
             }

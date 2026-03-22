@@ -107,7 +107,7 @@ JoltPhysicsWorld::loadLevel(const world::WorldMapData& map)
         const float wallH  = ceilY - floorY;
         const float midY   = (floorY + ceilY) * 0.5f;
 
-        // ── Wall collision boxes ─────────────────────────────────────────────────────
+        // ── Wall collision boxes
         // Curved walls are subdivided into per-segment boxes so the collision
         // geometry follows the Bezier arc rather than the straight chord.
         // Without this, curved walls that open up space leave a phantom chord
@@ -155,8 +155,14 @@ JoltPhysicsWorld::loadLevel(const world::WorldMapData& map)
                 const float     segLen   = glm::length(segDelta);
                 if (segLen < 1.0e-4f) { continue; }
 
+                // Pass convexRadius=0 for static level geometry.  The
+                // default convex radius (0.05f) requires every half-extent
+                // to be strictly > 0.05f, which short portal-boundary wall
+                // segments violate (segLen*0.5f <= 0.05f).  Zero convex
+                // radius is correct and stable for non-moving bodies.
                 JPH::Ref<JPH::Shape> shape = new JPH::BoxShape(
-                    JPH::Vec3(segLen * 0.5f, wallH * 0.5f, kWallHalfThick)
+                    JPH::Vec3(segLen * 0.5f, wallH * 0.5f, kWallHalfThick),
+                    0.0f
                 );
 
                 const float midX  = (sp0.x + sp1.x) * 0.5f;
@@ -218,7 +224,7 @@ JoltPhysicsWorld::loadLevel(const world::WorldMapData& map)
             if (hx > 1.0e-4f && hz > 1.0e-4f)
             {
                 JPH::Ref<JPH::Shape> slab =
-                    new JPH::BoxShape(JPH::Vec3(hx, kSlabHalfThick, hz));
+                    new JPH::BoxShape(JPH::Vec3(hx, kSlabHalfThick, hz), 0.0f);
 
                 JPH::BodyCreationSettings bcs(
                     slab,

@@ -201,8 +201,11 @@ void Viewport2D::drawSectors(ImDrawList*            dl,
             pts.push_back({s.x, s.y});
         }
 
-        // Filled polygon.
-        dl->AddConvexPolyFilled(pts.data(), static_cast<int>(pts.size()),
+        // Filled polygon.  AddConcavePolyFilled handles both convex and
+        // concave simple polygons correctly; AddConvexPolyFilled uses a
+        // triangle fan from vertex 0 which produces phantom triangles
+        // outside concave (e.g. L-shaped) sectors.
+        dl->AddConcavePolyFilled(pts.data(), static_cast<int>(pts.size()),
             applyOp(sectSel ? IM_COL32(80, 130, 200, 60)
                             : IM_COL32(50,  80, 120, 40)));
 
