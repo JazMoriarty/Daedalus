@@ -1347,13 +1347,17 @@ int main(int argc, char* argv[])
                 glm::radians(60.0f), fpAspect, 0.1f, 500.0f);
 
             // ── Portal traversal ──────────────────────────────────────────────
-            world::SectorId dlCamSector =
-                dlWorldMap->findSector({fpCamPos.x, fpCamPos.z});
-            if (dlCamSector == world::INVALID_SECTOR_ID) { dlCamSector = 0u; }
+            // Use findSectorAt (3D, same as the editor viewport) so the Y-range
+            // check correctly disambiguates stacked sectors and so the function
+            // returns INVALID_SECTOR_ID when the camera is in the chord-gap region
+            // of a curved wall (the sector polygon uses the straight chord, not the
+            // Bezier arc, so the space between chord and curve is outside every
+            // sector's polygon).
+            const world::SectorId dlCamSector =
+                dlWorldMap->findSectorAt(
+                    glm::vec3(fpCamPos.x, fpCamPos.y, fpCamPos.z));
 
             const glm::mat4 fpViewProj = fpProj * fpView;
-            const auto dlVisibleSectors =
-                dlPortalTraversal->traverse(*dlWorldMap, dlCamSector, fpViewProj);
 
             // ── Build SceneView ───────────────────────────────────────────────
             render::SceneView fpScene;
@@ -1362,34 +1366,59 @@ int main(int argc, char* argv[])
             const float fW = static_cast<float>(dlSwapW);
             const float fH = static_cast<float>(dlSwapH);
 
-            for (const auto& vs : dlVisibleSectors)
+            if (dlCamSector != world::INVALID_SECTOR_ID)
             {
-                if (vs.sectorId >= numSectors) { continue; }
+                // Normal case: camera is inside a known sector.
+                const auto dlVisibleSectors =
+                    dlPortalTraversal->traverse(*dlWorldMap, dlCamSector, fpViewProj);
 
-                // Compute pixel scissor rect from NDC window min/max.
-                const float px0f = (vs.windowMin.x + 1.0f) * 0.5f * fW;
-                const float py0f = (1.0f - vs.windowMax.y) * 0.5f * fH;
-                const float px1f = (vs.windowMax.x + 1.0f) * 0.5f * fW;
-                const float py1f = (1.0f - vs.windowMin.y) * 0.5f * fH;
-
-                rhi::ScissorRect sr;
-                sr.x      = static_cast<u32>(std::max(0.0f, std::floor(px0f)));
-                sr.y      = static_cast<u32>(std::max(0.0f, std::floor(py0f)));
-                sr.width  = static_cast<u32>(std::min(fW, std::ceil(px1f)))
-                            - sr.x;
-                sr.height = static_cast<u32>(std::min(fH, std::ceil(py1f)))
-                            - sr.y;
-
-                const bool scissorValid = (sr.width > 0 && sr.height > 0);
-
-                for (const auto& draw : sectorDraws[vs.sectorId])
+                for (const auto& vs : dlVisibleSectors)
                 {
-                    if (draw.vertexBuffer == nullptr) { continue; }
+                    if (vs.sectorId >= numSectors) { continue; }
 
-                    render::MeshDraw d = draw;
-                    d.scissorValid = scissorValid;
-                    d.scissorRect  = sr;
-                    fpScene.meshDraws.push_back(std::move(d));
+                    // Compute pixel scissor rect from NDC window min/max.
+                    const float px0f = (vs.windowMin.x + 1.0f) * 0.5f * fW;
+                    const float py0f = (1.0f - vs.windowMax.y) * 0.5f * fH;
+                    const float px1f = (vs.windowMax.x + 1.0f) * 0.5f * fW;
+                    const float py1f = (1.0f - vs.windowMin.y) * 0.5f * fH;
+
+                    rhi::ScissorRect sr;
+                    sr.x      = static_cast<i32>(std::max(0.0f, std::floor(px0f)));
+                    sr.y      = static_cast<i32>(std::max(0.0f, std::floor(py0f)));
+                    sr.width  = static_cast<u32>(std::min(fW, std::ceil(px1f)))
+                                - static_cast<u32>(std::max(0, sr.x));
+                    sr.height = static_cast<u32>(std::min(fH, std::ceil(py1f)))
+                                - static_cast<u32>(std::max(0, sr.y));
+
+                    const bool scissorValid = (sr.width > 0 && sr.height > 0);
+
+                    for (const auto& draw : sectorDraws[vs.sectorId])
+                    {
+                        if (draw.vertexBuffer == nullptr) { continue; }
+
+                        render::MeshDraw d = draw;
+                        d.scissorValid = scissorValid;
+                        d.scissorRect  = sr;
+                        fpScene.meshDraws.push_back(std::move(d));
+                    }
+                }
+            }
+            else
+            {
+                // Camera is in a chord-gap region (between a curved wall's chord
+                // and its Bezier arc) or genuinely outside the map.  Submit all
+                // sectors without scissor clipping so rendering stays correct
+                // during this transitional period — identical to the editor
+                // viewport's fallback behaviour.
+                for (u32 si = 0; si < numSectors; ++si)
+                {
+                    for (const auto& draw : sectorDraws[si])
+                    {
+                        if (draw.vertexBuffer == nullptr) { continue; }
+                        render::MeshDraw d = draw;
+                        d.scissorValid = false;
+                        fpScene.meshDraws.push_back(std::move(d));
+                    }
                 }
             }
 
