@@ -564,16 +564,24 @@ void FrameRenderer::createPersistentResources(IRenderDevice& device, u32 w, u32 
         m_linearClampSampler = device.createSampler(d);
     }
 
-    // Linear-repeat sampler (used by G-buffer material texture sampling)
+    // Linear-repeat sampler (used by G-buffer material texture sampling).
+    // maxAnisotropy=16: at oblique viewing angles the screen-space UV footprint
+    // is elongated (large gradient in one axis, small in the other).  With
+    // anisotropy=1 the mip selector must use the worst-case (largest) gradient
+    // axis, driving mip selection 3-4 levels too high and making normal maps go
+    // flat long before they should.  16x anisotropy lets the GPU use a 16:1
+    // ratio between the two gradient axes, preserving detail in the
+    // low-gradient direction without reintroducing aliasing in the other.
     {
         SamplerDescriptor d;
-        d.magFilter  = SamplerDescriptor::Filter::Linear;
-        d.minFilter  = SamplerDescriptor::Filter::Linear;
-        d.mipFilter  = SamplerDescriptor::Filter::Linear;
-        d.addressU   = SamplerDescriptor::AddressMode::Repeat;
-        d.addressV   = SamplerDescriptor::AddressMode::Repeat;
-        d.addressW   = SamplerDescriptor::AddressMode::Repeat;
-        d.debugName  = "LinearRepeat";
+        d.magFilter      = SamplerDescriptor::Filter::Linear;
+        d.minFilter      = SamplerDescriptor::Filter::Linear;
+        d.mipFilter      = SamplerDescriptor::Filter::Linear;
+        d.addressU       = SamplerDescriptor::AddressMode::Repeat;
+        d.addressV       = SamplerDescriptor::AddressMode::Repeat;
+        d.addressW       = SamplerDescriptor::AddressMode::Repeat;
+        d.maxAnisotropy  = 16.0f;
+        d.debugName      = "LinearRepeat";
         m_linearRepeatSampler = device.createSampler(d);
     }
 
