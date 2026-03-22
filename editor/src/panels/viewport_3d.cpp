@@ -365,78 +365,239 @@ void Viewport3D::drawTerrainAndHeightOverlays(EditMapDocument&  doc,
                     brushCol, 1.5f);
     }
 
-    // ── Per-vertex height handles (Vertex selection, not captured) ─────────────────────
+    // ── Per-vertex height handles (all selected vertices, non-fly mode only) ─────────
+    //
+    // Rules:
+    //  • Handles shown for every item in the selection when type == Vertex.
+    //  • Handle index i*2 = floor, i*2+1 = ceil for sel.items[i].
+    //  • LMB drag on any handle moves that surface (floor or ceil) on ALL
+    //    currently selected vertices by the same Y delta.  Upward mouse drag
+    //    increases height (natural: pull up to raise).
+    //  • Drag commits a single CompoundCommand wrapping one CmdSetVertexHeight
+    //    per vertex so the whole operation is one undo step.
+    //  • Scroll wheel on a hovered handle also adjusts height (quick nudge),
+    //    and the event is consumed so the camera does not dolly simultaneously.
     if (!m_mouseCaptured)
     {
         const SelectionState& sel = doc.selection();
-        if (sel.hasSingleOf(SelectionType::Vertex) &&
-            sel.items[0].sectorId != world::INVALID_SECTOR_ID)
-        {
-            const auto& sectors  = doc.mapData().sectors;
-            const world::SectorId sid = sel.items[0].sectorId;
-            if (sid >= static_cast<world::SectorId>(sectors.size())) return;
+        const bool hasVertexSel   = (sel.uniformType() == SelectionType::Vertex &&
+                                     !sel.items.empty());
 
-            const world::Sector& sector = sectors[sid];
-            const std::size_t    ns     = sector.walls.size();
+        if (hasVertexSel)
+        {
+            auto& sectors        = doc.mapData().sectors;
             const ImVec2 mousePos = ImGui::GetIO().MousePos;
 
             constexpr float kHandleR = 6.0f;
             constexpr float kHitR    = kHandleR + 4.0f;
 
+            auto distSq = [](ImVec2 a, ImVec2 b) noexcept {
+                const float dx = a.x - b.x; const float dy = a.y - b.y;
+                return dx*dx + dy*dy;
+            };
+
             int newHovered = -1;
 
-            for (std::size_t vi = 0; vi < ns; ++vi)
+            // ── Draw handles and detect hover ──────────────────────────────────────────
+            for (int ii = 0; ii < static_cast<int>(sel.items.size()); ++ii)
             {
-                const world::Wall& wall = sector.walls[vi];
+                const SelectionItem& item = sel.items[static_cast<std::size_t>(ii)];
+                const world::SectorId sid = item.sectorId;
+                if (sid >= static_cast<world::SectorId>(sectors.size())) continue;
+                const std::size_t wi = item.index;
+                const world::Sector& sector = sectors[sid];
+                if (wi >= sector.walls.size()) continue;
+
+                const world::Wall& wall = sector.walls[wi];
                 const float floorY = wall.floorHeightOverride.value_or(sector.floorHeight);
                 const float ceilY  = wall.ceilHeightOverride.value_or(sector.ceilHeight);
 
                 const ImVec2 floorScreen = projectWorld({wall.p0.x, floorY, wall.p0.y});
                 const ImVec2 ceilScreen  = projectWorld({wall.p0.x, ceilY,  wall.p0.y});
 
-                // Floor handle (cyan)
-                const int floorHandle = static_cast<int>(vi) * 2;
-                const bool floorHov   = (m_hoveredHeightHandle == floorHandle);
+                const int floorHandle = ii * 2;
+                const int ceilHandle  = ii * 2 + 1;
+                const bool floorHov   = (m_hoveredHeightHandle == floorHandle ||
+                                         (m_heightDragActive && m_heightDragIsFloor));
+                const bool ceilHov    = (m_hoveredHeightHandle == ceilHandle ||
+                                         (m_heightDragActive && !m_heightDragIsFloor));
+
+                // Floor handle — cyan
                 dl->AddCircleFilled(floorScreen, kHandleR,
-                    floorHov ? IM_COL32(100, 255, 255, 240)
-                             : IM_COL32(0,   200, 200, 180));
-                dl->AddCircle(floorScreen, kHandleR, IM_COL32(0, 255, 255, 200), 12, 1.2f);
+                    floorHov ? IM_COL32(100, 255, 255, 255) : IM_COL32(0, 200, 200, 180));
+                dl->AddCircle(floorScreen, kHandleR + 1.5f, IM_COL32(0, 255, 255, 200), 12, 1.5f);
 
-                // Ceiling handle (magenta)
-                const int ceilHandle = static_cast<int>(vi) * 2 + 1;
-                const bool ceilHov   = (m_hoveredHeightHandle == ceilHandle);
-                dl->AddCircleFilled(ceilScreen,  kHandleR,
-                    ceilHov  ? IM_COL32(255, 100, 255, 240)
-                              : IM_COL32(200, 0,   200, 180));
-                dl->AddCircle(ceilScreen, kHandleR, IM_COL32(255, 0, 255, 200), 12, 1.2f);
+                // Ceiling handle — magenta
+                dl->AddCircleFilled(ceilScreen, kHandleR,
+                    ceilHov ? IM_COL32(255, 100, 255, 255) : IM_COL32(200, 0, 200, 180));
+                dl->AddCircle(ceilScreen, kHandleR + 1.5f, IM_COL32(255, 0, 255, 200), 12, 1.5f);
 
-                // Hover detection.
-                auto distSq = [](ImVec2 a, ImVec2 b) {
-                    const float dx = a.x - b.x; const float dy = a.y - b.y;
-                    return dx*dx + dy*dy;
-                };
-                if (distSq(mousePos, floorScreen) <= kHitR * kHitR) newHovered = floorHandle;
-                if (distSq(mousePos, ceilScreen)  <= kHitR * kHitR) newHovered = ceilHandle;
+                // Hover detection (only when not dragging).
+                if (!m_heightDragActive)
+                {
+                    if (distSq(mousePos, floorScreen) <= kHitR * kHitR) newHovered = floorHandle;
+                    if (distSq(mousePos, ceilScreen)  <= kHitR * kHitR) newHovered = ceilHandle;
+                }
             }
 
-            // Scroll-to-adjust height when hovering a handle.
-            const float scroll = ImGui::GetIO().MouseWheel;
-            if (m_hoveredHeightHandle >= 0 && scroll != 0.0f &&
+            // ── Start drag when LMB clicked on a handle ──────────────────────────────
+            if (!m_heightDragActive &&
+                newHovered >= 0 &&
+                ImGui::IsWindowHovered() &&
+                ImGui::IsMouseClicked(ImGuiMouseButton_Left))
+            {
+                m_heightDragIsFloor    = (newHovered % 2 == 0);
+                m_heightDragStartScreenY = mousePos.y;
+                m_heightDragVerts.clear();
+
+                for (const auto& item : sel.items)
+                {
+                    const world::SectorId sid = item.sectorId;
+                    if (sid >= static_cast<world::SectorId>(sectors.size())) continue;
+                    const std::size_t wi = item.index;
+                    const world::Sector& sec = sectors[sid];
+                    if (wi >= sec.walls.size()) continue;
+                    const world::Wall& w = sec.walls[wi];
+                    m_heightDragVerts.push_back({
+                        sid, wi,
+                        w.floorHeightOverride.value_or(sec.floorHeight),
+                        w.ceilHeightOverride.value_or(sec.ceilHeight),
+                        w.floorHeightOverride.has_value(),
+                        w.ceilHeightOverride.has_value()
+                    });
+                }
+                m_heightDragActive = !m_heightDragVerts.empty();
+            }
+
+            // ── Apply drag delta (live preview) ──────────────────────────────────────
+            if (m_heightDragActive && ImGui::IsMouseDown(ImGuiMouseButton_Left))
+            {
+                // Screen Y increases downward; dragging the mouse UP raises height.
+                // Sensitivity: 100 screen pixels = 1 world unit.
+                const float delta = (m_heightDragStartScreenY - mousePos.y) / 100.0f;
+
+                for (const auto& entry : m_heightDragVerts)
+                {
+                    if (entry.sid >= static_cast<world::SectorId>(sectors.size())) continue;
+                    if (entry.wi  >= sectors[entry.sid].walls.size()) continue;
+                    world::Wall& w = sectors[entry.sid].walls[entry.wi];
+                    if (m_heightDragIsFloor)
+                        w.floorHeightOverride = entry.startFloor + delta;
+                    else
+                        w.ceilHeightOverride  = entry.startCeil  + delta;
+                }
+                doc.markDirty();
+            }
+
+            // ── Commit drag as a single undo step on mouse release ─────────────────
+            if (m_heightDragActive && ImGui::IsMouseReleased(ImGuiMouseButton_Left))
+            {
+                // Collect final values.
+                const float delta = (m_heightDragStartScreenY - mousePos.y) / 100.0f;
+
+                // Restore pre-drag state so commands capture the correct old values.
+                for (const auto& entry : m_heightDragVerts)
+                {
+                    if (entry.sid >= static_cast<world::SectorId>(sectors.size())) continue;
+                    if (entry.wi  >= sectors[entry.sid].walls.size()) continue;
+                    world::Wall& w = sectors[entry.sid].walls[entry.wi];
+                    // Restore the original optional state.
+                    w.floorHeightOverride = entry.hadFloorOvr
+                        ? std::optional<float>(entry.startFloor) : std::nullopt;
+                    w.ceilHeightOverride  = entry.hadCeilOvr
+                        ? std::optional<float>(entry.startCeil)  : std::nullopt;
+                }
+
+                // Build compound command.
+                std::vector<std::unique_ptr<ICommand>> steps;
+                steps.reserve(m_heightDragVerts.size());
+                for (const auto& entry : m_heightDragVerts)
+                {
+                    if (entry.sid >= static_cast<world::SectorId>(sectors.size())) continue;
+                    if (entry.wi  >= sectors[entry.sid].walls.size()) continue;
+                    const world::Sector& sec = sectors[entry.sid];
+                    const world::Wall&   w   = sec.walls[entry.wi];
+
+                    const float newFloor = entry.startFloor + (m_heightDragIsFloor ? delta : 0.0f);
+                    const float newCeil  = entry.startCeil  + (m_heightDragIsFloor ? 0.0f : delta);
+
+                    // Only override the surface being dragged; leave the other as-is.
+                    const std::optional<float> floorOvr = m_heightDragIsFloor
+                        ? std::optional<float>(newFloor)
+                        : w.floorHeightOverride;
+                    const std::optional<float> ceilOvr  = m_heightDragIsFloor
+                        ? w.ceilHeightOverride
+                        : std::optional<float>(newCeil);
+
+                    steps.push_back(std::make_unique<CmdSetVertexHeight>(
+                        doc, entry.sid, entry.wi, floorOvr, ceilOvr));
+                }
+
+                if (!steps.empty())
+                    doc.pushCommand(std::make_unique<CompoundCommand>(
+                        "Drag Vertex Height", std::move(steps)));
+
+                m_heightDragActive = false;
+                m_heightDragVerts.clear();
+            }
+
+            // Cancel drag if mouse leaves the window without releasing (edge case).
+            if (m_heightDragActive && !ImGui::IsMouseDown(ImGuiMouseButton_Left))
+            {
+                // Restore pre-drag values and abort.
+                for (const auto& entry : m_heightDragVerts)
+                {
+                    if (entry.sid >= static_cast<world::SectorId>(sectors.size())) continue;
+                    if (entry.wi  >= sectors[entry.sid].walls.size()) continue;
+                    world::Wall& w = sectors[entry.sid].walls[entry.wi];
+                    w.floorHeightOverride = entry.hadFloorOvr
+                        ? std::optional<float>(entry.startFloor) : std::nullopt;
+                    w.ceilHeightOverride  = entry.hadCeilOvr
+                        ? std::optional<float>(entry.startCeil)  : std::nullopt;
+                }
+                doc.markDirty();
+                m_heightDragActive = false;
+                m_heightDragVerts.clear();
+            }
+
+            // ── Scroll-wheel nudge (consume event so camera does not dolly) ─────────
+            // Only fires when hovering a handle and not actively dragging.
+            if (!m_heightDragActive &&
+                m_hoveredHeightHandle >= 0 &&
                 ImGui::IsWindowHovered())
             {
-                const std::size_t vi  = static_cast<std::size_t>(m_hoveredHeightHandle / 2);
-                const bool isFloor    = (m_hoveredHeightHandle % 2 == 0);
-                if (vi < ns)
+                const float scroll = ImGui::GetIO().MouseWheel;
+                if (scroll != 0.0f)
                 {
-                    const world::Wall& wall = sector.walls[vi];
-                    const float cur = isFloor
-                        ? wall.floorHeightOverride.value_or(sector.floorHeight)
-                        : wall.ceilHeightOverride.value_or(sector.ceilHeight);
-                    const float newVal = cur + scroll * 0.25f;
-                    doc.pushCommand(std::make_unique<CmdSetVertexHeight>(
-                        doc, sid, vi,
-                        isFloor ? std::optional<float>(newVal) : wall.floorHeightOverride,
-                        isFloor ? wall.ceilHeightOverride       : std::optional<float>(newVal)));
+                    // Determine which surface to nudge.
+                    const bool isFloor = (m_hoveredHeightHandle % 2 == 0);
+                    const int  selIdx  = m_hoveredHeightHandle / 2;
+
+                    std::vector<std::unique_ptr<ICommand>> steps;
+                    for (const auto& item : sel.items)
+                    {
+                        const world::SectorId sid = item.sectorId;
+                        if (sid >= static_cast<world::SectorId>(sectors.size())) continue;
+                        const std::size_t wi = item.index;
+                        const world::Sector& sec = sectors[sid];
+                        if (wi >= sec.walls.size()) continue;
+                        const world::Wall& w = sec.walls[wi];
+                        const float cur = isFloor
+                            ? w.floorHeightOverride.value_or(sec.floorHeight)
+                            : w.ceilHeightOverride.value_or(sec.ceilHeight);
+                        const float newVal = cur + scroll * 0.25f;
+                        steps.push_back(std::make_unique<CmdSetVertexHeight>(
+                            doc, sid, wi,
+                            isFloor ? std::optional<float>(newVal) : w.floorHeightOverride,
+                            isFloor ? w.ceilHeightOverride          : std::optional<float>(newVal)));
+                    }
+                    if (!steps.empty())
+                        doc.pushCommand(std::make_unique<CompoundCommand>(
+                            "Nudge Vertex Height", std::move(steps)));
+
+                    // Mark scroll consumed so camera dolly (line ~982) is skipped.
+                    ImGui::GetIO().MouseWheel = 0.0f;
+                    (void)selIdx;  // used only for isFloor derivation above
                 }
             }
 
@@ -445,6 +606,12 @@ void Viewport3D::drawTerrainAndHeightOverlays(EditMapDocument&  doc,
         else
         {
             m_hoveredHeightHandle = -1;
+            // Cancel any lingering drag if vertex selection was cleared.
+            if (m_heightDragActive)
+            {
+                m_heightDragActive = false;
+                m_heightDragVerts.clear();
+            }
         }
     }
 }
@@ -1588,21 +1755,30 @@ void Viewport3D::draw(EditMapDocument&      doc,
                     const glm::vec2 p0 = wall.p0;
                     const glm::vec2 p1 = sec.walls[(wi + 1) % ns].p0;
 
-                    // Test two triangles of a wall quad for a given straight segment.
-                    auto testSegStrip = [&](glm::vec2 sp0, glm::vec2 sp1,
-                                            float yBottom, float yTop, HoveredSurface surf)
+                    // Test two triangles of a trapezoidal wall quad.
+                    // Per-endpoint heights support sloped floors/ceilings; for
+                    // flat walls yBot0==yBot1 and yTop0==yTop1 (identical to old).
+                    auto testSegTrap = [&](glm::vec2 sp0, glm::vec2 sp1,
+                                           float yBot0, float yTop0,
+                                           float yBot1, float yTop1,
+                                           HoveredSurface surf)
                     {
-                        if (yBottom >= yTop) return;
-                        const glm::vec3 bl = {sp0.x, yBottom, sp0.y};
-                        const glm::vec3 br = {sp1.x, yBottom, sp1.y};
-                        const glm::vec3 tr = {sp1.x, yTop,    sp1.y};
-                        const glm::vec3 tl = {sp0.x, yTop,    sp0.y};
+                        if (yBot0 >= yTop0 && yBot1 >= yTop1) return;
+                        const glm::vec3 bl = {sp0.x, yBot0, sp0.y};
+                        const glm::vec3 br = {sp1.x, yBot1, sp1.y};
+                        const glm::vec3 tr = {sp1.x, yTop1, sp1.y};
+                        const glm::vec3 tl = {sp0.x, yTop0, sp0.y};
                         float t;
                         if (rayTriangleIntersect(m_eye, rayDir, bl, tr, br, t) && t < closestT)
                         { closestT = t; hitSector = static_cast<world::SectorId>(si); hitWall = wi; hitSurface = surf; }
                         if (rayTriangleIntersect(m_eye, rayDir, bl, tl, tr, t) && t < closestT)
                         { closestT = t; hitSector = static_cast<world::SectorId>(si); hitWall = wi; hitSurface = surf; }
                     };
+                    // Per-vertex floor/ceil heights respecting overrides.
+                    const float wFloor0 = wall.floorHeightOverride.value_or(sec.floorHeight);
+                    const float wCeil0  = wall.ceilHeightOverride.value_or(sec.ceilHeight);
+                    const float wFloor1 = sec.walls[static_cast<std::size_t>((wi + 1) % static_cast<int>(ns))].floorHeightOverride.value_or(sec.floorHeight);
+                    const float wCeil1  = sec.walls[static_cast<std::size_t>((wi + 1) % static_cast<int>(ns))].ceilHeightOverride.value_or(sec.ceilHeight);
 
                     // Build the segment list: 1 segment for straight, N for curved.
                     const bool isCurved = wall.curveControlA.has_value();
@@ -1617,7 +1793,12 @@ void Viewport3D::draw(EditMapDocument&      doc,
                             const float t1 = static_cast<float>(k+1) / static_cast<float>(nSeg);
                             const glm::vec2 sp0 = isCurved ? evalWallPt(wall, p1, t0) : p0;
                             const glm::vec2 sp1 = isCurved ? evalWallPt(wall, p1, t1) : p1;
-                            testSegStrip(sp0, sp1, sec.floorHeight, sec.ceilHeight, HoveredSurface::Wall);
+                            // Interpolate per-vertex heights along the curve parameter.
+                            const float f0 = wFloor0 + t0 * (wFloor1 - wFloor0);
+                            const float c0 = wCeil0  + t0 * (wCeil1  - wCeil0);
+                            const float f1 = wFloor0 + t1 * (wFloor1 - wFloor0);
+                            const float c1 = wCeil0  + t1 * (wCeil1  - wCeil0);
+                            testSegTrap(sp0, sp1, f0, c0, f1, c1, HoveredSurface::Wall);
                         }
                     }
                     else
@@ -1632,9 +1813,11 @@ void Viewport3D::draw(EditMapDocument&      doc,
                             const glm::vec2 sp0 = isCurved ? evalWallPt(wall, p1, t0) : p0;
                             const glm::vec2 sp1 = isCurved ? evalWallPt(wall, p1, t1) : p1;
                             if (adj.ceilHeight < sec.ceilHeight)   // upper strip
-                                testSegStrip(sp0, sp1, adj.ceilHeight, sec.ceilHeight, HoveredSurface::UpperWall);
+                                testSegTrap(sp0, sp1, adj.ceilHeight, sec.ceilHeight,
+                                            adj.ceilHeight, sec.ceilHeight, HoveredSurface::UpperWall);
                             if (adj.floorHeight > sec.floorHeight)  // lower strip
-                                testSegStrip(sp0, sp1, sec.floorHeight, adj.floorHeight, HoveredSurface::LowerWall);
+                                testSegTrap(sp0, sp1, sec.floorHeight, adj.floorHeight,
+                                            sec.floorHeight, adj.floorHeight, HoveredSurface::LowerWall);
                         }
                     }
                 }
@@ -1658,30 +1841,83 @@ void Viewport3D::draw(EditMapDocument&      doc,
             };
 
             constexpr float kMinT = 1e-3f;
-            if (std::abs(rayDir.y) > kMinT)
+            // Floor and ceiling: use triangle mesh test for sloped surfaces,
+            // flat-plane test for sectors with no height overrides.
+            for (std::size_t si = 0; si < sectors.size(); ++si)
             {
-                for (std::size_t si = 0; si < sectors.size(); ++si)
+                const world::Sector& sec = sectors[si];
+                const std::size_t    nw  = sec.walls.size();
+
+                // ── Floor ────────────────────────────────────────────────────
                 {
-                    const world::Sector& sec = sectors[si];
+                    bool floorSloped = false;
+                    for (const auto& w : sec.walls)
+                        if (w.floorHeightOverride.has_value()) { floorSloped = true; break; }
 
-                    const float tFloor = (sec.floorHeight - m_eye.y) / rayDir.y;
-                    if (tFloor > kMinT && tFloor < closestT)
+                    if (floorSloped)
                     {
-                        const glm::vec2 xz(m_eye.x + tFloor * rayDir.x,
-                                           m_eye.z + tFloor * rayDir.z);
-                        if (pointInSector(sec, xz))
-                        { closestT = tFloor; hitSector = static_cast<world::SectorId>(si);
-                          hitSurface = HoveredSurface::Floor; }
+                        // Fan-triangulate the sloped floor polygon and test each triangle.
+                        std::vector<glm::vec3> fp(nw);
+                        for (std::size_t k = 0; k < nw; ++k)
+                            fp[k] = { sec.walls[k].p0.x,
+                                      sec.walls[k].floorHeightOverride.value_or(sec.floorHeight),
+                                      sec.walls[k].p0.y };
+                        for (std::size_t fi = 1; fi + 1 < nw; ++fi)
+                        {
+                            float t;
+                            if (rayTriangleIntersect(m_eye, rayDir, fp[0], fp[fi], fp[fi+1], t)
+                                && t > kMinT && t < closestT)
+                            { closestT = t; hitSector = static_cast<world::SectorId>(si);
+                              hitSurface = HoveredSurface::Floor; }
+                        }
                     }
-
-                    const float tCeil = (sec.ceilHeight - m_eye.y) / rayDir.y;
-                    if (tCeil > kMinT && tCeil < closestT)
+                    else if (std::abs(rayDir.y) > kMinT)
                     {
-                        const glm::vec2 xz(m_eye.x + tCeil * rayDir.x,
-                                           m_eye.z + tCeil * rayDir.z);
-                        if (pointInSector(sec, xz))
-                        { closestT = tCeil; hitSector = static_cast<world::SectorId>(si);
-                          hitSurface = HoveredSurface::Ceil; }
+                        const float tFloor = (sec.floorHeight - m_eye.y) / rayDir.y;
+                        if (tFloor > kMinT && tFloor < closestT)
+                        {
+                            const glm::vec2 xz(m_eye.x + tFloor * rayDir.x,
+                                               m_eye.z + tFloor * rayDir.z);
+                            if (pointInSector(sec, xz))
+                            { closestT = tFloor; hitSector = static_cast<world::SectorId>(si);
+                              hitSurface = HoveredSurface::Floor; }
+                        }
+                    }
+                }
+
+                // ── Ceiling ──────────────────────────────────────────────────
+                {
+                    bool ceilSloped = false;
+                    for (const auto& w : sec.walls)
+                        if (w.ceilHeightOverride.has_value()) { ceilSloped = true; break; }
+
+                    if (ceilSloped)
+                    {
+                        std::vector<glm::vec3> cp(nw);
+                        for (std::size_t k = 0; k < nw; ++k)
+                            cp[k] = { sec.walls[k].p0.x,
+                                      sec.walls[k].ceilHeightOverride.value_or(sec.ceilHeight),
+                                      sec.walls[k].p0.y };
+                        for (std::size_t fi = 1; fi + 1 < nw; ++fi)
+                        {
+                            float t;
+                            if (rayTriangleIntersect(m_eye, rayDir, cp[0], cp[fi], cp[fi+1], t)
+                                && t > kMinT && t < closestT)
+                            { closestT = t; hitSector = static_cast<world::SectorId>(si);
+                              hitSurface = HoveredSurface::Ceil; }
+                        }
+                    }
+                    else if (std::abs(rayDir.y) > kMinT)
+                    {
+                        const float tCeil = (sec.ceilHeight - m_eye.y) / rayDir.y;
+                        if (tCeil > kMinT && tCeil < closestT)
+                        {
+                            const glm::vec2 xz(m_eye.x + tCeil * rayDir.x,
+                                               m_eye.z + tCeil * rayDir.z);
+                            if (pointInSector(sec, xz))
+                            { closestT = tCeil; hitSector = static_cast<world::SectorId>(si);
+                              hitSurface = HoveredSurface::Ceil; }
+                        }
                     }
                 }
             }
@@ -1805,32 +2041,44 @@ void Viewport3D::draw(EditMapDocument&      doc,
             else     dl->AddLine(projClip(clip), projClip(b),    col, 2.0f);
         };
 
-        // Draw the boundary edges of a sector polygon at a given Y height.
-        // Curved walls are expanded into their Bezier subdivision points so the
-        // outline matches the actual geometry.
-        auto drawSectorOutline = [&](world::SectorId sid, float y, ImU32 lineCol)
+        // Per-vertex height helpers (floor and ceiling, respecting overrides).
+        auto getFloorH = [](const world::Sector& s, std::size_t i) -> float {
+            return s.walls[i].floorHeightOverride.value_or(s.floorHeight);
+        };
+        auto getCeilH = [](const world::Sector& s, std::size_t i) -> float {
+            return s.walls[i].ceilHeightOverride.value_or(s.ceilHeight);
+        };
+
+        // Draw the boundary edges of a sector polygon.
+        // heightFn(wallIndex) -> float: per-vertex Y; handles sloped floors/ceilings.
+        // Curved walls are expanded into their Bezier subdivision points.
+        auto drawSectorOutlineFn = [&](world::SectorId sid,
+                                       std::function<float(std::size_t)> heightFn,
+                                       ImU32 lineCol)
         {
             if (sid >= static_cast<world::SectorId>(sectors.size())) return;
             const world::Sector& sec = sectors[sid];
             const std::size_t ns = sec.walls.size();
             if (ns < 2) return;
 
-            // Build expanded clip-space polygon (inserts Bezier interior points).
             std::vector<glm::vec4> in;
             in.reserve(ns * 4);
             for (std::size_t i = 0; i < ns; ++i)
             {
                 const world::Wall& wall   = sec.walls[i];
                 const glm::vec2    wallP1 = sec.walls[(i + 1) % ns].p0;
-                in.push_back(VP * glm::vec4(wall.p0.x, y, wall.p0.y, 1.0f));
+                const float        y0     = heightFn(i);
+                const float        y1     = heightFn((i + 1) % ns);
+                in.push_back(VP * glm::vec4(wall.p0.x, y0, wall.p0.y, 1.0f));
                 if (wall.curveControlA.has_value())
                 {
                     const u32 nSeg = std::clamp(wall.curveSubdivisions, 4u, 64u);
                     for (u32 k = 1; k < nSeg; ++k)
                     {
-                        const float t  = static_cast<float>(k) / static_cast<float>(nSeg);
+                        const float t   = static_cast<float>(k) / static_cast<float>(nSeg);
+                        const float yt  = y0 + t * (y1 - y0);   // interpolate height along curve
                         const glm::vec2 pt = evalWallPtOutline(wall, wallP1, t);
-                        in.push_back(VP * glm::vec4(pt.x, y, pt.y, 1.0f));
+                        in.push_back(VP * glm::vec4(pt.x, yt, pt.y, 1.0f));
                     }
                 }
             }
@@ -1860,11 +2108,11 @@ void Viewport3D::draw(EditMapDocument&      doc,
         };
 
         // Draw a wall outline following the Bezier curve when curved.
-        // For straight walls: single clipped quad.
-        // For curved walls: top and bottom polylines + vertical ends.
-        // yBottom/yTop define the vertical extent.
+        // Per-endpoint heights (bot0/top0 at p0, bot1/top1 at p1) support
+        // trapezoidal quads on sloped sectors.
         auto drawWallOutline = [&](world::SectorId sid, std::size_t wi,
-                                   float yBottom, float yTop,
+                                   float yBot0, float yTop0,
+                                   float yBot1, float yTop1,
                                    ImU32 fillCol, ImU32 lineCol)
         {
             if (sid >= static_cast<world::SectorId>(sectors.size())) return;
@@ -1877,8 +2125,6 @@ void Viewport3D::draw(EditMapDocument&      doc,
 
             if (wall.curveControlA.has_value())
             {
-                // Curved wall: draw top and bottom polylines following the curve,
-                // plus vertical end lines at p0 and p1.
                 const u32 nSeg = std::clamp(wall.curveSubdivisions, 4u, 64u);
 
                 std::vector<glm::vec4> botPts, topPts;
@@ -1886,29 +2132,28 @@ void Viewport3D::draw(EditMapDocument&      doc,
                 topPts.reserve(nSeg + 1);
                 for (u32 k = 0; k <= nSeg; ++k)
                 {
-                    const float t  = static_cast<float>(k) / static_cast<float>(nSeg);
+                    const float t   = static_cast<float>(k) / static_cast<float>(nSeg);
+                    const float yB  = yBot0 + t * (yBot1 - yBot0);
+                    const float yT  = yTop0 + t * (yTop1 - yTop0);
                     const glm::vec2 pt = evalWallPtOutline(wall, p1, t);
-                    botPts.push_back(VP * glm::vec4(pt.x, yBottom, pt.y, 1.0f));
-                    topPts.push_back(VP * glm::vec4(pt.x, yTop,    pt.y, 1.0f));
+                    botPts.push_back(VP * glm::vec4(pt.x, yB, pt.y, 1.0f));
+                    topPts.push_back(VP * glm::vec4(pt.x, yT, pt.y, 1.0f));
                 }
-                // Bottom and top polylines.
                 for (u32 k = 0; k < nSeg; ++k)
                 {
                     drawClippedLine(botPts[k], botPts[k+1], lineCol);
                     drawClippedLine(topPts[k], topPts[k+1], lineCol);
                 }
-                // Vertical end lines.
                 drawClippedLine(botPts.front(), topPts.front(), lineCol);
                 drawClippedLine(botPts.back(),  topPts.back(),  lineCol);
             }
             else
             {
-                // Straight wall: existing clipped-quad approach.
                 const glm::vec4 in[4] = {
-                    VP * glm::vec4(p0.x, yBottom, p0.y, 1.0f),
-                    VP * glm::vec4(p1.x, yBottom, p1.y, 1.0f),
-                    VP * glm::vec4(p1.x, yTop,    p1.y, 1.0f),
-                    VP * glm::vec4(p0.x, yTop,    p0.y, 1.0f),
+                    VP * glm::vec4(p0.x, yBot0, p0.y, 1.0f),
+                    VP * glm::vec4(p1.x, yBot1, p1.y, 1.0f),
+                    VP * glm::vec4(p1.x, yTop1, p1.y, 1.0f),
+                    VP * glm::vec4(p0.x, yTop0, p0.y, 1.0f),
                 };
                 glm::vec4 poly[5];
                 int n = 0;
@@ -1955,30 +2200,53 @@ void Viewport3D::draw(EditMapDocument&      doc,
             return yBot < yTop;
         };
 
+        // Convenience wrappers around drawSectorOutlineFn using per-vertex heights.
+        auto drawFloorOutline = [&](world::SectorId sid, ImU32 col)
+        {
+            if (sid >= static_cast<world::SectorId>(sectors.size())) return;
+            const world::Sector& s = sectors[sid];
+            drawSectorOutlineFn(sid, [&s, &getFloorH](std::size_t i){ return getFloorH(s, i); }, col);
+        };
+        auto drawCeilOutline = [&](world::SectorId sid, ImU32 col)
+        {
+            if (sid >= static_cast<world::SectorId>(sectors.size())) return;
+            const world::Sector& s = sectors[sid];
+            drawSectorOutlineFn(sid, [&s, &getCeilH](std::size_t i){ return getCeilH(s, i); }, col);
+        };
+        // Wall outline helper: resolves per-vertex heights automatically.
+        auto drawWallOutlineH = [&](world::SectorId sid, std::size_t wi, ImU32 col)
+        {
+            if (sid >= static_cast<world::SectorId>(sectors.size())) return;
+            const world::Sector& s  = sectors[sid];
+            const std::size_t    ns = s.walls.size();
+            if (wi >= ns) return;
+            const std::size_t    wi1 = (wi + 1) % ns;
+            drawWallOutline(sid, wi,
+                getFloorH(s, wi),  getCeilH(s, wi),
+                getFloorH(s, wi1), getCeilH(s, wi1),
+                0, col);
+        };
+
         // Hover outlines.
         if (m_hoveredSectorId != world::INVALID_SECTOR_ID)
         {
-            const world::Sector& hovSec = sectors[m_hoveredSectorId];
             if (m_hoveredSurface == HoveredSurface::Wall)
-                drawWallOutline(m_hoveredSectorId, m_hoveredWallIdx,
-                                hovSec.floorHeight, hovSec.ceilHeight,
-                                0, IM_COL32(255, 255, 255, 200));
+                drawWallOutlineH(m_hoveredSectorId, m_hoveredWallIdx,
+                                 IM_COL32(255, 255, 255, 200));
             else if (m_hoveredSurface == HoveredSurface::UpperWall ||
                      m_hoveredSurface == HoveredSurface::LowerWall)
             {
-                float yBot = hovSec.floorHeight, yTop = hovSec.ceilHeight;
+                const world::Sector& hSec = sectors[m_hoveredSectorId];
+                float yBot = hSec.floorHeight, yTop = hSec.ceilHeight;
                 if (getStripY(m_hoveredSectorId, m_hoveredWallIdx, m_hoveredSurface, yBot, yTop))
                     drawWallOutline(m_hoveredSectorId, m_hoveredWallIdx,
-                                    yBot, yTop, 0, IM_COL32(255, 255, 255, 200));
+                                    yBot, yTop, yBot, yTop,
+                                    0, IM_COL32(255, 255, 255, 200));
             }
             else if (m_hoveredSurface == HoveredSurface::Floor)
-                drawSectorOutline(m_hoveredSectorId,
-                                  hovSec.floorHeight,
-                                  IM_COL32(255, 255, 255, 200));
+                drawFloorOutline(m_hoveredSectorId, IM_COL32(255, 255, 255, 200));
             else if (m_hoveredSurface == HoveredSurface::Ceil)
-                drawSectorOutline(m_hoveredSectorId,
-                                  hovSec.ceilHeight,
-                                  IM_COL32(255, 255, 255, 200));
+                drawCeilOutline(m_hoveredSectorId, IM_COL32(255, 255, 255, 200));
         }
 
         // Selection outlines.
@@ -1988,19 +2256,23 @@ void Viewport3D::draw(EditMapDocument&      doc,
         {
             const world::SectorId wSid = sel2.items[0].sectorId;
             const std::size_t     wWi  = sel2.items[0].index;
-            float yBot = 0.0f, yTop = 0.0f;
-            bool  useStrip = false;
             if (wSid < static_cast<world::SectorId>(sectors.size()) && wWi < sectors[wSid].walls.size())
             {
                 const world::Sector& wSec = sectors[wSid];
-                if (m_selectedWallSurface == HoveredSurface::UpperWall ||
-                    m_selectedWallSurface == HoveredSurface::LowerWall)
-                    useStrip = getStripY(wSid, wWi, m_selectedWallSurface, yBot, yTop);
-                if (!useStrip)
-                { yBot = wSec.floorHeight; yTop = wSec.ceilHeight; }
+                float yBot = 0.0f, yTop = 0.0f;
+                if ((m_selectedWallSurface == HoveredSurface::UpperWall ||
+                     m_selectedWallSurface == HoveredSurface::LowerWall) &&
+                    getStripY(wSid, wWi, m_selectedWallSurface, yBot, yTop))
+                {
+                    drawWallOutline(wSid, wWi, yBot, yTop, yBot, yTop,
+                                    0, IM_COL32(255, 200, 0, 220));
+                }
+                else
+                {
+                    drawWallOutlineH(wSid, wWi, IM_COL32(255, 200, 0, 220));
+                }
+                (void)wSec;
             }
-            drawWallOutline(wSid, wWi, yBot, yTop,
-                            0, IM_COL32(255, 200, 0, 220));
         }
         else if (!sel2.items.empty() &&
                  (sel2.items[0].type == SelectionType::Sector ||
@@ -2017,20 +2289,15 @@ void Viewport3D::draw(EditMapDocument&      doc,
 
                 if (selType == SelectionType::Sector)
                 {
-                    // Whole sector selected from the 2D viewport: outline every wall
-                    // at full height and draw both floor and ceiling polygons so the
-                    // designer can see the complete 3D bounding of the sector.
                     for (std::size_t wi = 0; wi < selSec.walls.size(); ++wi)
-                        drawWallOutline(sid, wi,
-                                        selSec.floorHeight, selSec.ceilHeight,
-                                        0, kSelCol);
-                    drawSectorOutline(sid, selSec.floorHeight, kSelCol);
-                    drawSectorOutline(sid, selSec.ceilHeight,  kSelCol);
+                        drawWallOutlineH(sid, wi, kSelCol);
+                    drawFloorOutline(sid, kSelCol);
+                    drawCeilOutline(sid,  kSelCol);
                 }
                 else if (selType == SelectionType::Floor)
-                    drawSectorOutline(sid, selSec.floorHeight, kSelCol);
+                    drawFloorOutline(sid, kSelCol);
                 else  // Ceil
-                    drawSectorOutline(sid, selSec.ceilHeight,  kSelCol);
+                    drawCeilOutline(sid, kSelCol);
             }
         }
         

@@ -1375,13 +1375,179 @@ void PropertyInspector::draw(EditMapDocument&      doc,
     {
         auto& sectors = doc.mapData().sectors;
 
-        // Multi-vertex header: show count when more than one vertex is selected.
+        // ── Multi-vertex: aggregate height controls ────────────────────────────────────
         if (sel.items.size() > 1)
         {
             ImGui::SeparatorText("Vertices");
             ImGui::Text("%zu vertices selected", sel.items.size());
             ImGui::Spacing();
-            ImGui::TextDisabled("Shift+click to add/remove. Drag any selected vertex to move all.");
+            ImGui::TextDisabled("Drag a floor/ceiling handle in the 3D view to move all.");
+            ImGui::Spacing();
+            ImGui::SeparatorText("Set Height Overrides");
+            ImGui::TextDisabled("Applies the entered value to ALL selected vertices.");
+            ImGui::Spacing();
+
+            // Derive a representative starting value from the first valid item.
+            // These are local per-frame values; committed on IsItemDeactivatedAfterEdit.
+            static float s_multiFloor = 0.0f;
+            static float s_multiCeil  = 4.0f;
+
+            // Populate representative values only when the widget is not active.
+            if (!ImGui::IsAnyItemActive())
+            {
+                for (const auto& item : sel.items)
+                {
+                    if (item.sectorId >= sectors.size()) continue;
+                    const auto& sec = sectors[item.sectorId];
+                    if (item.index >= sec.walls.size()) continue;
+                    const auto& w = sec.walls[item.index];
+                    s_multiFloor = w.floorHeightOverride.value_or(sec.floorHeight);
+                    s_multiCeil  = w.ceilHeightOverride.value_or(sec.ceilHeight);
+                    break;
+                }
+            }
+
+            // Pre-drag snapshots for live preview + undo correctness.
+            // Storing optional<float> preserves whether each vertex already had
+            // an override before the drag began; on commit the old state is
+            // restored so CmdSetVertexHeight captures the correct oldFloor/oldCeil.
+            static std::vector<std::optional<float>> s_preDragMVFloor;
+            static std::vector<std::optional<float>> s_preDragMVCeil;
+
+            // Floor override: set all selected verts to the same floor height.
+            ImGui::SetNextItemWidth(-1.0f);
+            {
+                const bool floorCommitted =
+                    dragFloatUndo("##mvfloor", &s_multiFloor, 0.05f, 0.0f, 0.0f, "Floor: %.2f");
+
+                if (ImGui::IsItemActivated())
+                {
+                    s_preDragMVFloor.clear();
+                    for (const auto& item : sel.items)
+                    {
+                        if (item.sectorId >= sectors.size()) { s_preDragMVFloor.emplace_back(std::nullopt); continue; }
+                        const auto& sec = sectors[item.sectorId];
+                        if (item.index >= sec.walls.size()) { s_preDragMVFloor.emplace_back(std::nullopt); continue; }
+                        s_preDragMVFloor.push_back(sec.walls[item.index].floorHeightOverride);
+                    }
+                }
+                if (ImGui::IsItemActive())
+                {
+                    for (const auto& item : sel.items)
+                    {
+                        if (item.sectorId >= sectors.size()) continue;
+                        const std::size_t wi2 = item.index;
+                        auto& sec2 = sectors[item.sectorId];
+                        if (wi2 >= sec2.walls.size()) continue;
+                        sec2.walls[wi2].floorHeightOverride = s_multiFloor;
+                    }
+                    doc.markDirty();
+                }
+                if (floorCommitted)
+                {
+                    // Restore pre-drag so commands capture correct old values.
+                    for (std::size_t k = 0; k < sel.items.size() && k < s_preDragMVFloor.size(); ++k)
+                    {
+                        const auto& item = sel.items[k];
+                        if (item.sectorId >= sectors.size()) continue;
+                        if (item.index >= sectors[item.sectorId].walls.size()) continue;
+                        sectors[item.sectorId].walls[item.index].floorHeightOverride =
+                            s_preDragMVFloor[k];
+                    }
+                    std::vector<std::unique_ptr<ICommand>> steps;
+                    for (const auto& item : sel.items)
+                    {
+                        if (item.sectorId >= sectors.size()) continue;
+                        const std::size_t wi2 = item.index;
+                        const auto& sec2 = sectors[item.sectorId];
+                        if (wi2 >= sec2.walls.size()) continue;
+                        steps.push_back(std::make_unique<CmdSetVertexHeight>(
+                            doc, item.sectorId, wi2,
+                            std::optional<float>(s_multiFloor),
+                            sec2.walls[wi2].ceilHeightOverride));
+                    }
+                    if (!steps.empty())
+                        doc.pushCommand(std::make_unique<CompoundCommand>(
+                            "Set Vertex Floor Heights", std::move(steps)));
+                }
+            }
+
+            // Ceiling override: set all selected verts to the same ceiling height.
+            ImGui::SetNextItemWidth(-1.0f);
+            {
+                const bool ceilCommitted =
+                    dragFloatUndo("##mvceil", &s_multiCeil, 0.05f, 0.0f, 0.0f, "Ceiling: %.2f");
+
+                if (ImGui::IsItemActivated())
+                {
+                    s_preDragMVCeil.clear();
+                    for (const auto& item : sel.items)
+                    {
+                        if (item.sectorId >= sectors.size()) { s_preDragMVCeil.emplace_back(std::nullopt); continue; }
+                        const auto& sec = sectors[item.sectorId];
+                        if (item.index >= sec.walls.size()) { s_preDragMVCeil.emplace_back(std::nullopt); continue; }
+                        s_preDragMVCeil.push_back(sec.walls[item.index].ceilHeightOverride);
+                    }
+                }
+                if (ImGui::IsItemActive())
+                {
+                    for (const auto& item : sel.items)
+                    {
+                        if (item.sectorId >= sectors.size()) continue;
+                        const std::size_t wi2 = item.index;
+                        auto& sec2 = sectors[item.sectorId];
+                        if (wi2 >= sec2.walls.size()) continue;
+                        sec2.walls[wi2].ceilHeightOverride = s_multiCeil;
+                    }
+                    doc.markDirty();
+                }
+                if (ceilCommitted)
+                {
+                    for (std::size_t k = 0; k < sel.items.size() && k < s_preDragMVCeil.size(); ++k)
+                    {
+                        const auto& item = sel.items[k];
+                        if (item.sectorId >= sectors.size()) continue;
+                        if (item.index >= sectors[item.sectorId].walls.size()) continue;
+                        sectors[item.sectorId].walls[item.index].ceilHeightOverride =
+                            s_preDragMVCeil[k];
+                    }
+                    std::vector<std::unique_ptr<ICommand>> steps;
+                    for (const auto& item : sel.items)
+                    {
+                        if (item.sectorId >= sectors.size()) continue;
+                        const std::size_t wi2 = item.index;
+                        const auto& sec2 = sectors[item.sectorId];
+                        if (wi2 >= sec2.walls.size()) continue;
+                        steps.push_back(std::make_unique<CmdSetVertexHeight>(
+                            doc, item.sectorId, wi2,
+                            sec2.walls[wi2].floorHeightOverride,
+                            std::optional<float>(s_multiCeil)));
+                    }
+                    if (!steps.empty())
+                        doc.pushCommand(std::make_unique<CompoundCommand>(
+                            "Set Vertex Ceiling Heights", std::move(steps)));
+                }
+            }
+
+            // Clear all overrides button: restore sector scalar defaults.
+            ImGui::Spacing();
+            if (ImGui::SmallButton("Clear All Overrides"))
+            {
+                std::vector<std::unique_ptr<ICommand>> steps;
+                for (const auto& item : sel.items)
+                {
+                    if (item.sectorId >= sectors.size()) continue;
+                    const std::size_t wi = item.index;
+                    if (wi >= sectors[item.sectorId].walls.size()) continue;
+                    steps.push_back(std::make_unique<CmdSetVertexHeight>(
+                        doc, item.sectorId, wi,
+                        std::nullopt, std::nullopt));
+                }
+                if (!steps.empty())
+                    doc.pushCommand(std::make_unique<CompoundCommand>(
+                        "Clear Vertex Height Overrides", std::move(steps)));
+            }
+
             ImGui::End();
             return;
         }
@@ -1418,10 +1584,21 @@ void PropertyInspector::draw(EditMapDocument&      doc,
                 {
                     float fh = *vwall.floorHeightOverride;
                     ImGui::SetNextItemWidth(-1.0f);
-                    if (dragFloatUndo("##vfloor", &fh, 0.05f, 0.0f, 0.0f, "Floor: %.2f") &&
-                        fh != *vwall.floorHeightOverride)
+                    static float s_preDragFloor = 0.0f;
+                    const bool fcommit = dragFloatUndo("##vfloor", &fh, 0.05f, 0.0f, 0.0f, "Floor: %.2f");
+                    if (ImGui::IsItemActivated())
+                        s_preDragFloor = *vwall.floorHeightOverride;
+                    if (ImGui::IsItemActive() && fh != *vwall.floorHeightOverride)
+                    {
+                        vwall.floorHeightOverride = fh;
+                        doc.markDirty();
+                    }
+                    if (fcommit && fh != s_preDragFloor)
+                    {
+                        vwall.floorHeightOverride = s_preDragFloor;
                         doc.pushCommand(std::make_unique<CmdSetVertexHeight>(
                             doc, sid, wi, fh, vwall.ceilHeightOverride));
+                    }
                 }
 
                 // Ceiling override.
@@ -1438,10 +1615,21 @@ void PropertyInspector::draw(EditMapDocument&      doc,
                 {
                     float ch = *vwall.ceilHeightOverride;
                     ImGui::SetNextItemWidth(-1.0f);
-                    if (dragFloatUndo("##vceil", &ch, 0.05f, 0.0f, 0.0f, "Ceiling: %.2f") &&
-                        ch != *vwall.ceilHeightOverride)
+                    static float s_preDragCeil = 0.0f;
+                    const bool ccommit = dragFloatUndo("##vceil", &ch, 0.05f, 0.0f, 0.0f, "Ceiling: %.2f");
+                    if (ImGui::IsItemActivated())
+                        s_preDragCeil = *vwall.ceilHeightOverride;
+                    if (ImGui::IsItemActive() && ch != *vwall.ceilHeightOverride)
+                    {
+                        vwall.ceilHeightOverride = ch;
+                        doc.markDirty();
+                    }
+                    if (ccommit && ch != s_preDragCeil)
+                    {
+                        vwall.ceilHeightOverride = s_preDragCeil;
                         doc.pushCommand(std::make_unique<CmdSetVertexHeight>(
                             doc, sid, wi, vwall.floorHeightOverride, ch));
+                    }
                 }
             }
         }

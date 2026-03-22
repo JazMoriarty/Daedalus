@@ -184,61 +184,110 @@ JoltPhysicsWorld::loadLevel(const world::WorldMapData& map)
             }
         }
 
-        // ── Floor slab (axis-aligned box from sector AABB footprint) ──────────
-        // The AABB is expanded to include Bezier control points so the slab
-        // covers any extra floor area opened by outward-curving walls.
+        // ── Floor collision ───────────────────────────────────────────
+        // Flat floors use a simple axis-aligned BoxShape slab.
+        // Sloped floors (any wall has floorHeightOverride) use a MeshShape
+        // built from the per-vertex heights so the character controller slides
+        // up and down ramps instead of walking through them.
         {
-            float minX =  std::numeric_limits<float>::max();
-            float maxX = -std::numeric_limits<float>::max();
-            float minZ =  std::numeric_limits<float>::max();
-            float maxZ = -std::numeric_limits<float>::max();
+            // Detect slope: any wall with a floor height override.
+            bool isSloped = false;
+            for (const auto& w : sector.walls)
+                if (w.floorHeightOverride.has_value()) { isSloped = true; break; }
 
-            for (const world::Wall& w : sector.walls)
+            if (isSloped)
             {
-                minX = std::min(minX, w.p0.x);
-                maxX = std::max(maxX, w.p0.x);
-                minZ = std::min(minZ, w.p0.y);
-                maxZ = std::max(maxZ, w.p0.y);
-                // The Bezier control polygon is a conservative bounding hull for
-                // the curve, so including control points expands the AABB to cover
-                // any space swept by an outward-curving wall.
-                if (w.curveControlA.has_value())
+                // Build a triangle mesh from the sector polygon with per-vertex Y.
+                // Fan triangulation from vertex 0: works correctly for convex
+                // polygons (the common case for ramps).  Winding order (0, i, i+1)
+                // is CCW viewed from above (+Y) which gives upward-facing normals.
+                const auto wn = static_cast<uint32_t>(sector.walls.size());
+
+                JPH::VertexList verts;
+                verts.reserve(wn);
+                for (const auto& w : sector.walls)
                 {
-                    minX = std::min(minX, w.curveControlA->x);
-                    maxX = std::max(maxX, w.curveControlA->x);
-                    minZ = std::min(minZ, w.curveControlA->y);
-                    maxZ = std::max(maxZ, w.curveControlA->y);
+                    const float vy = w.floorHeightOverride.value_or(floorY);
+                    verts.push_back(JPH::Float3(w.p0.x, vy, w.p0.y));
                 }
-                if (w.curveControlB.has_value())
+
+                JPH::IndexedTriangleList tris;
+                tris.reserve(wn - 2u);
+                for (uint32_t fi = 1u; fi + 1u < wn; ++fi)
+                    tris.push_back(JPH::IndexedTriangle(0u, fi, fi + 1u));
+
+                if (!tris.empty())
                 {
-                    minX = std::min(minX, w.curveControlB->x);
-                    maxX = std::max(maxX, w.curveControlB->x);
-                    minZ = std::min(minZ, w.curveControlB->y);
-                    maxZ = std::max(maxZ, w.curveControlB->y);
+                    JPH::MeshShapeSettings meshSettings(verts, tris);
+                    const auto result = meshSettings.Create();
+                    if (!result.HasError())
+                    {
+                        JPH::BodyCreationSettings bcs(
+                            result.Get(),
+                            JPH::RVec3::sZero(),
+                            JPH::Quat::sIdentity(),
+                            JPH::EMotionType::Static,
+                            Layers::NON_MOVING
+                        );
+                        const JPH::BodyID bid =
+                            bi.CreateAndAddBody(bcs, JPH::EActivation::DontActivate);
+                        if (!bid.IsInvalid()) { m_levelBodyIds.push_back(bid); }
+                    }
                 }
             }
-
-            const float hx = (maxX - minX) * 0.5f;
-            const float hz = (maxZ - minZ) * 0.5f;
-
-            if (hx > 1.0e-4f && hz > 1.0e-4f)
+            else
             {
-                JPH::Ref<JPH::Shape> slab =
-                    new JPH::BoxShape(JPH::Vec3(hx, kSlabHalfThick, hz), 0.0f);
+                // Flat floor: existing AABB box slab.  The AABB is expanded to
+                // include Bezier control points so it covers outward-curving walls.
+                float minX =  std::numeric_limits<float>::max();
+                float maxX = -std::numeric_limits<float>::max();
+                float minZ =  std::numeric_limits<float>::max();
+                float maxZ = -std::numeric_limits<float>::max();
 
-                JPH::BodyCreationSettings bcs(
-                    slab,
-                    JPH::RVec3((minX + maxX) * 0.5f,
-                               floorY - kSlabHalfThick,
-                               (minZ + maxZ) * 0.5f),
-                    JPH::Quat::sIdentity(),
-                    JPH::EMotionType::Static,
-                    Layers::NON_MOVING
-                );
+                for (const world::Wall& w : sector.walls)
+                {
+                    minX = std::min(minX, w.p0.x);
+                    maxX = std::max(maxX, w.p0.x);
+                    minZ = std::min(minZ, w.p0.y);
+                    maxZ = std::max(maxZ, w.p0.y);
+                    if (w.curveControlA.has_value())
+                    {
+                        minX = std::min(minX, w.curveControlA->x);
+                        maxX = std::max(maxX, w.curveControlA->x);
+                        minZ = std::min(minZ, w.curveControlA->y);
+                        maxZ = std::max(maxZ, w.curveControlA->y);
+                    }
+                    if (w.curveControlB.has_value())
+                    {
+                        minX = std::min(minX, w.curveControlB->x);
+                        maxX = std::max(maxX, w.curveControlB->x);
+                        minZ = std::min(minZ, w.curveControlB->y);
+                        maxZ = std::max(maxZ, w.curveControlB->y);
+                    }
+                }
 
-                const JPH::BodyID bid =
-                    bi.CreateAndAddBody(bcs, JPH::EActivation::DontActivate);
-                if (!bid.IsInvalid()) { m_levelBodyIds.push_back(bid); }
+                const float hx = (maxX - minX) * 0.5f;
+                const float hz = (maxZ - minZ) * 0.5f;
+
+                if (hx > 1.0e-4f && hz > 1.0e-4f)
+                {
+                    JPH::Ref<JPH::Shape> slab =
+                        new JPH::BoxShape(JPH::Vec3(hx, kSlabHalfThick, hz), 0.0f);
+
+                    JPH::BodyCreationSettings bcs(
+                        slab,
+                        JPH::RVec3((minX + maxX) * 0.5f,
+                                   floorY - kSlabHalfThick,
+                                   (minZ + maxZ) * 0.5f),
+                        JPH::Quat::sIdentity(),
+                        JPH::EMotionType::Static,
+                        Layers::NON_MOVING
+                    );
+
+                    const JPH::BodyID bid =
+                        bi.CreateAndAddBody(bcs, JPH::EActivation::DontActivate);
+                    if (!bid.IsInvalid()) { m_levelBodyIds.push_back(bid); }
+                }
             }
         }
     }

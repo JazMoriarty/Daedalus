@@ -216,11 +216,29 @@ private:
     world::SectorId    m_terrainSectorId   = world::INVALID_SECTOR_ID;
 
     // ─── Per-vertex height handle state (Vertex tool mode) ──────────────────────
-    // Which handle the cursor is currently over.  -1 = none.
-    // Even indices = floor handles, odd indices = ceiling handles, alternating per vertex.
-    // e.g. vertex i: floor handle = 2*i, ceil handle = 2*i+1.
-    int         m_hoveredHeightHandle     = -1;
-    float       m_hoveredHandleOrigValue  = 0.0f;  ///< Value at scroll-start for undo.
+    // Handles are indexed over the current Vertex selection items:
+    //   item i → floor handle = i*2,  ceiling handle = i*2+1.
+    // -1 means nothing is hovered.
+    int  m_hoveredHeightHandle = -1;
+
+    // ─── Height handle drag state ─────────────────────────────────────────────
+    // Active when the user LMB-drags a floor or ceiling height handle in the 3D
+    // viewport (non-fly mode only).  All currently selected vertices are dragged
+    // together by the same Y delta.
+    struct HeightDragEntry
+    {
+        world::SectorId sid;
+        std::size_t     wi;
+        float           startFloor;  ///< floor override value at drag start
+        float           startCeil;   ///< ceil  override value at drag start
+        bool            hadFloorOvr; ///< whether the wall had a floor override before drag
+        bool            hadCeilOvr;  ///< whether the wall had a ceil  override before drag
+    };
+
+    bool                         m_heightDragActive  = false;
+    bool                         m_heightDragIsFloor = false; ///< true = floor, false = ceil
+    float                        m_heightDragStartScreenY = 0.0f;
+    std::vector<HeightDragEntry> m_heightDragVerts;
 
     void ensureInit(rhi::IRenderDevice& device, unsigned w, unsigned h);
     void retessellate(rhi::IRenderDevice& device, const world::WorldMapData& map);

@@ -128,6 +128,12 @@ namespace
 // N vertices are emitted (one per polygon point, shared across all triangles),
 // yielding (N−2) triangles.  Output for convex polygons is identical in vertex
 // count to the old triangle-fan; for concave polygons it is always correct.
+//
+// Normals: flat surfaces use the hardcoded (0, ±1, 0).  Sloped surfaces (any
+// height differs from heights[0]) have per-vertex normals recomputed from the
+// actual triangle geometry after ear-clipping.  Correct normals are required
+// by SSAO/HBAO+, TAA neighbourhood clamping, and the deferred lighting pass;
+// without them a sloped floor produces dancing white-noise artefacts.
 static void appendHorizontalSurface(
     std::vector<render::StaticMeshVertex>& verts,
     std::vector<u32>&                      indices,
@@ -141,8 +147,15 @@ static void appendHorizontalSurface(
     const u32 n = static_cast<u32>(polygonPts.size());
     if (n < 3 || heights.size() < n) return;
 
-    const u32   base = static_cast<u32>(verts.size());
-    const float tx   = (normalY > 0.0f) ? 1.0f : -1.0f;
+    // Detect sloped surfaces so we know whether to recompute normals below.
+    bool isSloped = false;
+    const float h0 = heights[0];
+    for (u32 i = 1; i < n; ++i)
+        if (std::abs(heights[i] - h0) > 1e-5f) { isSloped = true; break; }
+
+    const u32   base      = static_cast<u32>(verts.size());
+    const u32   indexBase = static_cast<u32>(indices.size()); // for normal post-pass
+    const float tx        = (normalY > 0.0f) ? 1.0f : -1.0f;
 
     const float cosR = std::cos(uvRotation);
     const float sinR = std::sin(uvRotation);
@@ -158,20 +171,25 @@ static void appendHorizontalSurface(
         const float v_t = pz / vScale + vOff;
         const float u_f = u_t * cosR - v_t * sinR;
         const float v_f = u_t * sinR + v_t * cosR;
+        // Normals start as (0, ±1, 0).  For sloped surfaces these are overwritten
+        // by the per-vertex normal post-pass at the end of this function.
         verts.push_back(makeVertex(px, py, pz,
                                    0.0f, normalY, 0.0f,
                                    u_f, v_f,
                                    tx, 0.0f, 0.0f, 1.0f));
     }
 
+    // ── Triangle (n==3): emit directly, then fall through to normal post-pass. ───────
     if (n == 3)
     {
         if (normalY > 0.0f)
         { indices.push_back(base); indices.push_back(base+1); indices.push_back(base+2); }
         else
         { indices.push_back(base); indices.push_back(base+2); indices.push_back(base+1); }
-        return;
+        // Fall through to the normal post-pass below.
     }
+    else
+    {
 
     // Ear-clipping: work on a mutable list of LOCAL indices [0..n-1].
     // Emitted triangles reference GPU vertices via (base + localIndex).
@@ -249,9 +267,45 @@ static void appendHorizontalSurface(
             indices.push_back(base + active[1]);
         }
     }
+
+    } // end else (n > 3 ear-clipping path)
+
+    // ── Per-vertex normal post-pass for sloped surfaces ──────────────────────────
+    // For flat surfaces (isSloped == false) the hardcoded (0, ±1, 0) is already
+    // correct and this block is skipped at no cost.
+    if (isSloped)
+    {
+        // Accumulate area-weighted face normals into each vertex.
+        std::vector<glm::vec3> normAccum(n, glm::vec3(0.0f));
+        const u32 numNewIdx = static_cast<u32>(indices.size()) - indexBase;
+        for (u32 t = 0; t < numNewIdx; t += 3)
+        {
+            const u32 i0 = indices[indexBase + t];
+            const u32 i1 = indices[indexBase + t + 1];
+            const u32 i2 = indices[indexBase + t + 2];
+            const glm::vec3 p0{verts[i0].pos[0], verts[i0].pos[1], verts[i0].pos[2]};
+            const glm::vec3 p1{verts[i1].pos[0], verts[i1].pos[1], verts[i1].pos[2]};
+            const glm::vec3 p2{verts[i2].pos[0], verts[i2].pos[1], verts[i2].pos[2]};
+            // Area-weighted face normal (unnormalised cross product).
+            const glm::vec3 faceN = glm::cross(p1 - p0, p2 - p0);
+            if (glm::dot(faceN, faceN) < 1e-10f) continue;  // degenerate, skip
+            normAccum[i0 - base] += faceN;
+            normAccum[i1 - base] += faceN;
+            normAccum[i2 - base] += faceN;
+        }
+        for (u32 i = 0; i < n; ++i)
+        {
+            const float len2 = glm::dot(normAccum[i], normAccum[i]);
+            if (len2 < 1e-10f) continue;  // degenerate vertex: keep (0, ±1, 0)
+            const glm::vec3 nn = normAccum[i] * (1.0f / std::sqrt(len2));
+            verts[base + i].normal[0] = nn.x;
+            verts[base + i].normal[1] = nn.y;
+            verts[base + i].normal[2] = nn.z;
+        }
+    }
 }
 
-// ─── appendWallQuad ───────────────────────────────────────────────────────────────
+// ─── appendWallQuad
 //
 // Phase 1F-A: per-end heights replace the single yFloor/yCeil pair.
 // For flat walls (yFloor0==yFloor1, yCeil0==yCeil1) output is identical to old.
