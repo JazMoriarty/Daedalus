@@ -1306,7 +1306,7 @@ int main(int argc, char* argv[])
             // ── WASD movement → physics character controller ─────────────────────
             {
                 const bool* keys = SDL_GetKeyboardState(nullptr);
-                constexpr float kMoveSpeed = 4.0f;  // m/s
+                constexpr float kMoveSpeed = 8.0f;  // m/s
 
                 // Horizontal movement only; gravity is applied by the physics step.
                 const glm::vec3 flatDir = glm::normalize(

@@ -436,23 +436,47 @@ void JoltPhysicsWorld::step(float dt)
 
     for (auto& [id, state] : m_characters)
     {
-        // ── Gravity accumulation ──────────────────────────────────────────────
-        // IsSupported() returns true when the character stands on solid ground
-        // (ground state != InAir / NotSupported).
-        if (state.character->IsSupported()) {
-            state.verticalVelocity = 0.0f;
-        } else {
-            state.verticalVelocity -= kGravity * dt;
-        }
-
-        // ── Merge horizontal input + accumulated vertical velocity ─────────────
+        // ── Gravity accumulation + slope following ──────────────────────────────────
         glm::vec3 hInput(0.0f);
         if (const auto it = m_characterInputs.find(id); it != m_characterInputs.end()) {
             hInput = it->second;
         }
-        state.character->SetLinearVelocity(
-            JPH::Vec3(hInput.x, state.verticalVelocity, hInput.z)
-        );
+
+        if (state.character->IsSupported())
+        {
+            state.verticalVelocity = 0.0f;
+
+            // Project the horizontal input onto the ground plane so the character
+            // follows downward slopes smoothly rather than stepping along them.
+            //
+            // Without this, velocity is purely horizontal (vy = 0).  On a
+            // descending slope the character moves forward but the surface drops,
+            // leaving the feet briefly above the mesh.  IsSupported() then returns
+            // false, gravity accumulates, the player drops a small amount and
+            // lands, and the cycle repeats — producing a stair-step sensation.
+            //
+            // With slope projection: for horizontal input (vx, 0, vz) on a surface
+            // with unit normal (nx, ny, nz), the vertical component that keeps the
+            // character tangent to the surface is -(nx*vx + nz*vz) / ny.
+            // On flat ground ny == 1, nx == nz == 0 → vy = 0 (unchanged).
+            // On a downward slope vy < 0 so the character moves smoothly downhill.
+            glm::vec3 finalVel = hInput;
+            if (glm::dot(hInput, hInput) > 1e-6f)
+            {
+                const JPH::Vec3 jGN = state.character->GetGroundNormal();
+                const float nx = jGN.GetX(), ny = jGN.GetY(), nz = jGN.GetZ();
+                if (std::abs(ny) > 1e-3f)
+                    finalVel.y = -(nx * hInput.x + nz * hInput.z) / ny;
+            }
+            state.character->SetLinearVelocity(
+                JPH::Vec3(finalVel.x, finalVel.y, finalVel.z));
+        }
+        else
+        {
+            state.verticalVelocity -= kGravity * dt;
+            state.character->SetLinearVelocity(
+                JPH::Vec3(hInput.x, state.verticalVelocity, hInput.z));
+        }
 
         // ── Advance character, resolving contacts against the physics world ───
         state.character->Update(
