@@ -543,11 +543,11 @@ void PropertyInspector::draw(EditMapDocument&      doc,
                 if (!sector.heightfield.has_value())
                 {
                     ImGui::TextDisabled("(no heightfield data)");
-                    if (ImGui::Button("Create 8\xc3\x97" "8 Heightfield"))
+                    if (ImGui::Button("Create 32\xc3\x97" "32 Heightfield"))
                     {
                         world::HeightfieldFloor hf;
-                        hf.gridWidth = 8u;
-                        hf.gridDepth = 8u;
+                        hf.gridWidth = 32u;
+                        hf.gridDepth = 32u;
                         // Bound the grid to the sector polygon's axis-aligned bounding box.
                         glm::vec2 mn{1e9f, 1e9f}, mx{-1e9f, -1e9f};
                         for (const auto& w : sector.walls)
@@ -731,11 +731,11 @@ void PropertyInspector::draw(EditMapDocument&      doc,
                 if (!sector.ceilHeightfield.has_value())
                 {
                     ImGui::TextDisabled("(no heightfield data)");
-                    if (ImGui::Button("Create 8\xc3\x97" "8 Heightfield##ceil"))
+                    if (ImGui::Button("Create 32\xc3\x97" "32 Heightfield##ceil"))
                     {
                         world::HeightfieldFloor hf;
-                        hf.gridWidth = 8u;
-                        hf.gridDepth = 8u;
+                        hf.gridWidth = 32u;
+                        hf.gridDepth = 32u;
                         // Bound to sector bounding box
                         glm::vec2 mn{1e9f, 1e9f}, mx{-1e9f, -1e9f};
                         for (const auto& w : sector.walls)

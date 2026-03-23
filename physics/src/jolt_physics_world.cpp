@@ -198,17 +198,31 @@ JoltPhysicsWorld::loadLevel(const world::WorldMapData& map)
                 const u32 w = hf.gridWidth;
                 const u32 d = hf.gridDepth;
 
+                std::printf("[Jolt] Sector %d: Floor heightfield detected (%ux%u grid, %zu samples)\n",
+                    static_cast<int>(&sector - &map.sectors[0]), w, d, hf.samples.size());
+
                 if (w >= 2 && d >= 2 && hf.samples.size() == w * d)
                 {
-                    // Jolt's HeightFieldShape only supports square grids (w == d).
-                    // For rectangular heightfields, use a triangle mesh instead.
-                    if (w == d)
+                    // Jolt's HeightFieldShape requires:
+                    //   1. Square grids (w == d)
+                    //   2. Minimum sample count (appears to be 32x32 based on error)
+                    // For rectangular or small heightfields, use triangle mesh instead.
+                    constexpr u32 kJoltMinSampleCount = 32;
+                    const bool canUseNativeHeightfield = (w == d) && (w >= kJoltMinSampleCount);
+
+                    if (canUseNativeHeightfield)
                     {
                         // Use native Jolt heightfield for square grids (more efficient).
                         const float worldSizeX = hf.worldMax.x - hf.worldMin.x;
                         const float worldSizeZ = hf.worldMax.y - hf.worldMin.y;
                         const glm::vec3 offset(hf.worldMin.x, 0.0f, hf.worldMin.y);
                         const glm::vec3 scale(worldSizeX / (w - 1), 1.0f, worldSizeZ / (d - 1));
+
+                        std::printf("[Jolt]   Square grid: using HeightFieldShape\n");
+                        std::printf("[Jolt]   World bounds: (%.2f,%.2f) to (%.2f,%.2f)\n",
+                            hf.worldMin.x, hf.worldMin.y, hf.worldMax.x, hf.worldMax.y);
+                        std::printf("[Jolt]   Offset: (%.2f, %.2f, %.2f), Scale: (%.2f, %.2f, %.2f)\n",
+                            offset.x, offset.y, offset.z, scale.x, scale.y, scale.z);
 
                         JPH::HeightFieldShapeSettings hfSettings(
                             hf.samples.data(), JPH::Vec3Arg(toJPH(offset)),
@@ -229,12 +243,23 @@ JoltPhysicsWorld::loadLevel(const world::WorldMapData& map)
 
                             const JPH::BodyID bid =
                                 bi.CreateAndAddBody(bcs, JPH::EActivation::DontActivate);
-                            if (!bid.IsInvalid()) { m_levelBodyIds.push_back(bid); }
+                            if (!bid.IsInvalid()) {
+                                m_levelBodyIds.push_back(bid);
+                                std::printf("[Jolt]   HeightFieldShape body created successfully\n");
+                            } else {
+                                std::printf("[Jolt]   ERROR: HeightFieldShape body creation failed\n");
+                            }
+                        } else {
+                            std::printf("[Jolt]   ERROR: HeightFieldShape::Create() failed: %s\n",
+                                result.GetError().c_str());
                         }
                     }
                     else
                     {
                         // Rectangular heightfield: build triangle mesh.
+                        std::printf("[Jolt]   Rectangular grid: using MeshShape (%u triangles)\n",
+                            2 * (w - 1) * (d - 1));
+
                         JPH::TriangleList triangles;
                         triangles.reserve(2 * (w - 1) * (d - 1));
 
@@ -280,13 +305,27 @@ JoltPhysicsWorld::loadLevel(const world::WorldMapData& map)
 
                             const JPH::BodyID bid =
                                 bi.CreateAndAddBody(bcs, JPH::EActivation::DontActivate);
-                            if (!bid.IsInvalid()) { m_levelBodyIds.push_back(bid); }
+                            if (!bid.IsInvalid()) {
+                                m_levelBodyIds.push_back(bid);
+                                std::printf("[Jolt]   MeshShape body created successfully\n");
+                            } else {
+                                std::printf("[Jolt]   ERROR: MeshShape body creation failed\n");
+                            }
+                        } else {
+                            std::printf("[Jolt]   ERROR: MeshShape::Create() failed: %s\n",
+                                result.GetError().c_str());
                         }
                     }
+                } else {
+                    std::printf("[Jolt]   ERROR: Invalid heightfield dimensions (w=%u, d=%u, samples=%zu)\n",
+                        w, d, hf.samples.size());
                 }
             }
             else
             {
+                std::printf("[Jolt] Sector %d: Flat/sloped floor\n",
+                    static_cast<int>(&sector - &map.sectors[0]));
+
                 // Detect slope: any wall with a floor height override.
                 bool isSloped = false;
                 for (const auto& w : sector.walls)
