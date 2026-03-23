@@ -593,6 +593,7 @@ static void appendHeightfieldFloor(
     }
 
     // Emit (W−1)×(D−1) quads as CCW triangles (floor, normal up).
+    // Diagonal direction alternates in a checkerboard pattern to eliminate Mach banding.
     for (u32 j = 0; j < D - 1u; ++j)
     {
         for (u32 i = 0; i < W - 1u; ++i)
@@ -602,9 +603,22 @@ static void appendHeightfieldFloor(
             const u32 tr = base + (j + 1u)* W + (i + 1u); // top-right
             const u32 tl = base + (j + 1u)* W +  i;       // top-left
 
-            // Two CCW triangles when viewed from above (+Y = floor normal).
-            indices.push_back(bl); indices.push_back(br); indices.push_back(tr);
-            indices.push_back(bl); indices.push_back(tr); indices.push_back(tl);
+            // Alternate diagonal direction in checkerboard pattern.
+            // This eliminates visible diagonal banding (Mach bands) at grazing angles.
+            const bool useBLtoTRdiagonal = ((i + j) & 1u) == 0u;
+            
+            if (useBLtoTRdiagonal)
+            {
+                // Diagonal from bottom-left to top-right.
+                indices.push_back(bl); indices.push_back(br); indices.push_back(tr);
+                indices.push_back(bl); indices.push_back(tr); indices.push_back(tl);
+            }
+            else
+            {
+                // Diagonal from bottom-right to top-left.
+                indices.push_back(br); indices.push_back(tr); indices.push_back(tl);
+                indices.push_back(br); indices.push_back(tl); indices.push_back(bl);
+            }
         }
     }
 }
@@ -709,6 +723,7 @@ static void appendHeightfieldCeiling(
     }
 
     // Emit (W−1)×(D−1) quads with reversed winding (CW when viewed from below).
+    // Diagonal direction alternates in a checkerboard pattern to eliminate Mach banding.
     for (u32 j = 0; j < D - 1u; ++j)
     {
         for (u32 i = 0; i < W - 1u; ++i)
@@ -718,9 +733,21 @@ static void appendHeightfieldCeiling(
             const u32 tr = base + (j + 1u)* W + (i + 1u);
             const u32 tl = base + (j + 1u)* W +  i;
 
-            // Reverse winding: (bl, tl, tr) and (bl, tr, br) instead of (bl, br, tr) and (bl, tr, tl).
-            indices.push_back(bl); indices.push_back(tl); indices.push_back(tr);
-            indices.push_back(bl); indices.push_back(tr); indices.push_back(br);
+            // Alternate diagonal direction in checkerboard pattern.
+            const bool useBLtoTRdiagonal = ((i + j) & 1u) == 0u;
+            
+            if (useBLtoTRdiagonal)
+            {
+                // Diagonal from bottom-left to top-right (ceiling winding).
+                indices.push_back(bl); indices.push_back(tl); indices.push_back(tr);
+                indices.push_back(bl); indices.push_back(tr); indices.push_back(br);
+            }
+            else
+            {
+                // Diagonal from bottom-right to top-left (ceiling winding).
+                indices.push_back(br); indices.push_back(bl); indices.push_back(tl);
+                indices.push_back(br); indices.push_back(tl); indices.push_back(tr);
+            }
         }
     }
 }
