@@ -161,8 +161,8 @@ constexpr u32 k_JSON_VERSION = 5u;
         j["heightfield"] = std::move(jh);
     }
     // Phase 1F-D+: heightfield terrain ceiling (omit when not set).
-    if (sec.ceilingShape == CeilingShape::Heightfield)
-        j["ceiling_shape"] = static_cast<u32>(sec.ceilingShape);
+    // Always write ceiling_shape so standalone app doesn't default to Flat.
+    j["ceiling_shape"] = static_cast<u32>(sec.ceilingShape);
     if (sec.ceilHeightfield)
     {
         const auto& hf = *sec.ceilHeightfield;
