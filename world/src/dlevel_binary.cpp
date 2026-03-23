@@ -200,7 +200,7 @@ namespace
 {
 
 constexpr u32 k_MAGIC   = 0x4C564C44u;  // 'D','L','V','L' as little-endian u32
-constexpr u32 k_VERSION = 8u;  // v8: Phase 1F — curved walls, slopes, portals, detail brushes, heightfields
+constexpr u32 k_VERSION = 9u;  // v9: ceiling heightfield serialization
 
 // ─── Write helpers ────────────────────────────────────────────────────────────
 
@@ -751,26 +751,29 @@ std::expected<LevelPackData, DlevelError> loadDlevel(const std::filesystem::path
                 sec.heightfield = std::move(hf);
             }
 
-            // Ceiling shape + heightfield
-            u32 ceilingShapeRaw = 0;
-            if (!r.read(ceilingShapeRaw)) return std::unexpected(DlevelError::ParseError);
-            sec.ceilingShape = static_cast<CeilingShape>(ceilingShapeRaw);
-            
-            u32 hasCeilHF = 0;
-            if (!r.read(hasCeilHF)) return std::unexpected(DlevelError::ParseError);
-            if (hasCeilHF)
+            // Ceiling shape + heightfield (v9+)
+            if (version >= 9u)
             {
-                HeightfieldFloor hf;
-                u32 sampleCount = 0;
-                if (!r.read(hf.gridWidth) || !r.read(hf.gridDepth))
-                    return std::unexpected(DlevelError::ParseError);
-                if (!r.readVec2(hf.worldMin) || !r.readVec2(hf.worldMax))
-                    return std::unexpected(DlevelError::ParseError);
-                if (!r.read(sampleCount)) return std::unexpected(DlevelError::ParseError);
-                hf.samples.resize(sampleCount);
-                for (u32 s = 0; s < sampleCount; ++s)
-                    if (!r.read(hf.samples[s])) return std::unexpected(DlevelError::ParseError);
-                sec.ceilHeightfield = std::move(hf);
+                u32 ceilingShapeRaw = 0;
+                if (!r.read(ceilingShapeRaw)) return std::unexpected(DlevelError::ParseError);
+                sec.ceilingShape = static_cast<CeilingShape>(ceilingShapeRaw);
+                
+                u32 hasCeilHF = 0;
+                if (!r.read(hasCeilHF)) return std::unexpected(DlevelError::ParseError);
+                if (hasCeilHF)
+                {
+                    HeightfieldFloor hf;
+                    u32 sampleCount = 0;
+                    if (!r.read(hf.gridWidth) || !r.read(hf.gridDepth))
+                        return std::unexpected(DlevelError::ParseError);
+                    if (!r.readVec2(hf.worldMin) || !r.readVec2(hf.worldMax))
+                        return std::unexpected(DlevelError::ParseError);
+                    if (!r.read(sampleCount)) return std::unexpected(DlevelError::ParseError);
+                    hf.samples.resize(sampleCount);
+                    for (u32 s = 0; s < sampleCount; ++s)
+                        if (!r.read(hf.samples[s])) return std::unexpected(DlevelError::ParseError);
+                    sec.ceilHeightfield = std::move(hf);
+                }
             }
 
             // Detail brushes
