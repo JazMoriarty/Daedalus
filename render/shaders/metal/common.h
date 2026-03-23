@@ -163,7 +163,11 @@ inline float3 cook_torrance(float3 N, float3 V, float3 L,
     float3 H  = normalize(V + L);
 
     float NdotL = max(dot(N, L), 0.0);
-    float NdotV = max(dot(N, V), 0.0);
+    // Clamp NdotV to 0.01 (grazing angle ~89.4°) to prevent division-by-near-zero
+    // in the geometry term denominator. At sharp heightfield peaks/edges, extreme
+    // grazing angles amplify specular to infinity, producing bright edges that
+    // disappear as the camera approaches and the viewing angle becomes less steep.
+    float NdotV = max(dot(N, V), 0.01);
     float NdotH = max(dot(N, H), 0.0);
     float HdotV = max(dot(H, V), 0.0);
 
