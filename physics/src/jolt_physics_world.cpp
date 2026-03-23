@@ -185,15 +185,58 @@ JoltPhysicsWorld::loadLevel(const world::WorldMapData& map)
         }
 
         // ── Floor collision ───────────────────────────────────────────
-        // Flat floors use a simple axis-aligned BoxShape slab.
-        // Sloped floors (any wall has floorHeightOverride) use a MeshShape
-        // built from the per-vertex heights so the character controller slides
-        // up and down ramps instead of walking through them.
+        // Floor shape priority:
+        //   1. Heightfield: native JPH::HeightFieldShape from sector.heightfield
+        //   2. Sloped: MeshShape from per-vertex heights (wall overrides)
+        //   3. Flat: BoxShape slab (default)
         {
-            // Detect slope: any wall with a floor height override.
-            bool isSloped = false;
-            for (const auto& w : sector.walls)
-                if (w.floorHeightOverride.has_value()) { isSloped = true; break; }
+            // Check if sector uses heightfield terrain.
+            if (sector.floorShape == world::FloorShape::Heightfield &&
+                sector.heightfield.has_value())
+            {
+                const world::HeightfieldFloor& hf = *sector.heightfield;
+                const u32 w = hf.gridWidth;
+                const u32 d = hf.gridDepth;
+
+                if (w >= 2 && d >= 2 && hf.samples.size() == w * d)
+                {
+                    // Compute world-space scale and offset.
+                    // Jolt heightfield origin is at min corner (worldMin.x, worldMin.y).
+                    const float worldSizeX = hf.worldMax.x - hf.worldMin.x;
+                    const float worldSizeZ = hf.worldMax.y - hf.worldMin.y;
+                    const glm::vec3 offset(hf.worldMin.x, 0.0f, hf.worldMin.y);
+                    const glm::vec3 scale(worldSizeX / (w - 1), 1.0f, worldSizeZ / (d - 1));
+
+                    // Create Jolt heightfield shape. Jolt expects row-major order
+                    // matching our convention: samples[j * w + i].
+                    JPH::HeightFieldShapeSettings hfSettings(
+                        hf.samples.data(), JPH::Vec3Arg(toJPH(offset)), JPH::Vec3Arg(toJPH(scale)), w
+                    );
+                    hfSettings.mBlockSize = std::min(8u, std::min(w, d));  // optimize BVH
+
+                    const JPH::ShapeSettings::ShapeResult result = hfSettings.Create();
+                    if (!result.HasError())
+                    {
+                        JPH::BodyCreationSettings bcs(
+                            result.Get(),
+                            JPH::RVec3::sZero(),
+                            JPH::Quat::sIdentity(),
+                            JPH::EMotionType::Static,
+                            Layers::NON_MOVING
+                        );
+
+                        const JPH::BodyID bid =
+                            bi.CreateAndAddBody(bcs, JPH::EActivation::DontActivate);
+                        if (!bid.IsInvalid()) { m_levelBodyIds.push_back(bid); }
+                    }
+                }
+            }
+            else
+            {
+                // Detect slope: any wall with a floor height override.
+                bool isSloped = false;
+                for (const auto& w : sector.walls)
+                    if (w.floorHeightOverride.has_value()) { isSloped = true; break; }
 
             if (isSloped)
             {
@@ -287,6 +330,78 @@ JoltPhysicsWorld::loadLevel(const world::WorldMapData& map)
                     const JPH::BodyID bid =
                         bi.CreateAndAddBody(bcs, JPH::EActivation::DontActivate);
                     if (!bid.IsInvalid()) { m_levelBodyIds.push_back(bid); }
+                }
+            }
+            }
+        }
+
+        // ── Ceiling collision ──────────────────────────────────────────
+        // Ceiling heightfields use either:
+        //   1. Inverted heightfield (not directly supported by Jolt)
+        //   2. Triangle mesh with inverted normals (implemented here)
+        // Flat ceilings do not need collision (player walks on floor, not ceiling).
+        {
+            if (sector.ceilingShape == world::CeilingShape::Heightfield &&
+                sector.ceilHeightfield.has_value())
+            {
+                const world::HeightfieldFloor& hf = *sector.ceilHeightfield;
+                const u32 w = hf.gridWidth;
+                const u32 d = hf.gridDepth;
+
+                if (w >= 2 && d >= 2 && hf.samples.size() == w * d)
+                {
+                    // Build triangle mesh from ceiling heightfield.
+                    // Winding order is reversed (CW when viewed from below) to
+                    // ensure normals point downward for collision detection.
+                    JPH::TriangleList triangles;
+                    triangles.reserve(2 * (w - 1) * (d - 1));
+
+                    const float cellSizeX = (hf.worldMax.x - hf.worldMin.x) / (w - 1);
+                    const float cellSizeZ = (hf.worldMax.y - hf.worldMin.y) / (d - 1);
+
+                    for (u32 j = 0; j < d - 1; ++j)
+                    {
+                        for (u32 i = 0; i < w - 1; ++i)
+                        {
+                            const float px0 = hf.worldMin.x + i * cellSizeX;
+                            const float px1 = hf.worldMin.x + (i + 1) * cellSizeX;
+                            const float pz0 = hf.worldMin.y + j * cellSizeZ;
+                            const float pz1 = hf.worldMin.y + (j + 1) * cellSizeZ;
+
+                            const float h00 = hf.samples[j * w + i];
+                            const float h10 = hf.samples[j * w + (i + 1)];
+                            const float h01 = hf.samples[(j + 1) * w + i];
+                            const float h11 = hf.samples[(j + 1) * w + (i + 1)];
+
+                            const JPH::Float3 v00(px0, h00, pz0);
+                            const JPH::Float3 v10(px1, h10, pz0);
+                            const JPH::Float3 v01(px0, h01, pz1);
+                            const JPH::Float3 v11(px1, h11, pz1);
+
+                            // Reversed winding order (CW from below) for downward normals.
+                            // Triangle 1: (i,j) → (i+1,j) → (i,j+1)
+                            triangles.push_back(JPH::Triangle(v00, v10, v01));
+                            // Triangle 2: (i+1,j) → (i+1,j+1) → (i,j+1)
+                            triangles.push_back(JPH::Triangle(v10, v11, v01));
+                        }
+                    }
+
+                    JPH::MeshShapeSettings meshSettings(triangles);
+                    const JPH::ShapeSettings::ShapeResult result = meshSettings.Create();
+                    if (!result.HasError())
+                    {
+                        JPH::BodyCreationSettings bcs(
+                            result.Get(),
+                            JPH::RVec3::sZero(),
+                            JPH::Quat::sIdentity(),
+                            JPH::EMotionType::Static,
+                            Layers::NON_MOVING
+                        );
+
+                        const JPH::BodyID bid =
+                            bi.CreateAndAddBody(bcs, JPH::EActivation::DontActivate);
+                        if (!bid.IsInvalid()) { m_levelBodyIds.push_back(bid); }
+                    }
                 }
             }
         }
