@@ -215,3 +215,117 @@ TEST(PhysicsWorldTest, QueryRayHitsFloorSlab)
     EXPECT_NEAR(hit->position.y, 0.0f, 0.15f) << "hit should be near y=0 (floor surface)";
     EXPECT_GT(hit->distance, 0.0f);
 }
+
+// ─── Heightfield collision ────────────────────────────────────────────────────
+
+TEST(PhysicsWorldTest, HeightfieldFloorCollision)
+{
+    // Create a 4x4 heightfield terrain with a small hill in the center.
+    WorldMapData map;
+    map.name = "HeightfieldTest";
+
+    Sector s;
+    s.floorHeight = 0.0f;
+    s.ceilHeight  = 4.0f;
+    s.floorShape  = FloorShape::Heightfield;
+
+    // 4x4 heightfield covering -5 to +5 in X and Z.
+    HeightfieldFloor hf;
+    hf.gridWidth = 4;
+    hf.gridDepth = 4;
+    hf.worldMin = {-5.0f, -5.0f};
+    hf.worldMax = { 5.0f,  5.0f};
+    // Create a small hill: center samples are higher (1.0), edges are lower (0.0).
+    hf.samples = {
+        0.0f, 0.0f, 0.0f, 0.0f,  // row 0
+        0.0f, 1.0f, 1.0f, 0.0f,  // row 1 (center)
+        0.0f, 1.0f, 1.0f, 0.0f,  // row 2 (center)
+        0.0f, 0.0f, 0.0f, 0.0f   // row 3
+    };
+    s.heightfield = hf;
+
+    Wall w0; w0.p0 = {-5.0f, -5.0f}; s.walls.push_back(w0);
+    Wall w1; w1.p0 = { 5.0f, -5.0f}; s.walls.push_back(w1);
+    Wall w2; w2.p0 = { 5.0f,  5.0f}; s.walls.push_back(w2);
+    Wall w3; w3.p0 = {-5.0f,  5.0f}; s.walls.push_back(w3);
+    map.sectors.push_back(std::move(s));
+
+    auto pw = makePhysicsWorld();
+    ASSERT_TRUE(pw->loadLevel(map).has_value());
+
+    // Ray cast at center (should hit at y≈1.0, the hill peak).
+    const auto hitCenter = pw->queryRay(glm::vec3(0.0f, 3.0f, 0.0f),
+                                        glm::vec3(0.0f, -1.0f, 0.0f),
+                                        10.0f);
+    ASSERT_TRUE(hitCenter.has_value()) << "ray should hit heightfield at center";
+    EXPECT_NEAR(hitCenter->position.y, 1.0f, 0.3f) << "center should be at y≈1.0";
+
+    // Character should land on the hill and stay supported.
+    World ecs;
+    const EntityId player = ecs.createEntity();
+    ecs.addComponent(player, TransformComponent{ .position = glm::vec3(0.0f, 5.0f, 0.0f) });
+    ASSERT_TRUE(pw->addCharacter(player, kDefaultChar, glm::vec3(0.0f, 5.0f, 0.0f)).has_value());
+
+    // Simulate falling and landing on the heightfield.
+    constexpr float dt = 1.0f / 60.0f;
+    for (int i = 0; i < 120; ++i)
+    {
+        pw->step(dt);
+        pw->syncTransforms(ecs);
+    }
+
+    const auto& tc = ecs.getComponent<TransformComponent>(player);
+    // Character should land on the hill peak at y≈1.0.
+    EXPECT_NEAR(tc.position.y, 1.0f, 0.2f)
+        << "character should land on heightfield hill at y≈1.0";
+}
+
+TEST(PhysicsWorldTest, HeightfieldCeilingCollision)
+{
+    // Create a ceiling heightfield with a downward bump.
+    WorldMapData map;
+    map.name = "CeilingHeightfieldTest";
+
+    Sector s;
+    s.floorHeight = 0.0f;
+    s.ceilHeight  = 4.0f;
+    s.ceilingShape = CeilingShape::Heightfield;
+
+    // 4x4 ceiling heightfield.
+    HeightfieldFloor hf;
+    hf.gridWidth = 4;
+    hf.gridDepth = 4;
+    hf.worldMin = {-5.0f, -5.0f};
+    hf.worldMax = { 5.0f,  5.0f};
+    // Center samples are lower (3.0), edges are higher (4.0) — a downward bump.
+    hf.samples = {
+        4.0f, 4.0f, 4.0f, 4.0f,  // row 0
+        4.0f, 3.0f, 3.0f, 4.0f,  // row 1 (center dip)
+        4.0f, 3.0f, 3.0f, 4.0f,  // row 2 (center dip)
+        4.0f, 4.0f, 4.0f, 4.0f   // row 3
+    };
+    s.ceilHeightfield = hf;
+
+    Wall w0; w0.p0 = {-5.0f, -5.0f}; s.walls.push_back(w0);
+    Wall w1; w1.p0 = { 5.0f, -5.0f}; s.walls.push_back(w1);
+    Wall w2; w2.p0 = { 5.0f,  5.0f}; s.walls.push_back(w2);
+    Wall w3; w3.p0 = {-5.0f,  5.0f}; s.walls.push_back(w3);
+    map.sectors.push_back(std::move(s));
+
+    auto pw = makePhysicsWorld();
+    ASSERT_TRUE(pw->loadLevel(map).has_value());
+
+    // Ray cast upward at corner (should hit ceiling at y≈4.0).
+    const auto hitCorner = pw->queryRay(glm::vec3(-4.0f, 1.0f, -4.0f),
+                                        glm::vec3(0.0f, 1.0f, 0.0f),
+                                        10.0f);
+    ASSERT_TRUE(hitCorner.has_value()) << "upward ray should hit ceiling at corner";
+    EXPECT_NEAR(hitCorner->position.y, 4.0f, 0.2f) << "corner ceiling should be at y≈4.0";
+
+    // Ray cast upward at center (should hit lower ceiling at y≈3.0).
+    const auto hitCenter = pw->queryRay(glm::vec3(0.0f, 1.0f, 0.0f),
+                                        glm::vec3(0.0f, 1.0f, 0.0f),
+                                        10.0f);
+    ASSERT_TRUE(hitCenter.has_value()) << "upward ray should hit ceiling at center";
+    EXPECT_NEAR(hitCenter->position.y, 3.0f, 0.2f) << "center ceiling dip should be at y≈3.0";
+}

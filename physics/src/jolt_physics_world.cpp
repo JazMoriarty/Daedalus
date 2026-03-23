@@ -200,34 +200,88 @@ JoltPhysicsWorld::loadLevel(const world::WorldMapData& map)
 
                 if (w >= 2 && d >= 2 && hf.samples.size() == w * d)
                 {
-                    // Compute world-space scale and offset.
-                    // Jolt heightfield origin is at min corner (worldMin.x, worldMin.y).
-                    const float worldSizeX = hf.worldMax.x - hf.worldMin.x;
-                    const float worldSizeZ = hf.worldMax.y - hf.worldMin.y;
-                    const glm::vec3 offset(hf.worldMin.x, 0.0f, hf.worldMin.y);
-                    const glm::vec3 scale(worldSizeX / (w - 1), 1.0f, worldSizeZ / (d - 1));
-
-                    // Create Jolt heightfield shape. Jolt expects row-major order
-                    // matching our convention: samples[j * w + i].
-                    JPH::HeightFieldShapeSettings hfSettings(
-                        hf.samples.data(), JPH::Vec3Arg(toJPH(offset)), JPH::Vec3Arg(toJPH(scale)), w
-                    );
-                    hfSettings.mBlockSize = std::min(8u, std::min(w, d));  // optimize BVH
-
-                    const JPH::ShapeSettings::ShapeResult result = hfSettings.Create();
-                    if (!result.HasError())
+                    // Jolt's HeightFieldShape only supports square grids (w == d).
+                    // For rectangular heightfields, use a triangle mesh instead.
+                    if (w == d)
                     {
-                        JPH::BodyCreationSettings bcs(
-                            result.Get(),
-                            JPH::RVec3::sZero(),
-                            JPH::Quat::sIdentity(),
-                            JPH::EMotionType::Static,
-                            Layers::NON_MOVING
-                        );
+                        // Use native Jolt heightfield for square grids (more efficient).
+                        const float worldSizeX = hf.worldMax.x - hf.worldMin.x;
+                        const float worldSizeZ = hf.worldMax.y - hf.worldMin.y;
+                        const glm::vec3 offset(hf.worldMin.x, 0.0f, hf.worldMin.y);
+                        const glm::vec3 scale(worldSizeX / (w - 1), 1.0f, worldSizeZ / (d - 1));
 
-                        const JPH::BodyID bid =
-                            bi.CreateAndAddBody(bcs, JPH::EActivation::DontActivate);
-                        if (!bid.IsInvalid()) { m_levelBodyIds.push_back(bid); }
+                        JPH::HeightFieldShapeSettings hfSettings(
+                            hf.samples.data(), JPH::Vec3Arg(toJPH(offset)),
+                            JPH::Vec3Arg(toJPH(scale)), w
+                        );
+                        hfSettings.mBlockSize = std::min(8u, w);
+
+                        const JPH::ShapeSettings::ShapeResult result = hfSettings.Create();
+                        if (!result.HasError())
+                        {
+                            JPH::BodyCreationSettings bcs(
+                                result.Get(),
+                                JPH::RVec3::sZero(),
+                                JPH::Quat::sIdentity(),
+                                JPH::EMotionType::Static,
+                                Layers::NON_MOVING
+                            );
+
+                            const JPH::BodyID bid =
+                                bi.CreateAndAddBody(bcs, JPH::EActivation::DontActivate);
+                            if (!bid.IsInvalid()) { m_levelBodyIds.push_back(bid); }
+                        }
+                    }
+                    else
+                    {
+                        // Rectangular heightfield: build triangle mesh.
+                        JPH::TriangleList triangles;
+                        triangles.reserve(2 * (w - 1) * (d - 1));
+
+                        const float cellSizeX = (hf.worldMax.x - hf.worldMin.x) / (w - 1);
+                        const float cellSizeZ = (hf.worldMax.y - hf.worldMin.y) / (d - 1);
+
+                        for (u32 j = 0; j < d - 1; ++j)
+                        {
+                            for (u32 i = 0; i < w - 1; ++i)
+                            {
+                                const float px0 = hf.worldMin.x + i * cellSizeX;
+                                const float px1 = hf.worldMin.x + (i + 1) * cellSizeX;
+                                const float pz0 = hf.worldMin.y + j * cellSizeZ;
+                                const float pz1 = hf.worldMin.y + (j + 1) * cellSizeZ;
+
+                                const float h00 = hf.samples[j * w + i];
+                                const float h10 = hf.samples[j * w + (i + 1)];
+                                const float h01 = hf.samples[(j + 1) * w + i];
+                                const float h11 = hf.samples[(j + 1) * w + (i + 1)];
+
+                                const JPH::Float3 v00(px0, h00, pz0);
+                                const JPH::Float3 v10(px1, h10, pz0);
+                                const JPH::Float3 v01(px0, h01, pz1);
+                                const JPH::Float3 v11(px1, h11, pz1);
+
+                                // CCW winding for upward-facing normals.
+                                triangles.push_back(JPH::Triangle(v00, v01, v10));
+                                triangles.push_back(JPH::Triangle(v10, v01, v11));
+                            }
+                        }
+
+                        JPH::MeshShapeSettings meshSettings(triangles);
+                        const JPH::ShapeSettings::ShapeResult result = meshSettings.Create();
+                        if (!result.HasError())
+                        {
+                            JPH::BodyCreationSettings bcs(
+                                result.Get(),
+                                JPH::RVec3::sZero(),
+                                JPH::Quat::sIdentity(),
+                                JPH::EMotionType::Static,
+                                Layers::NON_MOVING
+                            );
+
+                            const JPH::BodyID bid =
+                                bi.CreateAndAddBody(bcs, JPH::EActivation::DontActivate);
+                            if (!bid.IsInvalid()) { m_levelBodyIds.push_back(bid); }
+                        }
                     }
                 }
             }
