@@ -395,12 +395,14 @@ void HelpPanel::drawKeyboard()
 
     ImGui::Spacing();
     ImGui::SeparatorText("Terrain Paint  (fly mode + Heightfield sector selected)");
-    Tip("These are not keyboard shortcuts but active controls while fly mode is running.");
+    Tip("Press T to toggle terrain paint mode on/off. Press C to toggle between floor and ceiling heightfield painting.");
+    KeyRow("T",            "Toggle terrain paint mode on/off  (prevents accidental painting)");
+    KeyRow("C",            "Toggle between floor and ceiling heightfield painting");
     KeyRow("LMB hold",     "Raise terrain within brush radius");
     KeyRow("RMB hold",     "Lower terrain within brush radius");
     KeyRow("Shift+LMB",    "Smooth terrain (blend toward local average)");
     KeyRow("Alt+LMB",      "Flatten terrain (stamp the height at the brush anchor)");
-    KeyRow("Scroll",       "Adjust brush radius  (0.25 \xe2\x80\x93 20 m)");
+    KeyRow("Scroll",       "Adjust brush radius  (0.25 – 20 m)");
 
     ImGui::Spacing();
     ImGui::SeparatorText("Vertex Height Handles  (3D viewport, Vertex selection, no fly mode)");
@@ -559,21 +561,25 @@ void HelpPanel::draw3DViewport()
     ImGui::Spacing();
     ImGui::SeparatorText("Terrain Paint Brushes");
     ImGui::TextWrapped(
-        "When a Heightfield-floor sector is selected and fly mode is active "
-        "(Tab to enter), the 3D viewport switches to terrain paint mode.  "
-        "The overlay text at the top confirms the active brush mode.");
-    Bullet("Left-mouse hold \xe2\x80\x94 Raise: lifts terrain within brush radius.");
-    Bullet("Right-mouse hold \xe2\x80\x94 Lower: pushes terrain down within brush radius.");
-    Bullet("Shift + Left-mouse \xe2\x80\x94 Smooth: blends heights toward the local average, "
+        "When a Heightfield sector is selected and fly mode is active (Tab to enter), "
+        "press T to enable terrain paint mode. Press C to toggle between floor and ceiling "
+        "heightfield painting. The overlay text at the top confirms the active surface and brush mode.");
+    Bullet("T key — Toggle terrain paint mode on/off. When disabled, fly mode navigation "
+           "works normally even with a heightfield sector selected.");
+    Bullet("C key — Toggle between FLOOR and CEILING heightfield painting (only when "
+           "terrain paint mode is enabled).");
+    Bullet("Left-mouse hold — Raise: lifts terrain within brush radius.");
+    Bullet("Right-mouse hold — Lower: pushes terrain down within brush radius.");
+    Bullet("Shift + Left-mouse — Smooth: blends heights toward the local average, "
            "removing spikes and sharpness.");
-    Bullet("Alt + Left-mouse \xe2\x80\x94 Flatten: stamps every sample within the radius "
+    Bullet("Alt + Left-mouse — Flatten: stamps every sample within the radius "
            "to the height directly under the brush centre at drag-start.");
-    Bullet("Scroll wheel \xe2\x80\x94 adjusts brush radius from 0.25 m to 20 m.");
+    Bullet("Scroll wheel — adjusts brush radius from 0.25 m to 20 m.");
     ImGui::TextWrapped(
         "A coloured circle and crosshair show the brush position and radius in world space.  "
         "Green = Raise, Red = Lower, Amber = Smooth or Flatten.  "
         "The entire stroke from first click to release is a single undoable step.");
-    Tip("The brush hits the horizontal plane at the sector's floor height.  "
+    Tip("The brush hits the horizontal plane at the sector's floor or ceiling height.  "
         "Fly at a low angle pointing toward the terrain for best accuracy.");
 
     ImGui::Spacing();
@@ -716,16 +722,19 @@ void HelpPanel::drawSectorsWalls()
     ImGui::Spacing();
 
     // ─ Sectors ───────────────────────────────────────────────────────
+    ImGui::Spacing();
     ImGui::SeparatorText("Sector Properties  (Properties panel)");
     ImGui::TextWrapped(
         "Select a sector with the Select tool to view and edit all of its "
-        "properties in the Properties panel.");
+        "properties in the Properties panel. Properties are organized into "
+        "collapsing headers: Floor, Ceiling, Sector Flags, Lighting, and Walls.");
 
-    Bullet("Floor Height / Ceiling Height — drag to adjust.  "
-           "All walls and portals use these values for tessellation.");
+    Bullet("Floor section — contains Floor Height, Floor Shape, floor material UUID, "
+           "and floor-related settings like heightfield controls and visual stairs.");
+    Bullet("Ceiling section — contains Ceiling Height, Ceiling Shape, ceiling material UUID, "
+           "and ceiling-related settings like heightfield controls.");
     Bullet("Walls — each wall is listed below the sector properties.  "
            "Click to expand a wall's flags and UV controls inline.");
-
     ImGui::Spacing();
     ImGui::SeparatorText("Sector Flags");
     Bullet("Outdoors — sector receives direct sunlight and sun shadows.  "
@@ -750,7 +759,7 @@ void HelpPanel::drawSectorsWalls()
         "default white material.");
 
     ImGui::Spacing();
-    ImGui::SeparatorText("Floor Shape  (Properties panel > Floor Shape)");
+    ImGui::SeparatorText("Floor Shape  (Properties panel > Floor section)");
     ImGui::TextWrapped(
         "Each sector's floor mesh can be generated in one of three ways:");
     Bullet("Flat (default) — standard flat floor, optionally with per-vertex "
@@ -764,6 +773,18 @@ void HelpPanel::drawSectorsWalls()
     Tip("The Staircase Generator panel (Window > Staircase Generator) can "
         "apply a Stair Profile to the selected sector automatically, or "
         "generate a chain of portal-linked step sectors.");
+
+    ImGui::Spacing();
+    ImGui::SeparatorText("Ceiling Shape  (Properties panel > Ceiling section)");
+    ImGui::TextWrapped(
+        "Each sector's ceiling mesh can be generated in two ways:");
+    Bullet("Flat (default) — standard flat ceiling, optionally with per-vertex "
+           "height overrides for angled or vaulted surfaces.");
+    Bullet("Heightfield — the ceiling is a terrain mesh generated from a sample "
+           "grid, identical to floor heightfields but inverted. Use for caves, "
+           "organic rock formations, and irregular ceiling surfaces.");
+    Tip("Ceiling heightfields paint exactly like floor heightfields — press C "
+        "in terrain paint mode to toggle between them.");
 
     ImGui::Spacing();
     ImGui::SeparatorText("Floor / Ceiling Portals  (Properties panel)");
@@ -1622,25 +1643,35 @@ void HelpPanel::drawAdvancedGeometry()
 
     // ─ Heightfield terrain ─────────────────────────────────────────
     ImGui::Spacing();
-    ImGui::SeparatorText("Terrain Heightfield Floor");
+    ImGui::SeparatorText("Terrain Heightfield Floor & Ceiling");
     ImGui::TextWrapped(
-        "Setting a sector's Floor Shape to Heightfield replaces the flat floor "
-        "with a regular grid of height samples.  The tessellator generates a "
-        "smooth mesh with per-vertex normals; the physics engine uses a native "
-        "heightfield collision shape.");
-    Step(1, "Select a sector.  In Properties > Floor Shape, choose Heightfield.");
-    Step(2, "Click \"Create 8\xc3\x97" "8 Heightfield\" to initialise a flat grid over the "
-            "sector's bounding box at the current floor height.");
+        "Setting a sector's Floor Shape or Ceiling Shape to Heightfield replaces "
+        "the flat surface with a regular grid of height samples. The tessellator "
+        "generates a smooth mesh with per-vertex normals; the physics engine uses "
+        "a native heightfield collision shape (Jolt Physics HeightFieldShape for "
+        "grids ≥32×32 square, triangle mesh fallback for smaller or rectangular grids).");
+    Step(1, "Select a sector. In Properties > Floor (or Ceiling) section, "
+            "set Floor Shape (or Ceiling Shape) to Heightfield.");
+    Step(2, "Click \"Create 32×32 Heightfield\" to initialise a flat grid over the "
+            "sector's bounding box at the current floor/ceiling height.");
     Step(3, "In the Properties panel, adjust Grid Width and Grid Depth to set "
-            "the terrain resolution (2\xc3\x97 2 to 256\xc3\x97" "256 samples).");
-    Step(4, "Enter fly mode in the 3D viewport (Tab) while the sector is selected.  "
-            "Left-mouse to raise, right-mouse to lower, Shift+LMB to smooth, "
-            "Alt+LMB to flatten.  Scroll adjusts brush radius.");
+            "the terrain resolution (2×2 to 256×256 samples). Default is 32×32 "
+            "for optimal physics performance.");
+    Step(4, "Enter fly mode in the 3D viewport (Tab) while the sector is selected.");
+    Step(5, "Press T to enable terrain paint mode. The status overlay shows \"terrain paint (ON)\".");
+    Step(6, "Press C to toggle between FLOOR and CEILING heightfield painting. "
+            "The overlay shows which surface is active.");
+    Step(7, "Paint the terrain: Left-mouse to raise, right-mouse to lower, "
+            "Shift+LMB to smooth, Alt+LMB to flatten. Scroll adjusts brush radius.");
     Tip("The entire paint stroke from first click to release is stored as a "
-        "single undoable command.  Cmd+Z reverts the whole stroke at once.");
-    Tip("Increasing resolution bilinearly interpolates existing samples.  "
-        "Decreasing resolution averages them.  Use higher resolution only "
+        "single undoable command. Cmd+Z reverts the whole stroke at once.");
+    Tip("Increasing resolution bilinearly interpolates existing samples. "
+        "Decreasing resolution averages them. Use higher resolution only "
         "where terrain detail is needed.");
+    Tip("Press T again to disable terrain paint mode and return to normal fly mode "
+        "navigation without accidentally painting terrain.");
+    Tip("UV mapping on heightfield surfaces uses world-space coordinates (not normalized). "
+        "Adjust UV Scale and Offset in the Floor/Ceiling section to control texture tiling.");
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
