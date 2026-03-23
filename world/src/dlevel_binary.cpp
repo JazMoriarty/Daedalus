@@ -357,13 +357,31 @@ std::expected<void, DlevelError> saveDlevel(const LevelPackData&         pack,
             w.write(sec.stairProfile->directionAngle);
         }
 
-        // Heightfield (optional)
+        // Floor heightfield (optional)
         const u32 hasHF = (sec.heightfield.has_value() &&
                            !sec.heightfield->samples.empty()) ? 1u : 0u;
         w.write(hasHF);
         if (hasHF)
         {
             const HeightfieldFloor& hf = *sec.heightfield;
+            w.write(hf.gridWidth);
+            w.write(hf.gridDepth);
+            w.writeVec2(hf.worldMin);
+            w.writeVec2(hf.worldMax);
+            const u32 sampleCount = hf.gridWidth * hf.gridDepth;
+            w.write(sampleCount);
+            for (u32 s = 0; s < sampleCount && s < static_cast<u32>(hf.samples.size()); ++s)
+                w.write(hf.samples[s]);
+        }
+
+        // Ceiling shape + heightfield (optional)
+        w.write(static_cast<u32>(sec.ceilingShape));
+        const u32 hasCeilHF = (sec.ceilHeightfield.has_value() &&
+                               !sec.ceilHeightfield->samples.empty()) ? 1u : 0u;
+        w.write(hasCeilHF);
+        if (hasCeilHF)
+        {
+            const HeightfieldFloor& hf = *sec.ceilHeightfield;
             w.write(hf.gridWidth);
             w.write(hf.gridDepth);
             w.writeVec2(hf.worldMin);
@@ -715,7 +733,7 @@ std::expected<LevelPackData, DlevelError> loadDlevel(const std::filesystem::path
                 sec.stairProfile = sp;
             }
 
-            // Heightfield
+            // Floor heightfield
             u32 hasHF = 0;
             if (!r.read(hasHF)) return std::unexpected(DlevelError::ParseError);
             if (hasHF)
@@ -731,6 +749,28 @@ std::expected<LevelPackData, DlevelError> loadDlevel(const std::filesystem::path
                 for (u32 s = 0; s < sampleCount; ++s)
                     if (!r.read(hf.samples[s])) return std::unexpected(DlevelError::ParseError);
                 sec.heightfield = std::move(hf);
+            }
+
+            // Ceiling shape + heightfield
+            u32 ceilingShapeRaw = 0;
+            if (!r.read(ceilingShapeRaw)) return std::unexpected(DlevelError::ParseError);
+            sec.ceilingShape = static_cast<CeilingShape>(ceilingShapeRaw);
+            
+            u32 hasCeilHF = 0;
+            if (!r.read(hasCeilHF)) return std::unexpected(DlevelError::ParseError);
+            if (hasCeilHF)
+            {
+                HeightfieldFloor hf;
+                u32 sampleCount = 0;
+                if (!r.read(hf.gridWidth) || !r.read(hf.gridDepth))
+                    return std::unexpected(DlevelError::ParseError);
+                if (!r.readVec2(hf.worldMin) || !r.readVec2(hf.worldMax))
+                    return std::unexpected(DlevelError::ParseError);
+                if (!r.read(sampleCount)) return std::unexpected(DlevelError::ParseError);
+                hf.samples.resize(sampleCount);
+                for (u32 s = 0; s < sampleCount; ++s)
+                    if (!r.read(hf.samples[s])) return std::unexpected(DlevelError::ParseError);
+                sec.ceilHeightfield = std::move(hf);
             }
 
             // Detail brushes
