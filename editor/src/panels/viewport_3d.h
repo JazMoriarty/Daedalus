@@ -206,12 +206,24 @@ private:
 
     enum class TerrainBrushMode : uint8_t { Raise, Lower, Smooth, Flatten };
     enum class TerrainSurface   : uint8_t { Floor, Ceiling };
+    enum class TerrainBrushShape : uint8_t
+    {
+        Circle,     ///< Circular falloff (smooth, current default behavior)
+        Square,     ///< Axis-aligned square
+        Rectangle,  ///< Axis-aligned rectangle (configurable aspect ratio)
+        Star,       ///< 5-pointed star pattern
+        Triangle,   ///< Equilateral triangle
+        Hexagon,    ///< Regular hexagon
+        Diamond     ///< 45° rotated square (Manhattan distance)
+    };
 
     bool               m_terrainPaintModeEnabled = false; ///< Toggle with T key: whether terrain painting is active in fly mode.
     TerrainSurface     m_terrainSurface      = TerrainSurface::Floor; ///< Toggle with C key: floor or ceiling.
     bool               m_terrainPainting     = false;  ///< True while a paint drag is in progress.
     TerrainBrushMode   m_terrainBrushMode    = TerrainBrushMode::Raise;
-    float              m_terrainBrushRadius  = 2.0f;   ///< World-unit brush radius.
+    TerrainBrushShape  m_terrainBrushShape   = TerrainBrushShape::Circle; ///< Toggle with B key: brush shape.
+    float              m_terrainBrushRadius  = 2.0f;   ///< World-unit brush radius (or half-extents for non-circular shapes).
+    float              m_terrainBrushAspect  = 2.0f;   ///< Width/height aspect ratio for Rectangle shape.
     float              m_terrainBrushStrength = 0.5f; ///< Raise/lower units per second.
     glm::vec2          m_terrainHitXZ{};              ///< Last XZ brush hit point.
     bool               m_terrainHitValid     = false;   ///< True when the brush hit the terrain.
@@ -257,6 +269,16 @@ private:
 
     /// Apply terrain brush at the stored hit point to the sector's heightfield.
     void applyTerrainBrush(world::Sector& sector, float dt) noexcept;
+
+    /// Test if a point (dx, dz) relative to brush center is inside the given brush shape.
+    /// \param dx  X distance from brush center
+    /// \param dz  Z distance from brush center
+    /// \param radius  Brush radius (or half-extent for square/rectangle shapes)
+    /// \param shape  Brush shape type
+    /// \param aspect  Width/height aspect ratio (used only for Rectangle shape)
+    /// \return true if the point is inside the brush shape
+    [[nodiscard]] bool isInsideBrushShape(float dx, float dz, float radius,
+                                          TerrainBrushShape shape, float aspect) const noexcept;
 
     /// Draw terrain brush circle overlay and per-vertex height handles.
     void drawTerrainAndHeightOverlays(EditMapDocument&  doc,

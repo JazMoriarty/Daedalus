@@ -395,9 +395,10 @@ void HelpPanel::drawKeyboard()
 
     ImGui::Spacing();
     ImGui::SeparatorText("Terrain Paint  (fly mode + Heightfield sector selected)");
-    Tip("Press T to toggle terrain paint mode on/off. Press C to toggle between floor and ceiling heightfield painting.");
+    Tip("Press T to toggle terrain paint mode on/off. Press C to toggle between floor and ceiling heightfield painting. Press B to cycle brush shapes.");
     KeyRow("T",            "Toggle terrain paint mode on/off  (prevents accidental painting)");
     KeyRow("C",            "Toggle between floor and ceiling heightfield painting");
+    KeyRow("B",            "Cycle brush shape  (Circle, Square, Rectangle, Star, Triangle, Hexagon, Diamond)");
     KeyRow("LMB hold",     "Raise terrain within brush radius");
     KeyRow("RMB hold",     "Lower terrain within brush radius");
     KeyRow("Shift+LMB",    "Smooth terrain (blend toward local average)");
@@ -563,11 +564,15 @@ void HelpPanel::draw3DViewport()
     ImGui::TextWrapped(
         "When a Heightfield sector is selected and fly mode is active (Tab to enter), "
         "press T to enable terrain paint mode. Press C to toggle between floor and ceiling "
-        "heightfield painting. The overlay text at the top confirms the active surface and brush mode.");
+        "heightfield painting. Press B to cycle through brush shapes. The overlay text at the "
+        "top confirms the active surface, brush mode, and shape.");
     Bullet("T key — Toggle terrain paint mode on/off. When disabled, fly mode navigation "
            "works normally even with a heightfield sector selected.");
     Bullet("C key — Toggle between FLOOR and CEILING heightfield painting (only when "
            "terrain paint mode is enabled).");
+    Bullet("B key — Cycle through brush shapes: Circle (smooth round), Square (axis-aligned), "
+           "Rectangle (2:1 aspect for directional strokes), Star (5-pointed decorative), "
+           "Triangle (sharp features), Hexagon (organic patterns), Diamond (45° rotated square).");
     Bullet("Left-mouse hold — Raise: lifts terrain within brush radius.");
     Bullet("Right-mouse hold — Lower: pushes terrain down within brush radius.");
     Bullet("Shift + Left-mouse — Smooth: blends heights toward the local average, "
@@ -581,6 +586,9 @@ void HelpPanel::draw3DViewport()
         "The entire stroke from first click to release is a single undoable step.");
     Tip("The brush hits the horizontal plane at the sector's floor or ceiling height.  "
         "Fly at a low angle pointing toward the terrain for best accuracy.");
+    Tip("Different shapes are useful for different effects: Circle for natural terrain, "
+        "Square/Rectangle for man-made platforms and paths, Star for impact craters, "
+        "Triangle for sharp peaks, Hexagon for organic surfaces, Diamond for diagonal features.");
 
     ImGui::Spacing();
     ImGui::SeparatorText("Per-Vertex Height Handles");

@@ -233,6 +233,123 @@ void Viewport3D::setGizmoMode(GizmoMode mode) noexcept
     m_gizmoDragAxis = -1;
 }
 
+// ─── isInsideBrushShape ─────────────────────────────────────────────────────────
+// Returns true if point (dx, dz) relative to brush center is inside the given shape.
+
+bool Viewport3D::isInsideBrushShape(float dx, float dz, float radius,
+                                    TerrainBrushShape shape, float aspect) const noexcept
+{
+    switch (shape)
+    {
+    case TerrainBrushShape::Circle:
+    {
+        // Circular distance test (default behavior)
+        return (dx * dx + dz * dz) <= (radius * radius);
+    }
+
+    case TerrainBrushShape::Square:
+    {
+        // Axis-aligned square: point inside if both coordinates within half-extent
+        return (std::abs(dx) <= radius) && (std::abs(dz) <= radius);
+    }
+
+    case TerrainBrushShape::Rectangle:
+    {
+        // Axis-aligned rectangle with configurable aspect ratio
+        const float halfW = radius * aspect;  // Width = radius * aspect
+        const float halfH = radius;            // Height = radius
+        return (std::abs(dx) <= halfW) && (std::abs(dz) <= halfH);
+    }
+
+    case TerrainBrushShape::Diamond:
+    {
+        // 45° rotated square using Manhattan distance
+        return (std::abs(dx) + std::abs(dz)) <= radius;
+    }
+
+    case TerrainBrushShape::Triangle:
+    {
+        // Equilateral triangle inscribed in circle, one vertex pointing up (+Z)
+        // Vertices at angles: 90° (top), 210° (bottom-left), 330° (bottom-right)
+        constexpr float kSqrt3 = 1.732050807568877f;
+        const float h = radius * kSqrt3 * 0.5f;  // Height from center to edge
+        
+        // Triangle vertices (relative to center)
+        const float v0x = 0.0f,      v0z = radius;                    // Top
+        const float v1x = -radius,   v1z = -radius * 0.5f;            // Bottom-left
+        const float v2x = radius,    v2z = -radius * 0.5f;            // Bottom-right
+        
+        // Barycentric coordinate test
+        const float d0 = (dx - v0x) * (v1z - v0z) - (dz - v0z) * (v1x - v0x);
+        const float d1 = (dx - v1x) * (v2z - v1z) - (dz - v1z) * (v2x - v1x);
+        const float d2 = (dx - v2x) * (v0z - v2z) - (dz - v2z) * (v0x - v2x);
+        
+        // Inside if all cross products have same sign
+        const bool hasNeg = (d0 < 0) || (d1 < 0) || (d2 < 0);
+        const bool hasPos = (d0 > 0) || (d1 > 0) || (d2 > 0);
+        return !(hasNeg && hasPos);
+    }
+
+    case TerrainBrushShape::Hexagon:
+    {
+        // Regular hexagon inscribed in circle
+        // Vertices at 0°, 60°, 120°, 180°, 240°, 300°
+        // Efficient test: a point is inside if it's closer to center than to all 6 edge planes
+        constexpr float kCos30 = 0.866025403784439f;  // cos(30°) = sqrt(3)/2
+        const float apothem = radius * kCos30;  // Distance from center to edge midpoint
+        
+        // Six edge planes (perpendicular distance test)
+        // Normals point outward at 30°, 90°, 150°, 210°, 270°, 330°
+        const float d0 = std::abs( kCos30 * dx + 0.5f * dz);  // 30° normal
+        const float d1 = std::abs(dz);                         // 90° normal
+        const float d2 = std::abs(-kCos30 * dx + 0.5f * dz);  // 150° normal
+        
+        return (d0 <= apothem) && (d1 <= apothem) && (d2 <= apothem);
+    }
+
+    case TerrainBrushShape::Star:
+    {
+        // 5-pointed star: outer points at radius, inner points at radius * 0.382 (golden ratio)
+        constexpr float kGoldenRatio = 0.38196601125f;  // (sqrt(5) - 1) / 2 ≈ 0.618, inner = 1 - phi ≈ 0.382
+        const float innerRadius = radius * kGoldenRatio;
+        
+        // Polar coordinates of test point
+        const float r = std::sqrt(dx * dx + dz * dz);
+        const float angle = std::atan2(dz, dx);  // Angle in radians
+        
+        // Determine which of the 10 sectors (36° each) the point is in
+        constexpr float kAngleStep = glm::pi<float>() * 2.0f / 10.0f;  // 36°
+        const float normalizedAngle = angle + glm::pi<float>();  // Shift to [0, 2π]
+        const int sector = static_cast<int>(normalizedAngle / kAngleStep) % 10;
+        
+        // Odd sectors = outer points, even sectors = inner points
+        const bool isOuterSector = (sector % 2 == 1);
+        
+        // For outer sectors: edge is at outer radius
+        // For inner sectors: edge is at inner radius
+        // Linear interpolate between inner and outer based on angle within sector
+        const float sectorAngle = std::fmod(normalizedAngle, kAngleStep);
+        const float t = sectorAngle / kAngleStep;  // [0, 1] within sector
+        
+        float maxR;
+        if (isOuterSector)
+        {
+            // Interpolate from outer (t=0) to inner (t=1)
+            maxR = radius * (1.0f - t) + innerRadius * t;
+        }
+        else
+        {
+            // Interpolate from inner (t=0) to outer (t=1)
+            maxR = innerRadius * (1.0f - t) + radius * t;
+        }
+        
+        return r <= maxR;
+    }
+    }
+    
+    return false;  // Unreachable, but suppresses compiler warning
+}
+
 // ─── applyTerrainBrush ──────────────────────────────────────────────────────────
 // Modifies the heightfield in-place at m_terrainHitXZ within m_terrainBrushRadius.
 // Called every captured-mouse frame while a paint button is held; dt provides
@@ -248,7 +365,6 @@ void Viewport3D::applyTerrainBrush(world::Sector& sector, float dt) noexcept
     
     if (!hfPtr) return;
     world::HeightfieldFloor& hf = *hfPtr;
-    const float rSq  = m_terrainBrushRadius * m_terrainBrushRadius;
     const float str  = m_terrainBrushStrength * dt;
     const float invW = (hf.gridWidth  > 1) ? 1.0f / static_cast<float>(hf.gridWidth  - 1) : 0.0f;
     const float invD = (hf.gridDepth  > 1) ? 1.0f / static_cast<float>(hf.gridDepth  - 1) : 0.0f;
@@ -267,7 +383,7 @@ void Viewport3D::applyTerrainBrush(world::Sector& sector, float dt) noexcept
             const float wz = hf.worldMin.y + static_cast<float>(j) * invD * worldD;
             const float dx = wx - m_terrainHitXZ.x;
             const float dz = wz - m_terrainHitXZ.y;
-            if (dx*dx + dz*dz <= rSq)
+            if (isInsideBrushShape(dx, dz, m_terrainBrushRadius, m_terrainBrushShape, m_terrainBrushAspect))
             {
                 localAvg += hf.samples[j * hf.gridWidth + i];
                 ++localCnt;
@@ -297,7 +413,7 @@ void Viewport3D::applyTerrainBrush(world::Sector& sector, float dt) noexcept
         const float wz = hf.worldMin.y + static_cast<float>(j) * invD * worldD;
         const float dx = wx - m_terrainHitXZ.x;
         const float dz = wz - m_terrainHitXZ.y;
-        if (dx*dx + dz*dz > rSq) continue;
+        if (!isInsideBrushShape(dx, dz, m_terrainBrushRadius, m_terrainBrushShape, m_terrainBrushAspect)) continue;
 
         float& h = hf.samples[j * hf.gridWidth + i];
         switch (m_terrainBrushMode)
@@ -337,14 +453,9 @@ void Viewport3D::drawTerrainAndHeightOverlays(EditMapDocument&  doc,
                       imageTopLeft.y + (1.0f - (ny * 0.5f + 0.5f)) * fh);
     };
 
-    // ── Terrain brush circle (fly mode + terrain sector) ──────────────────────────
+    // ── Terrain brush overlay (fly mode + terrain sector) ──────────────────────────────
     if (m_mouseCaptured && m_terrainHitValid && m_terrainPaintModeEnabled)
     {
-        // Project 8 points around the brush circle onto the appropriate plane (floor or ceiling) to screen.
-        constexpr int kSegs = 24;
-        std::vector<ImVec2> circlePts;
-        circlePts.reserve(kSegs);
-        
         float y = 0.0f;
         if (m_terrainSectorId != world::INVALID_SECTOR_ID &&
             m_terrainSectorId < static_cast<world::SectorId>(doc.mapData().sectors.size()))
@@ -352,23 +463,116 @@ void Viewport3D::drawTerrainAndHeightOverlays(EditMapDocument&  doc,
             const auto& terrSec = doc.mapData().sectors[m_terrainSectorId];
             y = (m_terrainSurface == TerrainSurface::Floor) ? terrSec.floorHeight : terrSec.ceilHeight;
         }
-        for (int k = 0; k < kSegs; ++k)
-        {
-            const float a = glm::two_pi<float>() * static_cast<float>(k) / kSegs;
-            circlePts.push_back(projectWorld(glm::vec3(
-                m_terrainHitXZ.x + std::cos(a) * m_terrainBrushRadius,
-                y,
-                m_terrainHitXZ.y + std::sin(a) * m_terrainBrushRadius)));
-        }
+
+        // Color varies by brush mode
         const ImU32 brushCol = m_terrainBrushMode == TerrainBrushMode::Raise
             ? IM_COL32(80, 220, 80, 220)
             : m_terrainBrushMode == TerrainBrushMode::Lower
             ? IM_COL32(220, 80, 80, 220)
             : IM_COL32(220, 180, 50, 220);
-        for (int k = 0; k < kSegs; ++k)
-            dl->AddLine(circlePts[k], circlePts[(k + 1) % kSegs], brushCol, 1.5f);
 
-        // Crosshair at hit point.
+        // Generate shape outline vertices
+        std::vector<ImVec2> shapePts;
+        
+        switch (m_terrainBrushShape)
+        {
+        case TerrainBrushShape::Circle:
+        {
+            constexpr int kSegs = 24;
+            shapePts.reserve(kSegs);
+            for (int k = 0; k < kSegs; ++k)
+            {
+                const float a = glm::two_pi<float>() * static_cast<float>(k) / kSegs;
+                shapePts.push_back(projectWorld(glm::vec3(
+                    m_terrainHitXZ.x + std::cos(a) * m_terrainBrushRadius,
+                    y,
+                    m_terrainHitXZ.y + std::sin(a) * m_terrainBrushRadius)));
+            }
+            break;
+        }
+
+        case TerrainBrushShape::Square:
+        {
+            const float r = m_terrainBrushRadius;
+            shapePts.push_back(projectWorld(glm::vec3(m_terrainHitXZ.x - r, y, m_terrainHitXZ.y - r)));
+            shapePts.push_back(projectWorld(glm::vec3(m_terrainHitXZ.x + r, y, m_terrainHitXZ.y - r)));
+            shapePts.push_back(projectWorld(glm::vec3(m_terrainHitXZ.x + r, y, m_terrainHitXZ.y + r)));
+            shapePts.push_back(projectWorld(glm::vec3(m_terrainHitXZ.x - r, y, m_terrainHitXZ.y + r)));
+            break;
+        }
+
+        case TerrainBrushShape::Rectangle:
+        {
+            const float hw = m_terrainBrushRadius * m_terrainBrushAspect;
+            const float hh = m_terrainBrushRadius;
+            shapePts.push_back(projectWorld(glm::vec3(m_terrainHitXZ.x - hw, y, m_terrainHitXZ.y - hh)));
+            shapePts.push_back(projectWorld(glm::vec3(m_terrainHitXZ.x + hw, y, m_terrainHitXZ.y - hh)));
+            shapePts.push_back(projectWorld(glm::vec3(m_terrainHitXZ.x + hw, y, m_terrainHitXZ.y + hh)));
+            shapePts.push_back(projectWorld(glm::vec3(m_terrainHitXZ.x - hw, y, m_terrainHitXZ.y + hh)));
+            break;
+        }
+
+        case TerrainBrushShape::Diamond:
+        {
+            const float r = m_terrainBrushRadius;
+            shapePts.push_back(projectWorld(glm::vec3(m_terrainHitXZ.x,     y, m_terrainHitXZ.y - r)));  // Top
+            shapePts.push_back(projectWorld(glm::vec3(m_terrainHitXZ.x + r, y, m_terrainHitXZ.y)));      // Right
+            shapePts.push_back(projectWorld(glm::vec3(m_terrainHitXZ.x,     y, m_terrainHitXZ.y + r)));  // Bottom
+            shapePts.push_back(projectWorld(glm::vec3(m_terrainHitXZ.x - r, y, m_terrainHitXZ.y)));      // Left
+            break;
+        }
+
+        case TerrainBrushShape::Triangle:
+        {
+            const float r = m_terrainBrushRadius;
+            shapePts.push_back(projectWorld(glm::vec3(m_terrainHitXZ.x,     y, m_terrainHitXZ.y + r)));
+            shapePts.push_back(projectWorld(glm::vec3(m_terrainHitXZ.x - r, y, m_terrainHitXZ.y - r * 0.5f)));
+            shapePts.push_back(projectWorld(glm::vec3(m_terrainHitXZ.x + r, y, m_terrainHitXZ.y - r * 0.5f)));
+            break;
+        }
+
+        case TerrainBrushShape::Hexagon:
+        {
+            constexpr int kVerts = 6;
+            shapePts.reserve(kVerts);
+            for (int k = 0; k < kVerts; ++k)
+            {
+                const float a = glm::pi<float>() / 3.0f * static_cast<float>(k);  // 60° increments
+                shapePts.push_back(projectWorld(glm::vec3(
+                    m_terrainHitXZ.x + std::cos(a) * m_terrainBrushRadius,
+                    y,
+                    m_terrainHitXZ.y + std::sin(a) * m_terrainBrushRadius)));
+            }
+            break;
+        }
+
+        case TerrainBrushShape::Star:
+        {
+            constexpr int kPoints = 5;
+            constexpr float kInnerRatio = 0.38196601125f;  // Golden ratio
+            const float outerR = m_terrainBrushRadius;
+            const float innerR = outerR * kInnerRatio;
+            shapePts.reserve(kPoints * 2);
+            
+            for (int k = 0; k < kPoints * 2; ++k)
+            {
+                const float a = glm::two_pi<float>() * static_cast<float>(k) / (kPoints * 2.0f) - glm::pi<float>() * 0.5f;
+                const float r = (k % 2 == 0) ? outerR : innerR;  // Alternate outer/inner
+                shapePts.push_back(projectWorld(glm::vec3(
+                    m_terrainHitXZ.x + std::cos(a) * r,
+                    y,
+                    m_terrainHitXZ.y + std::sin(a) * r)));
+            }
+            break;
+        }
+        }
+
+        // Draw shape outline as closed polyline
+        const std::size_t n = shapePts.size();
+        for (std::size_t k = 0; k < n; ++k)
+            dl->AddLine(shapePts[k], shapePts[(k + 1) % n], brushCol, 1.5f);
+
+        // Crosshair at hit point
         const ImVec2 hitScreen = projectWorld(glm::vec3(m_terrainHitXZ.x, y, m_terrainHitXZ.y));
         constexpr float kCross = 5.0f;
         dl->AddLine({hitScreen.x - kCross, hitScreen.y}, {hitScreen.x + kCross, hitScreen.y},
@@ -1071,6 +1275,17 @@ void Viewport3D::draw(EditMapDocument&      doc,
                 ? TerrainSurface::Ceiling : TerrainSurface::Floor;
         prevC = currC;
 
+        // B key: cycle through brush shapes (when terrain paint mode is active).
+        static bool prevB = false;
+        const bool  currB = keys[SDL_SCANCODE_B];
+        if (currB && !prevB && m_terrainPaintModeEnabled)
+        {
+            // Cycle through all 7 shapes
+            const auto currentShape = static_cast<int>(m_terrainBrushShape);
+            m_terrainBrushShape = static_cast<TerrainBrushShape>((currentShape + 1) % 7);
+        }
+        prevB = currB;
+
         // ── Terrain paint (fly mode + heightfield sector selected) ─────────────
         // Only active when m_terrainPaintModeEnabled is true.
         if (m_terrainPaintModeEnabled)
@@ -1717,10 +1932,17 @@ void Viewport3D::draw(EditMapDocument&      doc,
                 m_terrainBrushMode == TerrainBrushMode::Lower   ? "Lower" :
                 m_terrainBrushMode == TerrainBrushMode::Smooth  ? "Smooth" : "Flatten";
             const char* surfaceName = (m_terrainSurface == TerrainSurface::Floor) ? "FLOOR" : "CEILING";
+            const char* shapeName =
+                m_terrainBrushShape == TerrainBrushShape::Circle    ? "CIRCLE" :
+                m_terrainBrushShape == TerrainBrushShape::Square    ? "SQUARE" :
+                m_terrainBrushShape == TerrainBrushShape::Rectangle ? "RECTANGLE" :
+                m_terrainBrushShape == TerrainBrushShape::Star      ? "STAR" :
+                m_terrainBrushShape == TerrainBrushShape::Triangle  ? "TRIANGLE" :
+                m_terrainBrushShape == TerrainBrushShape::Hexagon   ? "HEXAGON" : "DIAMOND";
             ImGui::TextDisabled(
-                "TERRAIN PAINT [%s %s]  LMB=Raise  RMB=Lower  Shift=Smooth  Alt=Flatten\n"
-                "Scroll=radius (%.1f m)  [C]=toggle surface  [T]=disable paint  [Tab]=exit",
-                surfaceName, modeName, m_terrainBrushRadius);
+                "TERRAIN PAINT [%s %s %s]  LMB=Raise  RMB=Lower  Shift=Smooth  Alt=Flatten\n"
+                "Scroll=radius (%.1f m)  [B]=shape  [C]=surface  [T]=disable  [Tab]=exit",
+                surfaceName, modeName, shapeName, m_terrainBrushRadius);
         }
         else
         {
