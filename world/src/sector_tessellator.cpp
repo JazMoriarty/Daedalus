@@ -466,7 +466,12 @@ static void appendStairSurface(
 //   T_x = world-space tangent in X = (2*dx, h(i+1,j)−h(i−1,j), 0)
 //   T_z = world-space tangent in Z = (0, h(i,j+1)−h(i,j−1), 2*dz)
 // Simplifying: normal ∝ (−(h_right−h_left)/(2*dx), 1, −(h_top−h_bot)/(2*dz))
-// (normalised).  Edge vertices use one-sided differences.
+// (normalised).
+//
+// Edge normal handling: Edge vertices extrapolate the slope from their nearest
+// interior neighbor to eliminate lighting discontinuities. A one-sided difference
+// would create sharp brightness changes at grid boundaries; extrapolation ensures
+// smooth shading across the entire surface.
 //
 // UV: world XZ position mapped through sector UV offset/scale/rotation.
 static void appendHeightfieldFloor(
@@ -500,23 +505,75 @@ static void appendHeightfieldFloor(
             const float pz = hf.worldMin.y + static_cast<float>(j) * dz;
             const float py = hf.samples[j * W + i];
 
-            // Central differences for normal computation.
-            const float hL = hf.samples[j * W + (i > 0      ? i - 1 : i)];
-            const float hR = hf.samples[j * W + (i < W - 1u ? i + 1 : i)];
-            const float hB = hf.samples[(j > 0      ? j - 1 : j) * W + i];
-            const float hT = hf.samples[(j < D - 1u ? j + 1 : j) * W + i];
+            // Compute normal via central differencing at interior vertices,
+            // extrapolating from nearest interior at edges.
+            glm::vec3 n;
+            
+            // Determine sample indices for height differences.
+            // Interior: use neighbors on both sides (central difference).
+            // Edge: extrapolate from the interior direction.
+            const u32 iL = (i > 0)      ? i - 1 : 0;      // Left neighbor
+            const u32 iR = (i < W - 1u) ? i + 1 : W - 1u; // Right neighbor
+            const u32 jB = (j > 0)      ? j - 1 : 0;      // Bottom neighbor
+            const u32 jT = (j < D - 1u) ? j + 1 : D - 1u; // Top neighbor
+            
+            const float hL = hf.samples[j  * W + iL];
+            const float hR = hf.samples[j  * W + iR];
+            const float hB = hf.samples[jB * W + i];
+            const float hT = hf.samples[jT * W + i];
+            
+            const bool isLeftEdge   = (i == 0);
+            const bool isRightEdge  = (i == W - 1u);
+            const bool isBottomEdge = (j == 0);
+            const bool isTopEdge    = (j == D - 1u);
+            
+            // X-direction slope (dh/dx).
+            float slopeX;
+            if (isLeftEdge)
+            {
+                // Left edge: extrapolate slope from interior (i=1).
+                // slope ≈ (h[1] - h[0]) / dx
+                slopeX = (hR - py) / dx;
+            }
+            else if (isRightEdge)
+            {
+                // Right edge: extrapolate slope from interior (i=W-2).
+                // slope ≈ (h[W-1] - h[W-2]) / dx
+                slopeX = (py - hL) / dx;
+            }
+            else
+            {
+                // Interior: central difference.
+                slopeX = (hR - hL) / (2.0f * dx);
+            }
+            
+            // Z-direction slope (dh/dz).
+            float slopeZ;
+            if (isBottomEdge)
+            {
+                // Bottom edge: extrapolate slope from interior (j=1).
+                slopeZ = (hT - py) / dz;
+            }
+            else if (isTopEdge)
+            {
+                // Top edge: extrapolate slope from interior (j=D-2).
+                slopeZ = (py - hB) / dz;
+            }
+            else
+            {
+                // Interior: central difference.
+                slopeZ = (hT - hB) / (2.0f * dz);
+            }
+            
+            // Normal is perpendicular to both tangent directions:
+            // T_x = (1, dh/dx, 0),  T_z = (0, dh/dz, 1)
+            // N = T_x × T_z = (-dh/dx, 1, -dh/dz), then normalize.
+            n = glm::normalize(glm::vec3(-slopeX, 1.0f, -slopeZ));
 
-            // Width of the finite difference step in world units.
-            const float stX = (i > 0u && i < W - 1u) ? 2.0f * dx : dx;
-            const float stZ = (j > 0u && j < D - 1u) ? 2.0f * dz : dz;
-
-            // Normal: normalize(-(hR-hL)/stX, 1, -(hT-hB)/stZ)
-            const glm::vec3 n = glm::normalize(
-                glm::vec3(-(hR - hL) / stX, 1.0f, -(hT - hB) / stZ));
-
-            // Tangent along world +X direction.
+            // Tangent along world +X direction (for normal mapping).
+            // Use the same extrapolated slope for consistency.
             const glm::vec3 t = glm::normalize(
-                glm::vec3(dx, hR - hL, 0.0f));
+                glm::vec3(1.0f, slopeX, 0.0f));
 
             // UV: use world XZ coordinates directly, matching appendHorizontalSurface.
             // This ensures texture tiling is consistent between flat and heightfield surfaces.
@@ -581,7 +638,7 @@ static void appendHeightfieldCeiling(
 
     const u32 base = static_cast<u32>(verts.size());
 
-    // Emit W×D vertices with central-difference normals (inverted for ceiling).
+    // Emit W×D vertices with extrapolated edge normals (inverted for ceiling).
     for (u32 j = 0; j < D; ++j)
     {
         for (u32 i = 0; i < W; ++i)
@@ -590,22 +647,49 @@ static void appendHeightfieldCeiling(
             const float pz = hf.worldMin.y + static_cast<float>(j) * dz;
             const float py = hf.samples[j * W + i];
 
-            // Central differences for normal computation.
-            const float hL = hf.samples[j * W + (i > 0      ? i - 1 : i)];
-            const float hR = hf.samples[j * W + (i < W - 1u ? i + 1 : i)];
-            const float hB = hf.samples[(j > 0      ? j - 1 : j) * W + i];
-            const float hT = hf.samples[(j < D - 1u ? j + 1 : j) * W + i];
+            // Compute normal via central differencing at interior vertices,
+            // extrapolating from nearest interior at edges (same as floor).
+            glm::vec3 n;
+            
+            const u32 iL = (i > 0)      ? i - 1 : 0;
+            const u32 iR = (i < W - 1u) ? i + 1 : W - 1u;
+            const u32 jB = (j > 0)      ? j - 1 : 0;
+            const u32 jT = (j < D - 1u) ? j + 1 : D - 1u;
+            
+            const float hL = hf.samples[j  * W + iL];
+            const float hR = hf.samples[j  * W + iR];
+            const float hB = hf.samples[jB * W + i];
+            const float hT = hf.samples[jT * W + i];
+            
+            const bool isLeftEdge   = (i == 0);
+            const bool isRightEdge  = (i == W - 1u);
+            const bool isBottomEdge = (j == 0);
+            const bool isTopEdge    = (j == D - 1u);
+            
+            // X-direction slope.
+            float slopeX;
+            if (isLeftEdge)
+                slopeX = (hR - py) / dx;
+            else if (isRightEdge)
+                slopeX = (py - hL) / dx;
+            else
+                slopeX = (hR - hL) / (2.0f * dx);
+            
+            // Z-direction slope.
+            float slopeZ;
+            if (isBottomEdge)
+                slopeZ = (hT - py) / dz;
+            else if (isTopEdge)
+                slopeZ = (py - hB) / dz;
+            else
+                slopeZ = (hT - hB) / (2.0f * dz);
+            
+            // Ceiling normal: inverted Y component.
+            n = glm::normalize(glm::vec3(-slopeX, -1.0f, -slopeZ));
 
-            const float stX = (i > 0u && i < W - 1u) ? 2.0f * dx : dx;
-            const float stZ = (j > 0u && j < D - 1u) ? 2.0f * dz : dz;
-
-            // Normal: same formula as floor but with -Y (downward).
-            const glm::vec3 n = glm::normalize(
-                glm::vec3(-(hR - hL) / stX, -1.0f, -(hT - hB) / stZ));
-
-            // Tangent along world +X direction (same as floor).
+            // Tangent along world +X direction (for normal mapping).
             const glm::vec3 t = glm::normalize(
-                glm::vec3(dx, hR - hL, 0.0f));
+                glm::vec3(1.0f, slopeX, 0.0f));
 
             // UV: use world XZ coordinates directly, matching appendHorizontalSurface.
             // This ensures texture tiling is consistent between flat and heightfield surfaces.
