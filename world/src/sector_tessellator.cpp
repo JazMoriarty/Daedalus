@@ -468,11 +468,14 @@ static void appendStairSurface(
 // Simplifying: normal ∝ (−(h_right−h_left)/(2*dx), 1, −(h_top−h_bot)/(2*dz))
 // (normalised).  Edge vertices use one-sided differences.
 //
-// UV: u = i / (W−1), v = j / (D−1) — covers [0,1] across the grid.
+// UV: world XZ position mapped through sector UV offset/scale/rotation.
 static void appendHeightfieldFloor(
     std::vector<render::StaticMeshVertex>& verts,
     std::vector<u32>&                      indices,
-    const HeightfieldFloor&                hf) noexcept
+    const HeightfieldFloor&                hf,
+    float uScale, float vScale,
+    float uOff,   float vOff,
+    float uvRotation = 0.0f) noexcept
 {
     const u32 W = hf.gridWidth;
     const u32 D = hf.gridDepth;
@@ -515,8 +518,15 @@ static void appendHeightfieldFloor(
             const glm::vec3 t = glm::normalize(
                 glm::vec3(dx, hR - hL, 0.0f));
 
-            const float u = static_cast<float>(i) / static_cast<float>(W - 1u);
-            const float v = static_cast<float>(j) / static_cast<float>(D - 1u);
+            // UV: use world XZ coordinates directly, matching appendHorizontalSurface.
+            // This ensures texture tiling is consistent between flat and heightfield surfaces.
+            const float u_t = px / uScale + uOff;
+            const float v_t = pz / vScale + vOff;
+            // Rotate.
+            const float cosR = std::cos(uvRotation);
+            const float sinR = std::sin(uvRotation);
+            const float u = u_t * cosR - v_t * sinR;
+            const float v = u_t * sinR + v_t * cosR;
 
             verts.push_back(makeVertex(px, py, pz,
                                        n.x, n.y, n.z,
@@ -538,6 +548,95 @@ static void appendHeightfieldFloor(
             // Two CCW triangles when viewed from above (+Y = floor normal).
             indices.push_back(bl); indices.push_back(br); indices.push_back(tr);
             indices.push_back(bl); indices.push_back(tr); indices.push_back(tl);
+        }
+    }
+}
+
+// ─── appendHeightfieldCeiling (Phase 1F-D+) ──────────────────────────────────────
+//
+// Generates a (gridWidth−1) × (gridDepth−1) quad mesh for a heightfield ceiling.
+// Identical to appendHeightfieldFloor except:
+//   - Normals point downward (normal.y = -1.0)
+//   - Triangle winding order reversed (CW when viewed from below)
+// Reuses HeightfieldFloor structure; samples are absolute world Y values.
+static void appendHeightfieldCeiling(
+    std::vector<render::StaticMeshVertex>& verts,
+    std::vector<u32>&                      indices,
+    const HeightfieldFloor&                hf,
+    float uScale, float vScale,
+    float uOff,   float vOff,
+    float uvRotation = 0.0f) noexcept
+{
+    const u32 W = hf.gridWidth;
+    const u32 D = hf.gridDepth;
+    if (W < 2u || D < 2u || hf.samples.size() < static_cast<std::size_t>(W * D))
+        return;
+
+    const float rangeX = hf.worldMax.x - hf.worldMin.x;
+    const float rangeZ = hf.worldMax.y - hf.worldMin.y;
+    if (rangeX <= 0.0f || rangeZ <= 0.0f) return;
+
+    const float dx = rangeX / static_cast<float>(W - 1u);
+    const float dz = rangeZ / static_cast<float>(D - 1u);
+
+    const u32 base = static_cast<u32>(verts.size());
+
+    // Emit W×D vertices with central-difference normals (inverted for ceiling).
+    for (u32 j = 0; j < D; ++j)
+    {
+        for (u32 i = 0; i < W; ++i)
+        {
+            const float px = hf.worldMin.x + static_cast<float>(i) * dx;
+            const float pz = hf.worldMin.y + static_cast<float>(j) * dz;
+            const float py = hf.samples[j * W + i];
+
+            // Central differences for normal computation.
+            const float hL = hf.samples[j * W + (i > 0      ? i - 1 : i)];
+            const float hR = hf.samples[j * W + (i < W - 1u ? i + 1 : i)];
+            const float hB = hf.samples[(j > 0      ? j - 1 : j) * W + i];
+            const float hT = hf.samples[(j < D - 1u ? j + 1 : j) * W + i];
+
+            const float stX = (i > 0u && i < W - 1u) ? 2.0f * dx : dx;
+            const float stZ = (j > 0u && j < D - 1u) ? 2.0f * dz : dz;
+
+            // Normal: same formula as floor but with -Y (downward).
+            const glm::vec3 n = glm::normalize(
+                glm::vec3(-(hR - hL) / stX, -1.0f, -(hT - hB) / stZ));
+
+            // Tangent along world +X direction (same as floor).
+            const glm::vec3 t = glm::normalize(
+                glm::vec3(dx, hR - hL, 0.0f));
+
+            // UV: use world XZ coordinates directly, matching appendHorizontalSurface.
+            // This ensures texture tiling is consistent between flat and heightfield surfaces.
+            const float u_t = px / uScale + uOff;
+            const float v_t = pz / vScale + vOff;
+            // Rotate.
+            const float cosR = std::cos(uvRotation);
+            const float sinR = std::sin(uvRotation);
+            const float u = u_t * cosR - v_t * sinR;
+            const float v = u_t * sinR + v_t * cosR;
+
+            verts.push_back(makeVertex(px, py, pz,
+                                       n.x, n.y, n.z,
+                                       u,   v,
+                                       t.x, t.y, t.z, 1.0f));
+        }
+    }
+
+    // Emit (W−1)×(D−1) quads with reversed winding (CW when viewed from below).
+    for (u32 j = 0; j < D - 1u; ++j)
+    {
+        for (u32 i = 0; i < W - 1u; ++i)
+        {
+            const u32 bl = base +  j      * W +  i;
+            const u32 br = base +  j      * W + (i + 1u);
+            const u32 tr = base + (j + 1u)* W + (i + 1u);
+            const u32 tl = base + (j + 1u)* W +  i;
+
+            // Reverse winding: (bl, tl, tr) and (bl, tr, br) instead of (bl, br, tr) and (bl, tr, tl).
+            indices.push_back(bl); indices.push_back(tl); indices.push_back(tr);
+            indices.push_back(bl); indices.push_back(tr); indices.push_back(br);
         }
     }
 }
@@ -1076,10 +1175,15 @@ std::vector<render::MeshData> tessellateMap(const WorldMapData& map)
         std::vector<float> floorHExp, ceilHExp;
         buildExpandedPoly(sector, floorH, ceilH, poly, floorHExp, ceilHExp);
 
-        // ── Floor ────────────────────────────────────────────────────────────────────────────
+        // ── Floor ────────────────────────────────────────────────────────────────────────────────
         if (sector.floorShape == FloorShape::Heightfield && sector.heightfield)
         {
-            appendHeightfieldFloor(mesh.vertices, mesh.indices, *sector.heightfield);
+            const float fuS = sector.floorUvScale.x > 0.0f ? sector.floorUvScale.x : 1.0f;
+            const float fvS = sector.floorUvScale.y > 0.0f ? sector.floorUvScale.y : 1.0f;
+            appendHeightfieldFloor(mesh.vertices, mesh.indices, *sector.heightfield,
+                                   fuS, fvS,
+                                   sector.floorUvOffset.x, sector.floorUvOffset.y,
+                                   sector.floorUvRotation);
         }
         else if (sector.floorShape == FloorShape::VisualStairs && sector.stairProfile)
         {
@@ -1098,14 +1202,26 @@ std::vector<render::MeshData> tessellateMap(const WorldMapData& map)
                                     sector.floorUvRotation);
         }
 
-        // ── Ceiling ─────────────────────────────────────────────────────────────────────────
-        const float cuS = sector.ceilUvScale.x > 0.0f ? sector.ceilUvScale.x : 1.0f;
-        const float cvS = sector.ceilUvScale.y > 0.0f ? sector.ceilUvScale.y : 1.0f;
-        appendHorizontalSurface(mesh.vertices, mesh.indices, poly,
-                                std::span<const float>(ceilHExp),
-                                -1.0f, cuS, cvS,
-                                sector.ceilUvOffset.x, sector.ceilUvOffset.y,
-                                sector.ceilUvRotation);
+        // ── Ceiling ───────────────────────────────────────────────────────────────────────────
+        if (sector.ceilingShape == CeilingShape::Heightfield && sector.ceilHeightfield)
+        {
+            const float cuS = sector.ceilUvScale.x > 0.0f ? sector.ceilUvScale.x : 1.0f;
+            const float cvS = sector.ceilUvScale.y > 0.0f ? sector.ceilUvScale.y : 1.0f;
+            appendHeightfieldCeiling(mesh.vertices, mesh.indices, *sector.ceilHeightfield,
+                                     cuS, cvS,
+                                     sector.ceilUvOffset.x, sector.ceilUvOffset.y,
+                                     sector.ceilUvRotation);
+        }
+        else
+        {
+            const float cuS = sector.ceilUvScale.x > 0.0f ? sector.ceilUvScale.x : 1.0f;
+            const float cvS = sector.ceilUvScale.y > 0.0f ? sector.ceilUvScale.y : 1.0f;
+            appendHorizontalSurface(mesh.vertices, mesh.indices, poly,
+                                    std::span<const float>(ceilHExp),
+                                    -1.0f, cuS, cvS,
+                                    sector.ceilUvOffset.x, sector.ceilUvOffset.y,
+                                    sector.ceilUvRotation);
+        }
 
         // ── Walls ──────────────────────────────────────────────────────────────────────────
         // Wall tessellation uses base height arrays (indexed by wall index wi).
@@ -1284,9 +1400,14 @@ std::vector<std::vector<TaggedMeshBatch>> tessellateMapTagged(const WorldMapData
 
             if (sector.floorShape == FloorShape::Heightfield && sector.heightfield)
             {
+                const float fuS2 = sector.floorUvScale.x > 0.0f ? sector.floorUvScale.x : 1.0f;
+                const float fvS2 = sector.floorUvScale.y > 0.0f ? sector.floorUvScale.y : 1.0f;
                 TaggedMeshBatch& batch = getBatch(floorMat);
                 appendHeightfieldFloor(batch.mesh.vertices, batch.mesh.indices,
-                                       *sector.heightfield);
+                                       *sector.heightfield,
+                                       fuS2, fvS2,
+                                       sector.floorUvOffset.x, sector.floorUvOffset.y,
+                                       sector.floorUvRotation);
             }
             else if (sector.floorShape == FloorShape::VisualStairs && sector.stairProfile)
             {
@@ -1308,20 +1429,35 @@ std::vector<std::vector<TaggedMeshBatch>> tessellateMapTagged(const WorldMapData
             }
         }
 
-        // ── Ceiling ───────────────────────────────────────────────────────────────────────────────────
+        // ── Ceiling ───────────────────────────────────────────────────────────────────────────────────────────────
         {
             const daedalus::UUID& ceilMat =
                 (sector.ceilPortalSectorId != INVALID_SECTOR_ID)
                 ? sector.ceilPortalMaterialId
                 : sector.ceilMaterialId;
-            const float cuS2 = sector.ceilUvScale.x > 0.0f ? sector.ceilUvScale.x : 1.0f;
-            const float cvS2 = sector.ceilUvScale.y > 0.0f ? sector.ceilUvScale.y : 1.0f;
-            TaggedMeshBatch& batch = getBatch(ceilMat);
-            appendHorizontalSurface(batch.mesh.vertices, batch.mesh.indices, poly,
-                                    std::span<const float>(ceilHExp),
-                                    -1.0f, cuS2, cvS2,
-                                    sector.ceilUvOffset.x, sector.ceilUvOffset.y,
-                                    sector.ceilUvRotation);
+
+            if (sector.ceilingShape == CeilingShape::Heightfield && sector.ceilHeightfield)
+            {
+                const float cuS2 = sector.ceilUvScale.x > 0.0f ? sector.ceilUvScale.x : 1.0f;
+                const float cvS2 = sector.ceilUvScale.y > 0.0f ? sector.ceilUvScale.y : 1.0f;
+                TaggedMeshBatch& batch = getBatch(ceilMat);
+                appendHeightfieldCeiling(batch.mesh.vertices, batch.mesh.indices,
+                                         *sector.ceilHeightfield,
+                                         cuS2, cvS2,
+                                         sector.ceilUvOffset.x, sector.ceilUvOffset.y,
+                                         sector.ceilUvRotation);
+            }
+            else
+            {
+                const float cuS2 = sector.ceilUvScale.x > 0.0f ? sector.ceilUvScale.x : 1.0f;
+                const float cvS2 = sector.ceilUvScale.y > 0.0f ? sector.ceilUvScale.y : 1.0f;
+                TaggedMeshBatch& batch = getBatch(ceilMat);
+                appendHorizontalSurface(batch.mesh.vertices, batch.mesh.indices, poly,
+                                        std::span<const float>(ceilHExp),
+                                        -1.0f, cuS2, cvS2,
+                                        sector.ceilUvOffset.x, sector.ceilUvOffset.y,
+                                        sector.ceilUvRotation);
+            }
         }
 
         // ── Walls (with curved subdivision, Phase 1F-C) ─────────────────────────────────

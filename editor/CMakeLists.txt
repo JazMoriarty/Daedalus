@@ -55,6 +55,7 @@ target_sources(DaedalusEdit PRIVATE
     src/document/commands/cmd_remove_detail_brush.cpp
     src/document/commands/cmd_set_detail_brush.cpp
     src/document/commands/cmd_set_heightfield.cpp
+    src/document/commands/cmd_set_ceiling_heightfield.cpp
     src/panels/floor_layer_panel.cpp
     src/panels/staircase_generator_panel.cpp
     src/panels/viewport_2d.cpp
@@ -200,6 +201,7 @@ if(DAEDALUS_PLATFORM_MACOS)
         src/document/commands/cmd_remove_detail_brush.cpp
         src/document/commands/cmd_set_detail_brush.cpp
         src/document/commands/cmd_set_heightfield.cpp
+        src/document/commands/cmd_set_ceiling_heightfield.cpp
         src/panels/floor_layer_panel.cpp
         src/panels/staircase_generator_panel.cpp
         src/panels/viewport_2d.cpp

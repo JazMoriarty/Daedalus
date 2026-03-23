@@ -205,15 +205,18 @@ private:
     // Active when m_mouseCaptured and the selected sector has FloorShape::Heightfield.
 
     enum class TerrainBrushMode : uint8_t { Raise, Lower, Smooth, Flatten };
+    enum class TerrainSurface   : uint8_t { Floor, Ceiling };
 
-    bool               m_terrainPainting   = false;  ///< True while a paint drag is in progress.
-    TerrainBrushMode   m_terrainBrushMode  = TerrainBrushMode::Raise;
-    float              m_terrainBrushRadius = 2.0f;   ///< World-unit brush radius.
+    bool               m_terrainPaintModeEnabled = false; ///< Toggle with T key: whether terrain painting is active in fly mode.
+    TerrainSurface     m_terrainSurface      = TerrainSurface::Floor; ///< Toggle with C key: floor or ceiling.
+    bool               m_terrainPainting     = false;  ///< True while a paint drag is in progress.
+    TerrainBrushMode   m_terrainBrushMode    = TerrainBrushMode::Raise;
+    float              m_terrainBrushRadius  = 2.0f;   ///< World-unit brush radius.
     float              m_terrainBrushStrength = 0.5f; ///< Raise/lower units per second.
     glm::vec2          m_terrainHitXZ{};              ///< Last XZ brush hit point.
-    bool               m_terrainHitValid   = false;   ///< True when the brush hit the terrain.
+    bool               m_terrainHitValid     = false;   ///< True when the brush hit the terrain.
     world::HeightfieldFloor m_terrainPrePaint;        ///< Snapshot before drag begins (for undo).
-    world::SectorId    m_terrainSectorId   = world::INVALID_SECTOR_ID;
+    world::SectorId    m_terrainSectorId     = world::INVALID_SECTOR_ID;
 
     // ─── Per-vertex height handle state (Vertex tool mode) ──────────────────────
     // Handles are indexed over the current Vertex selection items:

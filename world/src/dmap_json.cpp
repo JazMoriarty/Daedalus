@@ -160,6 +160,22 @@ constexpr u32 k_JSON_VERSION = 5u;
         jh["samples"] = std::move(js);
         j["heightfield"] = std::move(jh);
     }
+    // Phase 1F-D+: heightfield terrain ceiling (omit when not set).
+    if (sec.ceilingShape == CeilingShape::Heightfield)
+        j["ceiling_shape"] = static_cast<u32>(sec.ceilingShape);
+    if (sec.ceilHeightfield)
+    {
+        const auto& hf = *sec.ceilHeightfield;
+        nlohmann::json jh;
+        jh["grid_width"]  = hf.gridWidth;
+        jh["grid_depth"]  = hf.gridDepth;
+        jh["world_min"]   = {hf.worldMin.x, hf.worldMin.y};
+        jh["world_max"]   = {hf.worldMax.x, hf.worldMax.y};
+        nlohmann::json js = nlohmann::json::array();
+        for (const f32 s : hf.samples) js.push_back(s);
+        jh["samples"] = std::move(js);
+        j["ceil_heightfield"] = std::move(jh);
+    }
     if (!sec.details.empty())
     {
         nlohmann::json jd = nlohmann::json::array();
@@ -313,6 +329,27 @@ constexpr u32 k_JSON_VERSION = 5u;
                 for (const auto& sv : js) hf.samples.push_back(sv.get<float>());
             }
             out.heightfield = std::move(hf);
+        }
+        // Phase 1F-D+: heightfield terrain ceiling.
+        out.ceilingShape = static_cast<CeilingShape>(
+            jsec.value("ceiling_shape", static_cast<u32>(CeilingShape::Flat)));
+        if (jsec.contains("ceil_heightfield"))
+        {
+            const auto& jh = jsec["ceil_heightfield"];
+            HeightfieldFloor hf;
+            hf.gridWidth = jh.value("grid_width", 2u);
+            hf.gridDepth = jh.value("grid_depth", 2u);
+            if (jh.contains("world_min"))
+                hf.worldMin = {jh["world_min"][0].get<float>(), jh["world_min"][1].get<float>()};
+            if (jh.contains("world_max"))
+                hf.worldMax = {jh["world_max"][0].get<float>(), jh["world_max"][1].get<float>()};
+            if (jh.contains("samples"))
+            {
+                const auto& js = jh["samples"];
+                hf.samples.reserve(js.size());
+                for (const auto& sv : js) hf.samples.push_back(sv.get<float>());
+            }
+            out.ceilHeightfield = std::move(hf);
         }
         if (jsec.contains("details"))
         {

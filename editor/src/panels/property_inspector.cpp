@@ -276,6 +276,7 @@ void PropertyInspector::draw(EditMapDocument&      doc,
         static glm::vec2 s_secCeilUvOff{},  s_secCeilUvSc{};
         static float     s_secCeilUvRot  = 0.0f;
 
+        // Lambda for drawing a complete floor or ceiling section with all related settings.
         auto drawSectorSurface = [&](const char* header,
                                      SectorSurface surf,
                                      daedalus::UUID& matId,
@@ -286,6 +287,7 @@ void PropertyInspector::draw(EditMapDocument&      doc,
             ImGui::PushID(header);
 
             // Material row.
+            ImGui::TextDisabled("Material");
             {
                 rhi::ITexture* thumb = matId.isValid()
                     ? catalog.getOrLoadThumbnail(matId, device) : nullptr;
@@ -371,24 +373,102 @@ void PropertyInspector::draw(EditMapDocument&      doc,
             ImGui::PopID();
         };
 
+        // ══════════════════════════════════════════════════════════════════════════════
+        // ══ FLOOR
+        // ══════════════════════════════════════════════════════════════════════════════
         ImGui::Spacing();
-        drawSectorSurface("Floor",   SectorSurface::Floor,
-                          sector.floorMaterialId,
-                          sector.floorUvOffset, sector.floorUvScale, sector.floorUvRotation,
-                          s_secFloorUvOff, s_secFloorUvSc, s_secFloorUvRot);
-        drawSectorSurface("Ceiling", SectorSurface::Ceil,
-                          sector.ceilMaterialId,
-                          sector.ceilUvOffset,  sector.ceilUvScale,  sector.ceilUvRotation,
-                          s_secCeilUvOff, s_secCeilUvSc, s_secCeilUvRot);
-
-        // ── Floor Shape
-        ImGui::Spacing();
-        ImGui::SeparatorText("Floor Shape");
+        if (ImGui::CollapsingHeader("Floor"))
         {
-            static const char* k_shapeLabels[] = {"Flat", "Visual Stairs", "Heightfield"};
-            int shapeIdx = static_cast<int>(sector.floorShape);
-            ImGui::SetNextItemWidth(-1.0f);
-            if (ImGui::Combo("##floorshape", &shapeIdx, k_shapeLabels, 3))
+            ImGui::PushID("FloorSection");
+            
+            // Material + UV
+            ImGui::TextDisabled("Material");
+            {
+                rhi::ITexture* thumb = sector.floorMaterialId.isValid()
+                    ? catalog.getOrLoadThumbnail(sector.floorMaterialId, device) : nullptr;
+                if (thumb) ImGui::Image(reinterpret_cast<ImTextureID>(thumb->nativeHandle()), ImVec2(32, 32));
+                else       ImGui::Dummy(ImVec2(32, 32));
+                ImGui::SameLine();
+                ImGui::BeginGroup();
+                if (sector.floorMaterialId.isValid()) {
+                    const MaterialEntry* e = catalog.find(sector.floorMaterialId);
+                    ImGui::TextDisabled("%s", e ? e->displayName.c_str() : "(unknown)");
+                } else ImGui::TextDisabled("(none)");
+                if (ImGui::SmallButton("Browse##floormat"))
+                    assetBrowser.openPicker([&doc, sid](const UUID& uuid) {
+                        doc.pushCommand(std::make_unique<CmdSetSectorMaterial>(doc, sid, SectorSurface::Floor, uuid));
+                    }, "Floor");
+                ImGui::SameLine();
+                if (ImGui::SmallButton("X##floormat") && sector.floorMaterialId.isValid())
+                    doc.pushCommand(std::make_unique<CmdSetSectorMaterial>(doc, sid, SectorSurface::Floor, UUID{}));
+                ImGui::EndGroup();
+            }
+
+            // UV Mapping
+            ImGui::Spacing();
+            ImGui::TextDisabled("UV Mapping");
+            constexpr float kR2D = 180.0f / glm::pi<float>();
+            constexpr float kD2R = glm::pi<float>() / 180.0f;
+
+            ImGui::TextDisabled("Offset"); ImGui::SetNextItemWidth(-1.0f);
+            glm::vec2 floorOffEdit = sector.floorUvOffset;
+            bool floorOffC = dragFloat2Undo("##flooruvoff", &floorOffEdit.x, 0.01f, 0.0f, 0.0f, "%.3f");
+            if (ImGui::IsItemActivated()) s_secFloorUvOff = sector.floorUvOffset;
+            if (ImGui::IsItemActive() || ImGui::IsItemEdited()) { sector.floorUvOffset = floorOffEdit; doc.markDirty(); }
+            if (floorOffC) { const glm::vec2 fo = sector.floorUvOffset; sector.floorUvOffset = s_secFloorUvOff;
+                doc.pushCommand(std::make_unique<CmdSetSectorSurfaceUV>(doc, sid, SectorSurface::Floor, fo, sector.floorUvScale, sector.floorUvRotation)); }
+
+            ImGui::TextDisabled("Scale"); ImGui::SetNextItemWidth(-1.0f);
+            glm::vec2 floorScEdit = sector.floorUvScale;
+            bool floorScC = dragFloat2Undo("##flooruvsc", &floorScEdit.x, 0.01f, 0.0f, 0.0f, "%.3f");
+            if (ImGui::IsItemActivated()) s_secFloorUvSc = sector.floorUvScale;
+            if (ImGui::IsItemActive() || ImGui::IsItemEdited()) { sector.floorUvScale = floorScEdit; doc.markDirty(); }
+            if (floorScC) { const glm::vec2 fs = sector.floorUvScale; sector.floorUvScale = s_secFloorUvSc;
+                doc.pushCommand(std::make_unique<CmdSetSectorSurfaceUV>(doc, sid, SectorSurface::Floor, sector.floorUvOffset, fs, sector.floorUvRotation)); }
+
+            float floorRotDeg = sector.floorUvRotation * kR2D; ImGui::SetNextItemWidth(-1.0f);
+            bool floorRotC = dragFloatUndo("##flooruvrot", &floorRotDeg, 0.5f, 0.0f, 0.0f, "Rotation: %.1f°");
+            if (ImGui::IsItemActivated()) s_secFloorUvRot = sector.floorUvRotation;
+            if (ImGui::IsItemActive() || ImGui::IsItemEdited()) { sector.floorUvRotation = floorRotDeg * kD2R; doc.markDirty(); }
+            if (floorRotC) { const float fr = sector.floorUvRotation; sector.floorUvRotation = s_secFloorUvRot;
+                doc.pushCommand(std::make_unique<CmdSetSectorSurfaceUV>(doc, sid, SectorSurface::Floor, sector.floorUvOffset, sector.floorUvScale, fr)); }
+
+            ImGui::Spacing();
+            { const MaterialEntry* pp = catalog.find(sector.floorMaterialId);
+              const bool hd = pp && pp->texWidth > 0 && pp->texHeight > 0;
+              if (!hd) ImGui::BeginDisabled();
+              if (ImGui::SmallButton("Pixel Perfect##floorpp") && hd)
+                  doc.pushCommand(std::make_unique<CmdSetSectorSurfaceUV>(
+                      doc, sid, SectorSurface::Floor, sector.floorUvOffset,
+                      computePixelPerfectUVScale(pp->texWidth, pp->texHeight), sector.floorUvRotation));
+              if (!hd) ImGui::EndDisabled(); }
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Fit Surface##floorfit")) {
+                float minX=1e9f, maxX=-1e9f, minZ=1e9f, maxZ=-1e9f;
+                for (const auto& w : sector.walls) {
+                    minX=std::min(minX,w.p0.x); maxX=std::max(maxX,w.p0.x);
+                    minZ=std::min(minZ,w.p0.y); maxZ=std::max(maxZ,w.p0.y); }
+                doc.pushCommand(std::make_unique<CmdSetSectorSurfaceUV>(
+                    doc, sid, SectorSurface::Floor, glm::vec2{0,0},
+                    glm::vec2{maxX>minX?maxX-minX:1.f, maxZ>minZ?maxZ-minZ:1.f}, 0.f)); }
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Square##floorsq"))
+                doc.pushCommand(std::make_unique<CmdSetSectorSurfaceUV>(
+                    doc, sid, SectorSurface::Floor, sector.floorUvOffset, glm::vec2{sector.floorUvScale.x, sector.floorUvScale.x}, sector.floorUvRotation));
+            { const MaterialEntry* de = catalog.find(sector.floorMaterialId);
+              if (de && de->texWidth > 0 && de->texHeight > 0)
+                  ImGui::TextDisabled("%.0f px/u  %.0f px/v",
+                      static_cast<float>(de->texWidth)/std::max(sector.floorUvScale.x,1e-6f),
+                      static_cast<float>(de->texHeight)/std::max(sector.floorUvScale.y,1e-6f)); }
+
+            // Shape
+            ImGui::Spacing();
+            ImGui::TextDisabled("Shape");
+            {
+                static const char* k_shapeLabels[] = {"Flat", "Heightfield", "Visual Stairs"};
+                int shapeIdx = static_cast<int>(sector.floorShape);
+                ImGui::SetNextItemWidth(-1.0f);
+                if (ImGui::Combo("##floorshape", &shapeIdx, k_shapeLabels, 3))
             {
                 const auto newShape = static_cast<world::FloorShape>(shapeIdx);
                 if (newShape != sector.floorShape)
@@ -509,48 +589,224 @@ void PropertyInspector::draw(EditMapDocument&      doc,
                         doc.pushCommand(std::make_unique<CmdSetHeightfield>(
                             doc, sid, std::nullopt));
                 }
+                }
             }
-        }
-
-        // ── Floor / Ceiling Portals ─────────────────────────────────────────────────
-        ImGui::Spacing();
-        ImGui::SeparatorText("Floor / Ceiling Portals");
-        {
-            // Helper: draw linked/unlinked state and an ID drag field for one portal.
-            const auto editHPortal = [&](const char* label,
-                                         HPortalSurface  surf,
-                                         world::SectorId curTarget)
+            
+            // Portal
+            ImGui::Spacing();
+            ImGui::TextDisabled("Portal");
             {
-                ImGui::PushID(label);
-                const bool linked = (curTarget != world::INVALID_SECTOR_ID);
+                const bool linked = (sector.floorPortalSectorId != world::INVALID_SECTOR_ID);
                 if (linked)
-                    ImGui::Text("%s \xe2\x86\x92 Sector %u", label,
-                                static_cast<unsigned>(curTarget));
+                    ImGui::Text("→ Sector %u", static_cast<unsigned>(sector.floorPortalSectorId));
                 else
-                    ImGui::TextDisabled("%s: (none)", label);
-
-                // Integer drag: -1 means no link, >=0 is a sector index.
+                    ImGui::TextDisabled("(none)");
                 const int maxSec = static_cast<int>(doc.mapData().sectors.size()) - 1;
-                int tgtInt = linked ? static_cast<int>(curTarget) : -1;
+                int tgtInt = linked ? static_cast<int>(sector.floorPortalSectorId) : -1;
                 ImGui::SetNextItemWidth(-1.0f);
-                // Format: -1 displays as "ID: -1" meaning "no portal"; >=0 is the target sector index.
-                if (dragIntUndo("##hptgt", &tgtInt, 0.5f, -1, std::max(maxSec, 0), "ID: %d"))
+                if (dragIntUndo("##floorportaltgt", &tgtInt, 0.5f, -1, std::max(maxSec, 0), "Target: %d"))
                 {
                     const world::SectorId newTgt = (tgtInt < 0)
-                        ? world::INVALID_SECTOR_ID
-                        : static_cast<world::SectorId>(tgtInt);
-                    if (newTgt != curTarget)
+                        ? world::INVALID_SECTOR_ID : static_cast<world::SectorId>(tgtInt);
+                    if (newTgt != sector.floorPortalSectorId)
                         doc.pushCommand(std::make_unique<CmdSetFloorPortal>(
-                            doc, sid, surf, newTgt, UUID{}));
+                            doc, sid, HPortalSurface::Floor, newTgt, UUID{}));
                 }
-                ImGui::PopID();
-            };
+            }
+            ImGui::PopID();
+        }
 
-            editHPortal("Floor portal",   HPortalSurface::Floor,
-                        sector.floorPortalSectorId);
+        // ══════════════════════════════════════════════════════════════════════════════
+        // ══ CEILING
+        // ══════════════════════════════════════════════════════════════════════════════
+        ImGui::Spacing();
+        if (ImGui::CollapsingHeader("Ceiling"))
+        {
+            ImGui::PushID("CeilingSection");
+            
+            // Material + UV
+            ImGui::TextDisabled("Material");
+            {
+                rhi::ITexture* thumb = sector.ceilMaterialId.isValid()
+                    ? catalog.getOrLoadThumbnail(sector.ceilMaterialId, device) : nullptr;
+                if (thumb) ImGui::Image(reinterpret_cast<ImTextureID>(thumb->nativeHandle()), ImVec2(32, 32));
+                else       ImGui::Dummy(ImVec2(32, 32));
+                ImGui::SameLine();
+                ImGui::BeginGroup();
+                if (sector.ceilMaterialId.isValid()) {
+                    const MaterialEntry* e = catalog.find(sector.ceilMaterialId);
+                    ImGui::TextDisabled("%s", e ? e->displayName.c_str() : "(unknown)");
+                } else ImGui::TextDisabled("(none)");
+                if (ImGui::SmallButton("Browse##ceilmat"))
+                    assetBrowser.openPicker([&doc, sid](const UUID& uuid) {
+                        doc.pushCommand(std::make_unique<CmdSetSectorMaterial>(doc, sid, SectorSurface::Ceil, uuid));
+                    }, "Ceiling");
+                ImGui::SameLine();
+                if (ImGui::SmallButton("X##ceilmat") && sector.ceilMaterialId.isValid())
+                    doc.pushCommand(std::make_unique<CmdSetSectorMaterial>(doc, sid, SectorSurface::Ceil, UUID{}));
+                ImGui::EndGroup();
+            }
+
+            // UV Mapping
             ImGui::Spacing();
-            editHPortal("Ceiling portal", HPortalSurface::Ceiling,
-                        sector.ceilPortalSectorId);
+            ImGui::TextDisabled("UV Mapping");
+            constexpr float kR2D2 = 180.0f / glm::pi<float>();
+            constexpr float kD2R2 = glm::pi<float>() / 180.0f;
+
+            ImGui::TextDisabled("Offset"); ImGui::SetNextItemWidth(-1.0f);
+            glm::vec2 ceilOffEdit = sector.ceilUvOffset;
+            bool ceilOffC = dragFloat2Undo("##ceiluvoff", &ceilOffEdit.x, 0.01f, 0.0f, 0.0f, "%.3f");
+            if (ImGui::IsItemActivated()) s_secCeilUvOff = sector.ceilUvOffset;
+            if (ImGui::IsItemActive() || ImGui::IsItemEdited()) { sector.ceilUvOffset = ceilOffEdit; doc.markDirty(); }
+            if (ceilOffC) { const glm::vec2 fo = sector.ceilUvOffset; sector.ceilUvOffset = s_secCeilUvOff;
+                doc.pushCommand(std::make_unique<CmdSetSectorSurfaceUV>(doc, sid, SectorSurface::Ceil, fo, sector.ceilUvScale, sector.ceilUvRotation)); }
+
+            ImGui::TextDisabled("Scale"); ImGui::SetNextItemWidth(-1.0f);
+            glm::vec2 ceilScEdit = sector.ceilUvScale;
+            bool ceilScC = dragFloat2Undo("##ceiluvsc", &ceilScEdit.x, 0.01f, 0.0f, 0.0f, "%.3f");
+            if (ImGui::IsItemActivated()) s_secCeilUvSc = sector.ceilUvScale;
+            if (ImGui::IsItemActive() || ImGui::IsItemEdited()) { sector.ceilUvScale = ceilScEdit; doc.markDirty(); }
+            if (ceilScC) { const glm::vec2 fs = sector.ceilUvScale; sector.ceilUvScale = s_secCeilUvSc;
+                doc.pushCommand(std::make_unique<CmdSetSectorSurfaceUV>(doc, sid, SectorSurface::Ceil, sector.ceilUvOffset, fs, sector.ceilUvRotation)); }
+
+            float ceilRotDeg = sector.ceilUvRotation * kR2D2; ImGui::SetNextItemWidth(-1.0f);
+            bool ceilRotC = dragFloatUndo("##ceiluvrot", &ceilRotDeg, 0.5f, 0.0f, 0.0f, "Rotation: %.1f°");
+            if (ImGui::IsItemActivated()) s_secCeilUvRot = sector.ceilUvRotation;
+            if (ImGui::IsItemActive() || ImGui::IsItemEdited()) { sector.ceilUvRotation = ceilRotDeg * kD2R2; doc.markDirty(); }
+            if (ceilRotC) { const float fr = sector.ceilUvRotation; sector.ceilUvRotation = s_secCeilUvRot;
+                doc.pushCommand(std::make_unique<CmdSetSectorSurfaceUV>(doc, sid, SectorSurface::Ceil, sector.ceilUvOffset, sector.ceilUvScale, fr)); }
+
+            ImGui::Spacing();
+            { const MaterialEntry* pp = catalog.find(sector.ceilMaterialId);
+              const bool hd = pp && pp->texWidth > 0 && pp->texHeight > 0;
+              if (!hd) ImGui::BeginDisabled();
+              if (ImGui::SmallButton("Pixel Perfect##ceilpp") && hd)
+                  doc.pushCommand(std::make_unique<CmdSetSectorSurfaceUV>(
+                      doc, sid, SectorSurface::Ceil, sector.ceilUvOffset,
+                      computePixelPerfectUVScale(pp->texWidth, pp->texHeight), sector.ceilUvRotation));
+              if (!hd) ImGui::EndDisabled(); }
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Fit Surface##ceilfit")) {
+                float minX=1e9f, maxX=-1e9f, minZ=1e9f, maxZ=-1e9f;
+                for (const auto& w : sector.walls) {
+                    minX=std::min(minX,w.p0.x); maxX=std::max(maxX,w.p0.x);
+                    minZ=std::min(minZ,w.p0.y); maxZ=std::max(maxZ,w.p0.y); }
+                doc.pushCommand(std::make_unique<CmdSetSectorSurfaceUV>(
+                    doc, sid, SectorSurface::Ceil, glm::vec2{0,0},
+                    glm::vec2{maxX>minX?maxX-minX:1.f, maxZ>minZ?maxZ-minZ:1.f}, 0.f)); }
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Square##ceilsq"))
+                doc.pushCommand(std::make_unique<CmdSetSectorSurfaceUV>(
+                    doc, sid, SectorSurface::Ceil, sector.ceilUvOffset, glm::vec2{sector.ceilUvScale.x, sector.ceilUvScale.x}, sector.ceilUvRotation));
+            { const MaterialEntry* de = catalog.find(sector.ceilMaterialId);
+              if (de && de->texWidth > 0 && de->texHeight > 0)
+                  ImGui::TextDisabled("%.0f px/u  %.0f px/v",
+                      static_cast<float>(de->texWidth)/std::max(sector.ceilUvScale.x,1e-6f),
+                      static_cast<float>(de->texHeight)/std::max(sector.ceilUvScale.y,1e-6f)); }
+
+            // Shape
+            ImGui::Spacing();
+            ImGui::TextDisabled("Shape");
+        {
+            static const char* k_ceilShapeLabels[] = {"Flat", "Heightfield"};
+            int ceilShapeIdx = static_cast<int>(sector.ceilingShape);
+            ImGui::SetNextItemWidth(-1.0f);
+            if (ImGui::Combo("##ceilingshape", &ceilShapeIdx, k_ceilShapeLabels, 2))
+            {
+                const auto newShape = static_cast<world::CeilingShape>(ceilShapeIdx);
+                if (newShape != sector.ceilingShape)
+                {
+                    // Note: CmdSetSectorCeilingShape doesn't exist yet, using placeholder
+                    // For now, directly modify (will need proper command)
+                    sector.ceilingShape = newShape;
+                    doc.markDirty();
+                }
+            }
+
+            if (sector.ceilingShape == world::CeilingShape::Heightfield)
+            {
+                ImGui::Spacing();
+                ImGui::TextDisabled("Heightfield Grid");
+
+                if (!sector.ceilHeightfield.has_value())
+                {
+                    ImGui::TextDisabled("(no heightfield data)");
+                    if (ImGui::Button("Create 8\xc3\x97" "8 Heightfield##ceil"))
+                    {
+                        world::HeightfieldFloor hf;
+                        hf.gridWidth = 8u;
+                        hf.gridDepth = 8u;
+                        // Bound to sector bounding box
+                        glm::vec2 mn{1e9f, 1e9f}, mx{-1e9f, -1e9f};
+                        for (const auto& w : sector.walls)
+                        {
+                            mn.x = std::min(mn.x, w.p0.x); mn.y = std::min(mn.y, w.p0.y);
+                            mx.x = std::max(mx.x, w.p0.x); mx.y = std::max(mx.y, w.p0.y);
+                        }
+                        hf.worldMin = mn;
+                        hf.worldMax = mx;
+                        hf.samples.assign(hf.gridWidth * hf.gridDepth, sector.ceilHeight);
+                        // Note: Need CmdSetCeilHeightfield command, using direct modification for now
+                        sector.ceilHeightfield = hf;
+                        doc.markDirty();
+                    }
+                }
+                else
+                {
+                    const world::HeightfieldFloor& hf = *sector.ceilHeightfield;
+                    ImGui::Text("Grid: %u \xc3\x97 %u  (%zu samples)",
+                                hf.gridWidth, hf.gridDepth, hf.samples.size());
+
+                    int gw = static_cast<int>(hf.gridWidth);
+                    int gd = static_cast<int>(hf.gridDepth);
+                    bool gwChg = false, gdChg = false;
+                    ImGui::SetNextItemWidth(-1.0f);
+                    gwChg = dragIntUndo("##chfgw", &gw, 0.5f, 2, 256, "Width: %d");
+                    ImGui::SetNextItemWidth(-1.0f);
+                    gdChg = dragIntUndo("##chfgd", &gd, 0.5f, 2, 256, "Depth: %d");
+                    if ((gwChg || gdChg) &&
+                        (static_cast<uint32_t>(gw) != hf.gridWidth ||
+                         static_cast<uint32_t>(gd) != hf.gridDepth))
+                    {
+                        world::HeightfieldFloor nhf = hf;
+                        nhf.gridWidth = static_cast<uint32_t>(gw);
+                        nhf.gridDepth = static_cast<uint32_t>(gd);
+                        nhf.samples.assign(nhf.gridWidth * nhf.gridDepth, sector.ceilHeight);
+                        sector.ceilHeightfield = nhf;
+                        doc.markDirty();
+                    }
+
+                    if (ImGui::Button("Clear Heightfield##cclear"))
+                    {
+                        sector.ceilHeightfield = std::nullopt;
+                        doc.markDirty();
+                    }
+                }
+            }
+            }
+            
+            // Portal
+            ImGui::Spacing();
+            ImGui::TextDisabled("Portal");
+            {
+                const bool linked = (sector.ceilPortalSectorId != world::INVALID_SECTOR_ID);
+                if (linked)
+                    ImGui::Text("→ Sector %u", static_cast<unsigned>(sector.ceilPortalSectorId));
+                else
+                    ImGui::TextDisabled("(none)");
+                const int maxSec = static_cast<int>(doc.mapData().sectors.size()) - 1;
+                int tgtInt = linked ? static_cast<int>(sector.ceilPortalSectorId) : -1;
+                ImGui::SetNextItemWidth(-1.0f);
+                if (dragIntUndo("##ceilportaltgt", &tgtInt, 0.5f, -1, std::max(maxSec, 0), "Target: %d"))
+                {
+                    const world::SectorId newTgt = (tgtInt < 0)
+                        ? world::INVALID_SECTOR_ID : static_cast<world::SectorId>(tgtInt);
+                    if (newTgt != sector.ceilPortalSectorId)
+                        doc.pushCommand(std::make_unique<CmdSetFloorPortal>(
+                            doc, sid, HPortalSurface::Ceiling, newTgt, UUID{}));
+                }
+            }
+            ImGui::PopID();
         }
 
         // ── Wall list ────────────────────────────────────────────────────────

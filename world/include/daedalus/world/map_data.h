@@ -193,7 +193,7 @@ struct Sector
 
     SectorFlags flags = SectorFlags::None;
 
-    // ─── Phase 1F: floor shape and stair geometry ─────────────────────────────
+    // ─── Phase 1F: floor shape and stair geometry ───────────────────────────
     // Controls how the tessellator generates this sector's floor mesh.
     // Defaults to FloorShape::Flat which reproduces the baseline flat floor.
     FloorShape              floorShape   = FloorShape::Flat;
@@ -207,11 +207,20 @@ struct Sector
     UUID     floorPortalMaterialId;  ///< Material for the floor portal surface.
     UUID     ceilPortalMaterialId;   ///< Material for the ceiling portal surface.
 
-    // ─── Phase 1F-D: heightfield terrain floor ──────────────────────────────
+    // ─── Phase 1F-D: heightfield terrain floor ────────────────────────────────
     // When present, and floorShape == Heightfield, the tessellator generates a
     // terrain mesh from this sample grid instead of a flat floor.
     // SectorFlags::HasHeightfield is set automatically when heightfield has a value.
     std::optional<HeightfieldFloor> heightfield;
+
+    // ─── Phase 1F-D+: heightfield terrain ceiling ──────────────────────────────
+    // Controls how the tessellator generates this sector's ceiling mesh.
+    // Defaults to CeilingShape::Flat (per-vertex sloped via ceilHeightOverride).
+    CeilingShape ceilingShape = CeilingShape::Flat;
+    // When present, and ceilingShape == Heightfield, the tessellator generates a
+    // terrain mesh from this sample grid with inverted normals (downward-facing).
+    // Reuses HeightfieldFloor structure; samples are absolute world Y values.
+    std::optional<HeightfieldFloor> ceilHeightfield;
 
     // ─── Phase 1F-C: detail geometry (Layer 2) ──────────────────────────────
     // Static mesh shapes compiled into this sector's tagged GPU mesh batch at

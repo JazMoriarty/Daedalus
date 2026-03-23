@@ -16,6 +16,7 @@
 #include "document/commands/cmd_set_sector_material.h"
 #include "document/commands/cmd_set_wall_uv.h"
 #include "document/commands/cmd_set_heightfield.h"
+#include "document/commands/cmd_set_ceiling_heightfield.h"
 #include "document/commands/cmd_set_vertex_height.h"
 #include "daedalus/editor/compound_command.h"
 #include "uv_utils.h"
@@ -232,14 +233,21 @@ void Viewport3D::setGizmoMode(GizmoMode mode) noexcept
     m_gizmoDragAxis = -1;
 }
 
-// ─── applyTerrainBrush ─────────────────────────────────────────────────────────────────────────
+// ─── applyTerrainBrush ──────────────────────────────────────────────────────────
 // Modifies the heightfield in-place at m_terrainHitXZ within m_terrainBrushRadius.
 // Called every captured-mouse frame while a paint button is held; dt provides
 // time-based strength scaling so the effect rate is fps-independent.
+// Supports both floor and ceiling heightfields based on m_terrainSurface.
 
 void Viewport3D::applyTerrainBrush(world::Sector& sector, float dt) noexcept
 {
-    world::HeightfieldFloor& hf = *sector.heightfield;
+    // Select the appropriate heightfield based on current surface mode.
+    world::HeightfieldFloor* hfPtr = (m_terrainSurface == TerrainSurface::Floor)
+        ? sector.heightfield.has_value() ? &(*sector.heightfield) : nullptr
+        : sector.ceilHeightfield.has_value() ? &(*sector.ceilHeightfield) : nullptr;
+    
+    if (!hfPtr) return;
+    world::HeightfieldFloor& hf = *hfPtr;
     const float rSq  = m_terrainBrushRadius * m_terrainBrushRadius;
     const float str  = m_terrainBrushStrength * dt;
     const float invW = (hf.gridWidth  > 1) ? 1.0f / static_cast<float>(hf.gridWidth  - 1) : 0.0f;
@@ -329,17 +337,21 @@ void Viewport3D::drawTerrainAndHeightOverlays(EditMapDocument&  doc,
                       imageTopLeft.y + (1.0f - (ny * 0.5f + 0.5f)) * fh);
     };
 
-    // ── Terrain brush circle (fly mode + terrain sector) ─────────────────────────────
-    if (m_mouseCaptured && m_terrainHitValid)
+    // ── Terrain brush circle (fly mode + terrain sector) ──────────────────────────
+    if (m_mouseCaptured && m_terrainHitValid && m_terrainPaintModeEnabled)
     {
-        // Project 8 points around the brush circle onto the floor plane to screen.
+        // Project 8 points around the brush circle onto the appropriate plane (floor or ceiling) to screen.
         constexpr int kSegs = 24;
         std::vector<ImVec2> circlePts;
         circlePts.reserve(kSegs);
-        const float y = m_terrainSectorId != world::INVALID_SECTOR_ID &&
-                        m_terrainSectorId < static_cast<world::SectorId>(doc.mapData().sectors.size())
-                        ? doc.mapData().sectors[m_terrainSectorId].floorHeight
-                        : 0.0f;
+        
+        float y = 0.0f;
+        if (m_terrainSectorId != world::INVALID_SECTOR_ID &&
+            m_terrainSectorId < static_cast<world::SectorId>(doc.mapData().sectors.size()))
+        {
+            const auto& terrSec = doc.mapData().sectors[m_terrainSectorId];
+            y = (m_terrainSurface == TerrainSurface::Floor) ? terrSec.floorHeight : terrSec.ceilHeight;
+        }
         for (int k = 0; k < kSegs; ++k)
         {
             const float a = glm::two_pi<float>() * static_cast<float>(k) / kSegs;
@@ -1044,21 +1056,56 @@ void Viewport3D::draw(EditMapDocument&      doc,
         if (keys[SDL_SCANCODE_Q]) m_eye -= glm::vec3(0.0f, 1.0f, 0.0f) * spd;
         if (keys[SDL_SCANCODE_E]) m_eye += glm::vec3(0.0f, 1.0f, 0.0f) * spd;
 
-        // ── Terrain paint (fly mode + heightfield sector selected) ─────────────────
+        // T key: toggle terrain painting mode.
+        static bool prevT = false;
+        const bool  currT = keys[SDL_SCANCODE_T];
+        if (currT && !prevT)
+            m_terrainPaintModeEnabled = !m_terrainPaintModeEnabled;
+        prevT = currT;
+
+        // C key: toggle floor/ceiling mode (when terrain paint mode is active).
+        static bool prevC = false;
+        const bool  currC = keys[SDL_SCANCODE_C];
+        if (currC && !prevC && m_terrainPaintModeEnabled)
+            m_terrainSurface = (m_terrainSurface == TerrainSurface::Floor)
+                ? TerrainSurface::Ceiling : TerrainSurface::Floor;
+        prevC = currC;
+
+        // ── Terrain paint (fly mode + heightfield sector selected) ─────────────
+        // Only active when m_terrainPaintModeEnabled is true.
+        if (m_terrainPaintModeEnabled)
         {
             const SelectionState& sel = doc.selection();
             world::SectorId terrSid   = world::INVALID_SECTOR_ID;
-            // Terrain paint activates when a sector or its floor surface is selected.
+            
+            // Terrain paint activates when a sector (or floor/ceiling surface) is selected
+            // and the sector has the appropriate heightfield based on m_terrainSurface.
             if (!sel.items.empty() &&
                 (sel.items[0].type == SelectionType::Sector ||
-                 sel.items[0].type == SelectionType::Floor))
+                 sel.items[0].type == SelectionType::Floor ||
+                 sel.items[0].type == SelectionType::Ceil))
             {
                 const world::SectorId candidate = sel.items[0].sectorId;
                 const auto& sectors = doc.mapData().sectors;
-                if (candidate < static_cast<world::SectorId>(sectors.size()) &&
-                    sectors[candidate].floorShape == world::FloorShape::Heightfield &&
-                    sectors[candidate].heightfield.has_value())
-                    terrSid = candidate;
+                if (candidate < static_cast<world::SectorId>(sectors.size()))
+                {
+                    const auto& sector = sectors[candidate];
+                    bool hasHeightfield = false;
+                    
+                    if (m_terrainSurface == TerrainSurface::Floor)
+                    {
+                        hasHeightfield = (sector.floorShape == world::FloorShape::Heightfield &&
+                                         sector.heightfield.has_value());
+                    }
+                    else  // Ceiling
+                    {
+                        hasHeightfield = (sector.ceilingShape == world::CeilingShape::Heightfield &&
+                                         sector.ceilHeightfield.has_value());
+                    }
+                    
+                    if (hasHeightfield)
+                        terrSid = candidate;
+                }
             }
             m_terrainSectorId = terrSid;
 
@@ -1066,12 +1113,14 @@ void Viewport3D::draw(EditMapDocument&      doc,
             {
                 world::Sector& terrSec = doc.mapData().sectors[terrSid];
 
-                // Hit point: ray from m_eye along fwd, intersect y = floorHeight plane.
+                // Hit point: ray from m_eye along fwd, intersect the appropriate plane.
                 m_terrainHitValid = false;
                 constexpr float kMinFwdY = 1e-3f;
                 if (std::abs(fwd.y) > kMinFwdY)
                 {
-                    const float t = (terrSec.floorHeight - m_eye.y) / fwd.y;
+                    const float planeY = (m_terrainSurface == TerrainSurface::Floor)
+                        ? terrSec.floorHeight : terrSec.ceilHeight;
+                    const float t = (planeY - m_eye.y) / fwd.y;
                     if (t > 0.0f)
                     {
                         m_terrainHitXZ    = {m_eye.x + fwd.x * t, m_eye.z + fwd.z * t};
@@ -1104,8 +1153,12 @@ void Viewport3D::draw(EditMapDocument&      doc,
                     // Snapshot the heightfield before the first frame of this drag.
                     if (!m_terrainPainting)
                     {
-                        m_terrainPrePaint  = *terrSec.heightfield;
-                        m_terrainPainting  = true;
+                        // Save the appropriate heightfield based on the current surface mode.
+                        if (m_terrainSurface == TerrainSurface::Floor)
+                            m_terrainPrePaint = *terrSec.heightfield;
+                        else
+                            m_terrainPrePaint = *terrSec.ceilHeightfield;
+                        m_terrainPainting = true;
                     }
 
                     if (m_terrainHitValid)
@@ -1118,10 +1171,19 @@ void Viewport3D::draw(EditMapDocument&      doc,
                 {
                     // Buttons released: push undoable command for the whole stroke.
                     m_terrainPainting = false;
-                    // Swap: restore pre-paint so CmdSetHeightfield captures correct old state.
-                    world::HeightfieldFloor finalHf = *terrSec.heightfield;
-                    terrSec.heightfield = m_terrainPrePaint;
-                    doc.pushCommand(std::make_unique<CmdSetHeightfield>(doc, terrSid, finalHf));
+                    // Swap: restore pre-paint so the undo command captures correct old state.
+                    if (m_terrainSurface == TerrainSurface::Floor)
+                    {
+                        world::HeightfieldFloor finalHf = *terrSec.heightfield;
+                        terrSec.heightfield = m_terrainPrePaint;
+                        doc.pushCommand(std::make_unique<CmdSetHeightfield>(doc, terrSid, finalHf));
+                    }
+                    else  // Ceiling
+                    {
+                        world::HeightfieldFloor finalHf = *terrSec.ceilHeightfield;
+                        terrSec.ceilHeightfield = m_terrainPrePaint;
+                        doc.pushCommand(std::make_unique<CmdSetCeilingHeightfield>(doc, terrSid, finalHf));
+                    }
                 }
             }
             else
@@ -1647,21 +1709,25 @@ void Viewport3D::draw(EditMapDocument&      doc,
     if (m_mouseCaptured)
     {
         ImGui::SetCursorPos(ImVec2(8.0f, 8.0f));
-        if (m_terrainSectorId != world::INVALID_SECTOR_ID)
+        if (m_terrainPaintModeEnabled && m_terrainSectorId != world::INVALID_SECTOR_ID)
         {
             // Terrain paint mode hint.
             const char* modeName =
                 m_terrainBrushMode == TerrainBrushMode::Raise   ? "Raise" :
                 m_terrainBrushMode == TerrainBrushMode::Lower   ? "Lower" :
                 m_terrainBrushMode == TerrainBrushMode::Smooth  ? "Smooth" : "Flatten";
+            const char* surfaceName = (m_terrainSurface == TerrainSurface::Floor) ? "FLOOR" : "CEILING";
             ImGui::TextDisabled(
-                "TERRAIN PAINT [%s]  LMB=Raise  RMB=Lower  Shift=Smooth  Alt=Flatten"
-                "  Scroll=radius (%.1f m)  [Tab]=exit",
-                modeName, m_terrainBrushRadius);
+                "TERRAIN PAINT [%s %s]  LMB=Raise  RMB=Lower  Shift=Smooth  Alt=Flatten\n"
+                "Scroll=radius (%.1f m)  [C]=toggle surface  [T]=disable paint  [Tab]=exit",
+                surfaceName, modeName, m_terrainBrushRadius);
         }
         else
         {
-            ImGui::TextDisabled("[Tab] release cursor   WASD = move   Q/E = up/down   Shift = fast");
+            const char* status = m_terrainPaintModeEnabled ? "ON" : "OFF";
+            ImGui::TextDisabled(
+                "[Tab] release   WASD=move   Q/E=up/down   Shift=fast   [T]=terrain paint (%s)",
+                status);
         }
     }
     else
