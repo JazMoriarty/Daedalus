@@ -568,7 +568,16 @@ static void appendHeightfieldFloor(
             // Normal is perpendicular to both tangent directions:
             // T_x = (1, dh/dx, 0),  T_z = (0, dh/dz, 1)
             // N = T_x × T_z = (-dh/dx, 1, -dh/dz), then normalize.
-            n = glm::normalize(glm::vec3(-slopeX, 1.0f, -slopeZ));
+            // 
+            // At sharp peaks, the computed normal can tilt too far from vertical,
+            // causing bright edges at grazing angles. Clamp slope magnitude to ensure
+            // the normal's Y component stays >= 0.25 after normalization, preventing
+            // near-horizontal normals on steep terrain.
+            constexpr float kMaxSlope = 3.7320508f;  // tan(75°) ≈ 3.732; keeps N.y >= 0.25
+            const float slopeXClamped = std::clamp(slopeX, -kMaxSlope, kMaxSlope);
+            const float slopeZClamped = std::clamp(slopeZ, -kMaxSlope, kMaxSlope);
+            
+            n = glm::normalize(glm::vec3(-slopeXClamped, 1.0f, -slopeZClamped));
 
             // Tangent along world +X direction (for normal mapping).
             // Use the same extrapolated slope for consistency.
@@ -699,7 +708,12 @@ static void appendHeightfieldCeiling(
                 slopeZ = (hT - hB) / (2.0f * dz);
             
             // Ceiling normal: inverted Y component.
-            n = glm::normalize(glm::vec3(-slopeX, -1.0f, -slopeZ));
+            // Clamp slopes to prevent near-horizontal normals (same as floor).
+            constexpr float kMaxSlope = 3.7320508f;  // tan(75°)
+            const float slopeXClamped = std::clamp(slopeX, -kMaxSlope, kMaxSlope);
+            const float slopeZClamped = std::clamp(slopeZ, -kMaxSlope, kMaxSlope);
+            
+            n = glm::normalize(glm::vec3(-slopeXClamped, -1.0f, -slopeZClamped));
 
             // Tangent along world +X direction (for normal mapping).
             const glm::vec3 t = glm::normalize(
