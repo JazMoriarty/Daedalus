@@ -679,7 +679,10 @@ kernel void path_trace_main(
         if (NdotSun > 0.0f)
         {
             ray shadowRay;
-            shadowRay.origin       = surf.position + surf.geoNormal * 0.001f;
+            // Use shading normal for bias, not geoNormal. geoNormal is view-flipped
+            // and can point inward at grazing angles on heightfield edges, pushing
+            // shadow rays outside sealed rooms where they incorrectly see sunlight.
+            shadowRay.origin       = surf.position + N * 0.001f;
             shadowRay.direction    = sunDir;
             shadowRay.min_distance = 0.001f;
             shadowRay.max_distance = 1e20f;
@@ -760,7 +763,8 @@ kernel void path_trace_main(
             if (sunNdotL > 0.0f)
             {
                 ray shadowRay;
-                shadowRay.origin       = bounceSurf.position + bounceSurf.geoNormal * 0.001f;
+                // Use shading normal for bias (same reason as primary sun shadow above).
+                shadowRay.origin       = bounceSurf.position + newN * 0.001f;
                 shadowRay.direction    = sunDir;
                 shadowRay.min_distance = 0.001f;
                 shadowRay.max_distance = 1e20f;
