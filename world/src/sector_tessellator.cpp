@@ -698,8 +698,11 @@ static void appendHeightfieldCeiling(
             else
                 slopeZ = (hT - hB) / (2.0f * dz);
             
-            // Ceiling normal: inverted Y component.
-            n = glm::normalize(glm::vec3(-slopeX, -1.0f, -slopeZ));
+            // Ceiling normal: For a ceiling that dips down, we want the normal to point
+            // down and away from the dip. Since the slopes represent dh/dx and dh/dz
+            // (positive when ceiling goes up), the normal for a downward-facing surface
+            // should be (dh/dx, -1, dh/dz) -- the opposite of the floor case.
+            n = glm::normalize(glm::vec3(slopeX, -1.0f, slopeZ));
 
             // Tangent along world +X direction (for normal mapping).
             const glm::vec3 t = glm::normalize(
