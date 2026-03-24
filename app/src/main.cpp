@@ -420,7 +420,20 @@ int main(int argc, char* argv[])
     {
         // ── 1. Load .dlevel ───────────────────────────────────────────────────
         auto packResult = world::loadDlevel(std::filesystem::path(argv[1]));
-        DAEDALUS_ASSERT(packResult.has_value(), "Failed to load .dlevel file");
+        if (!packResult.has_value())
+        {
+            const char* errStr = "Unknown";
+            switch (packResult.error())
+            {
+                case world::DlevelError::FileNotFound:    errStr = "FileNotFound"; break;
+                case world::DlevelError::WriteError:      errStr = "WriteError"; break;
+                case world::DlevelError::ParseError:      errStr = "ParseError"; break;
+                case world::DlevelError::VersionMismatch: errStr = "VersionMismatch"; break;
+            }
+            std::fprintf(stderr, "[DLevel] Load failed: %s\n", errStr);
+            std::fprintf(stderr, "[DLevel] Path: %s\n", argv[1]);
+            DAEDALUS_ASSERT(false, "Failed to load .dlevel file");
+        }
         world::LevelPackData pack = std::move(*packResult);
 
         std::printf("[DLevel] Loaded '%s' — %zu sector(s), %zu light(s), %zu texture(s)\n",

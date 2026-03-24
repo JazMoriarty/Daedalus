@@ -382,6 +382,8 @@ std::expected<void, DlevelError> saveDlevel(const LevelPackData&         pack,
         if (hasCeilHF)
         {
             const HeightfieldFloor& hf = *sec.ceilHeightfield;
+            std::printf("[dlevel] Writing ceiling heightfield for sector (grid: %ux%u, samples: %zu)\n",
+                        hf.gridWidth, hf.gridDepth, hf.samples.size());
             w.write(hf.gridWidth);
             w.write(hf.gridDepth);
             w.writeVec2(hf.worldMin);
@@ -656,8 +658,8 @@ std::expected<LevelPackData, DlevelError> loadDlevel(const std::filesystem::path
         return std::unexpected(DlevelError::ParseError);
     }
     if (magic != k_MAGIC) { return std::unexpected(DlevelError::ParseError); }
-    // Accept v5 through v8.
-    if (version < 5u || version > 8u) { return std::unexpected(DlevelError::VersionMismatch); }
+    // Accept v5 through v9.
+    if (version < 5u || version > 9u) { return std::unexpected(DlevelError::VersionMismatch); }
 
     u32 entityCount = 0;
     if (!r.read(entityCount)) { return std::unexpected(DlevelError::ParseError); }
@@ -755,23 +757,47 @@ std::expected<LevelPackData, DlevelError> loadDlevel(const std::filesystem::path
             if (version >= 9u)
             {
                 u32 ceilingShapeRaw = 0;
-                if (!r.read(ceilingShapeRaw)) return std::unexpected(DlevelError::ParseError);
+                if (!r.read(ceilingShapeRaw))
+                {
+                    std::fprintf(stderr, "[dlevel] Parse error: failed to read ceilingShape (sector %u)\n", si);
+                    return std::unexpected(DlevelError::ParseError);
+                }
                 sec.ceilingShape = static_cast<CeilingShape>(ceilingShapeRaw);
                 
                 u32 hasCeilHF = 0;
-                if (!r.read(hasCeilHF)) return std::unexpected(DlevelError::ParseError);
+                if (!r.read(hasCeilHF))
+                {
+                    std::fprintf(stderr, "[dlevel] Parse error: failed to read hasCeilHF flag (sector %u)\n", si);
+                    return std::unexpected(DlevelError::ParseError);
+                }
                 if (hasCeilHF)
                 {
                     HeightfieldFloor hf;
                     u32 sampleCount = 0;
                     if (!r.read(hf.gridWidth) || !r.read(hf.gridDepth))
+                    {
+                        std::fprintf(stderr, "[dlevel] Parse error: failed to read ceiling heightfield grid dimensions (sector %u)\n", si);
                         return std::unexpected(DlevelError::ParseError);
+                    }
                     if (!r.readVec2(hf.worldMin) || !r.readVec2(hf.worldMax))
+                    {
+                        std::fprintf(stderr, "[dlevel] Parse error: failed to read ceiling heightfield world bounds (sector %u)\n", si);
                         return std::unexpected(DlevelError::ParseError);
-                    if (!r.read(sampleCount)) return std::unexpected(DlevelError::ParseError);
+                    }
+                    if (!r.read(sampleCount))
+                    {
+                        std::fprintf(stderr, "[dlevel] Parse error: failed to read ceiling heightfield sampleCount (sector %u)\n", si);
+                        return std::unexpected(DlevelError::ParseError);
+                    }
                     hf.samples.resize(sampleCount);
                     for (u32 s = 0; s < sampleCount; ++s)
-                        if (!r.read(hf.samples[s])) return std::unexpected(DlevelError::ParseError);
+                    {
+                        if (!r.read(hf.samples[s]))
+                        {
+                            std::fprintf(stderr, "[dlevel] Parse error: failed to read ceiling heightfield sample %u/%u (sector %u)\n", s, sampleCount, si);
+                            return std::unexpected(DlevelError::ParseError);
+                        }
+                    }
                     sec.ceilHeightfield = std::move(hf);
                 }
             }
