@@ -106,6 +106,16 @@
 //   [8]  ceilUvOffset     f32[2]
 //   [8]  ceilUvScale      f32[2]
 //   [4]  ceilUvRotation   f32
+//
+//   v7 sector additions (appended after v6 UV fields, omitted when reading v1–v6):
+//   [4]  ceilingShape     u32  (CeilingShape enum: 0=Flat, 1=Heightfield)
+//   [4]  hasCeilHeightfield  u32  (0 or 1)
+//   if hasCeilHeightfield == 1:
+//     [4]  gridWidth  u32
+//     [4]  gridDepth  u32
+//     [8]  worldMin   f32[2]
+//     [8]  worldMax   f32[2]
+//     [gridWidth*gridDepth*4]  samples  f32[]
 
 #include "daedalus/world/dmap_io.h"
 
@@ -119,7 +129,7 @@ namespace
 {
 
 constexpr u32 k_MAGIC   = 0x50414D44u;  // 'D','M','A','P' as little-endian u32
-constexpr u32 k_VERSION = 6u;
+constexpr u32 k_VERSION = 7u;  // v7: ceiling heightfield
 
 // ─── Write helpers ────────────────────────────────────────────────────────────
 
@@ -330,6 +340,19 @@ std::expected<void, DmapError> saveDmap(const WorldMapData&         map,
         w.writeVec2(sec.ceilUvOffset);
         w.writeVec2(sec.ceilUvScale);
         w.write(sec.ceilUvRotation);
+        // v7: ceiling shape and heightfield
+        w.write(static_cast<u32>(sec.ceilingShape));
+        const bool hasCeilHF = sec.ceilHeightfield.has_value();
+        w.write(static_cast<u32>(hasCeilHF ? 1u : 0u));
+        if (hasCeilHF)
+        {
+            const auto& hf = *sec.ceilHeightfield;
+            w.write(hf.gridWidth);
+            w.write(hf.gridDepth);
+            w.writeVec2(hf.worldMin);
+            w.writeVec2(hf.worldMax);
+            for (const f32 s : hf.samples) w.write(s);
+        }
     }
 
     if (!ofs) { return std::unexpected(DmapError::WriteError); }
@@ -545,6 +568,32 @@ std::expected<WorldMapData, DmapError> loadDmap(const std::filesystem::path& pat
             if (!r.readVec2(sec.ceilUvOffset) || !r.readVec2(sec.ceilUvScale) ||
                 !r.read(sec.ceilUvRotation))
                 return std::unexpected(DmapError::ParseError);
+        }
+        // v7: ceiling shape and heightfield
+        if (version >= 7)
+        {
+            u32 ceilingShapeRaw = 0;
+            if (!r.read(ceilingShapeRaw))
+                return std::unexpected(DmapError::ParseError);
+            sec.ceilingShape = static_cast<CeilingShape>(ceilingShapeRaw);
+            
+            u32 hasCeilHF = 0;
+            if (!r.read(hasCeilHF))
+                return std::unexpected(DmapError::ParseError);
+            if (hasCeilHF)
+            {
+                HeightfieldFloor hf;
+                if (!r.read(hf.gridWidth) || !r.read(hf.gridDepth))
+                    return std::unexpected(DmapError::ParseError);
+                if (!r.readVec2(hf.worldMin) || !r.readVec2(hf.worldMax))
+                    return std::unexpected(DmapError::ParseError);
+                const u32 count = hf.gridWidth * hf.gridDepth;
+                hf.samples.resize(count);
+                for (u32 k = 0; k < count; ++k)
+                    if (!r.read(hf.samples[k]))
+                        return std::unexpected(DmapError::ParseError);
+                sec.ceilHeightfield = std::move(hf);
+            }
         }
     }
 

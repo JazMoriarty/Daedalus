@@ -143,9 +143,10 @@ inline SurfaceHit evaluate_surface(
                    + float3(tri.normal2) * w2;
     interpN = normalize(interpN);
 
-    // Ensure the geometric normal faces the incoming ray.
-    if (dot(interpN, -rayDir) < 0.0f)
-        interpN = -interpN;
+    // Don't flip the geometric normal based on view direction. At grazing angles
+    // on heightfield edges, view-flipping can make edge normals point inward
+    // through the surface, causing shadow/bounce rays to escape sealed volumes.
+    // For properly closed meshes, we shouldn't be hitting backfaces anyway.
     surf.geoNormal = interpN;
 
     // ── Explicit mip LOD from ray cone ───────────────────────────────────────

@@ -378,6 +378,11 @@ std::expected<void, DlevelError> saveDlevel(const LevelPackData&         pack,
         w.write(static_cast<u32>(sec.ceilingShape));
         const u32 hasCeilHF = (sec.ceilHeightfield.has_value() &&
                                !sec.ceilHeightfield->samples.empty()) ? 1u : 0u;
+        std::printf("[dlevel] Sector %zu: ceilingShape=%u, hasCeilHF=%u, has_value=%d\n",
+                    static_cast<std::size_t>(&sec - &pack.map.sectors[0]),
+                    static_cast<u32>(sec.ceilingShape),
+                    hasCeilHF,
+                    sec.ceilHeightfield.has_value() ? 1 : 0);
         w.write(hasCeilHF);
         if (hasCeilHF)
         {
