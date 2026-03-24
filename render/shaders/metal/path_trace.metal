@@ -554,7 +554,8 @@ kernel void path_trace_main(
             atten *= atten;
 
             ray shadowRay;
-            shadowRay.origin       = centerSurf.position + centerSurf.geoNormal * 0.001f;
+            // Use shading normal for bias, not geoNormal (same fix as sun/bounce rays).
+            shadowRay.origin       = centerSurf.position + centerSurf.normal * 0.001f;
             shadowRay.direction    = L;
             shadowRay.min_distance = 0.001f;
             shadowRay.max_distance = dist - 0.002f;
@@ -605,7 +606,8 @@ kernel void path_trace_main(
             attenuation      *= falloff * falloff;
 
             ray shadowRay;
-            shadowRay.origin       = centerSurf.position + centerSurf.geoNormal * 0.001f;
+            // Use shading normal for bias, not geoNormal (same fix as sun/bounce rays).
+            shadowRay.origin       = centerSurf.position + centerSurf.normal * 0.001f;
             shadowRay.direction    = L;
             shadowRay.min_distance = 0.001f;
             shadowRay.max_distance = dist - 0.002f;
