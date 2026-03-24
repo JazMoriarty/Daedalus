@@ -470,6 +470,35 @@ kernel void path_trace_main(
     float linearDepth = length(centerSurf.position - frame.cameraPos.xyz);
     outDepth.write(float4(linearDepth, 0.0f, 0.0f, 0.0f), gid);
 
+    // ===== DEBUG MODES (uncomment ONE at a time) =====
+    // Mode 1: Visualize shading normals as RGB
+    // outHDR.write(float4(centerSurf.normal * 0.5f + 0.5f, 1.0f), gid); return;
+    
+    // Mode 2: Visualize geometric normals as RGB
+    // outHDR.write(float4(centerSurf.geoNormal * 0.5f + 0.5f, 1.0f), gid); return;
+    
+    // Mode 3: Show NdotSun value (how much surface faces sun)
+    // float NdotSun = max(dot(centerSurf.normal, sunDir), 0.0f);
+    // outHDR.write(float4(NdotSun, NdotSun, NdotSun, 1.0f), gid); return;
+    
+    // Mode 4: Show if sun shadow ray hits anything (red=occluded, green=visible)
+    // float NdotSun = max(dot(centerSurf.normal, sunDir), 0.0f);
+    // if (NdotSun > 0.0f) {
+    //     ray shadowRay;
+    //     shadowRay.origin = centerSurf.position + centerSurf.normal * 0.001f;
+    //     shadowRay.direction = sunDir;
+    //     shadowRay.min_distance = 0.001f;
+    //     shadowRay.max_distance = 1e20f;
+    //     intersector<instancing> shadowIsect;
+    //     shadowIsect.accept_any_intersection(true);
+    //     bool sunVisible = (shadowIsect.intersect(shadowRay, tlas).type == intersection_type::none);
+    //     outHDR.write(sunVisible ? float4(0, 1, 0, 1) : float4(1, 0, 0, 1), gid);
+    // } else {
+    //     outHDR.write(float4(0, 0, 1, 1), gid);  // blue = backfacing
+    // }
+    // return;
+    // ================================================
+
     float2 encN = encode_normal(centerSurf.normal);
     outNormal.write(float4(encN * 0.5f + 0.5f, 0.0f, 0.0f), gid);
 
@@ -726,7 +755,10 @@ kernel void path_trace_main(
             float3 bounceDir = to_world(localDir, T, B, bounceN);
 
             ray bounceRay;
-            bounceRay.origin       = bouncePos + bounceGeoN * 0.001f;
+            // Use shading normal for bias, not geoNormal (same fix as sun shadows).
+            // bounceGeoN is view-flipped and can point through heightfield edges,
+            // causing bounce rays to escape and sample sky with bright sun disc.
+            bounceRay.origin       = bouncePos + bounceN * 0.001f;
             bounceRay.direction    = bounceDir;
             bounceRay.min_distance = 0.001f;
             bounceRay.max_distance = 1e20f;
@@ -742,7 +774,7 @@ kernel void path_trace_main(
             }
 
             SurfaceHit bounceSurf = evaluate_surface(
-                bouncePos + bounceGeoN * 0.001f, bounceDir, bounceHit.distance,
+                bouncePos + bounceN * 0.001f, bounceDir, bounceHit.distance,
                 bounceHit.instance_id, bounceHit.primitive_id,
                 bounceHit.triangle_barycentric_coord,
                 materials, primitives, textures, texSampler, pixelAngle);
